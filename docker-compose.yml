@@ -1,0 +1,81 @@
+services:
+  # PostgreSQL Database for users, authentication, and audit logs
+  postgres:
+    image: postgres:16-alpine
+    container_name: kraken-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-kraken}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kraken_password}
+      POSTGRES_DB: ${DB_NAME:-kraken_db}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kraken} -d ${DB_NAME:-kraken_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kraken-network
+
+  # Go Backend Service (Chi Router, Docker SDK, Kubernetes Client-Go, GORM, WebSockets)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kraken-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      ENVIRONMENT: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-kraken}
+      DB_PASSWORD: ${DB_PASSWORD:-kraken_password}
+      DB_NAME: ${DB_NAME:-kraken_db}
+      JWT_SECRET: ${JWT_SECRET:-kraken-production-jwt-secret-key-32bytes-long!}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      KUBECONFIG: /home/kraken/.kube/config
+      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+    volumes:
+      # Host Docker daemon socket to inspect and manage Docker containers & images
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Host Kubeconfig to manage Kubernetes Pods & Deployments (optional, graceful fallback if absent)
+      - ${HOME}/.kube/config:/home/kraken/.kube/config:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - kraken-network
+
+  # Next.js 15 Frontend (App Router, Tailwind CSS, shadcn/ui, WebSocket Live Log Terminal)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: kraken-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      INTERNAL_API_URL: http://backend:8080
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    networks:
+      - kraken-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  kraken-network:
+    driver: bridge
