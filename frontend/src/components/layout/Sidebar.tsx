@@ -20,10 +20,11 @@ import { cn } from "@/lib/utils";
 const navigation = [
   { name: "Overview", href: "/", icon: LayoutDashboard },
   { name: "Containers", href: "/containers", icon: Box, badge: "Docker" },
+  { name: "Stacks", href: "/stacks", icon: Layers, badge: "Compose" },
   { name: "Images", href: "/images", icon: Disc, badge: "Docker" },
   { name: "Docker Hosts", href: "/servers", icon: Server, badge: "Multi" },
   { name: "Pods", href: "/pods", icon: Cpu, badge: "K8s" },
-  { name: "Deployments", href: "/deployments", icon: Layers, badge: "K8s" },
+  { name: "Deployments", href: "/deployments", icon: Activity, badge: "K8s" },
   { name: "Live Logs", href: "/logs", icon: FileText, pulse: true },
   { name: "Audit Trail", href: "/audit", icon: ShieldCheck },
 ];

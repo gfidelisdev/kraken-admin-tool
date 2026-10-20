@@ -67,6 +67,13 @@ export interface DockerServer {
   tls_cert?: string;
   ssh_user?: string;
   ssh_auth_method?: "key" | "password" | string;
+  credential_policy?: "save_securely" | "always_prompt" | string;
+  sudo_policy?: "save_securely" | "always_prompt" | string;
+  has_saved_sudo_password?: boolean;
+  package_manager?: string;
+  packages_last_checked?: string;
+  available_updates_count?: number;
+  security_updates_count?: number;
   is_default: boolean;
   status: "CONNECTED" | "UNREACHABLE" | "UNKNOWN" | string;
   err_msg?: string;
@@ -91,6 +98,10 @@ export interface CreateServerPayload {
   ssh_password?: string;
   ssh_private_key?: string;
   ssh_key_passphrase?: string;
+  credential_policy?: "save_securely" | "always_prompt" | string;
+  sudo_policy?: "save_securely" | "always_prompt" | string;
+  sudo_password?: string;
+  package_manager?: string;
   is_default?: boolean;
 }
 
@@ -174,3 +185,85 @@ export interface SystemStatus {
   database_type: string;
   database_status: string;
 }
+
+// Docker Compose Stack Types
+export interface ComposeService {
+  name: string;
+  image: string;
+  replicas: number;
+  running_replicas: number;
+  containers: DockerContainer[];
+}
+
+export interface ComposeStack {
+  name: string;
+  status: "running" | "stopped" | "partially_running" | string;
+  services: ComposeService[];
+  total_containers: number;
+  running_containers: number;
+  config_files?: string;
+  working_dir?: string;
+  created: number;
+}
+
+export interface DeployStackRequest {
+  name: string;
+  compose_yaml: string;
+}
+
+// Host Package Management Types
+export interface PackageUpdate {
+  name: string;
+  current_version: string;
+  new_version: string;
+  repository?: string;
+  is_security: boolean;
+  description?: string;
+}
+
+export interface HostPackageStatus {
+  server_id: number;
+  package_manager: string;
+  last_checked?: string;
+  available_updates_count: number;
+  security_updates_count: number;
+  updates?: PackageUpdate[] | null;
+}
+
+export interface CheckPackagesRequest {
+  sudo_password?: string;
+  package_manager?: string;
+}
+
+export interface UpgradePackagesRequest {
+  packages?: string[];
+  sudo_password?: string;
+  package_manager?: string;
+}
+
+export interface UpdateSudoPolicyRequest {
+  sudo_policy: "save_securely" | "always_prompt" | "";
+  sudo_password?: string;
+}
+
+export interface UpdatePackageManagerRequest {
+  package_manager: string;
+}
+
+export interface PackageUpgradeLog {
+  type?: "log";
+  message: string;
+  level: "info" | "stdout" | "stderr" | "error";
+  timestamp: string;
+}
+
+export interface PackageUpgradeResult {
+  success: boolean;
+  message: string;
+  output?: string;
+  remaining_updates_count?: number;
+  security_updates_count?: number;
+  error?: string;
+  code?: string;
+}
+

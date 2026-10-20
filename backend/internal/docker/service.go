@@ -313,7 +313,7 @@ func (s *DockerService) GetServer(serverID uint) (*models.DockerServer, error) {
 }
 
 // GetSSHClient establishes an authenticated SSH client connection for the specified serverID
-func (s *DockerService) GetSSHClient(ctx context.Context, serverID uint) (*ssh.Client, *models.DockerServer, error) {
+func (s *DockerService) GetSSHClient(ctx context.Context, serverID uint, overrides ...SSHConfig) (*ssh.Client, *models.DockerServer, error) {
 	server, err := s.GetServer(serverID)
 	if err != nil {
 		return nil, nil, err
@@ -332,6 +332,25 @@ func (s *DockerService) GetSSHClient(ctx context.Context, serverID uint) (*ssh.C
 	sshPassword, _ := krakencrypto.Decrypt(server.SSHPassword)
 	sshPrivateKey, _ := krakencrypto.Decrypt(server.SSHPrivateKey)
 	sshPassphrase, _ := krakencrypto.Decrypt(server.SSHKeyPassphrase)
+
+	if len(overrides) > 0 {
+		if overrides[0].Password != "" {
+			sshPassword = overrides[0].Password
+		}
+		if overrides[0].PrivateKey != "" {
+			sshPrivateKey = overrides[0].PrivateKey
+		}
+		if overrides[0].KeyPassphrase != "" {
+			sshPassphrase = overrides[0].KeyPassphrase
+		}
+		if overrides[0].User != "" {
+			parsed.User = overrides[0].User
+		}
+	}
+
+	if server.CredentialPolicy == "always_prompt" && sshPassword == "" && sshPrivateKey == "" {
+		return nil, server, errors.New("host credentials required: server configured in 'always prompt' mode")
+	}
 
 	cfg := SSHConfig{
 		HostURL:       cleanHost,
@@ -374,6 +393,11 @@ func (s *DockerService) ListServers(ctx context.Context) ([]models.DockerServer,
 
 	// Enrich servers with container/image counts and versions
 	for i := range servers {
+		if servers[i].CredentialPolicy == "" {
+			servers[i].CredentialPolicy = "save_securely"
+		}
+		servers[i].HasSavedSudoPassword = (servers[i].SudoPassword != "")
+
 		cli, err := s.GetClient(ctx, servers[i].ID)
 		if err == nil && cli != nil {
 			pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
@@ -471,11 +495,29 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 		s.db.Model(&models.DockerServer{}).Where("is_default = ?", true).Update("is_default", false)
 	}
 
-	// Encrypt sensitive credentials before saving to database
-	encTLSKey, _ := krakencrypto.Encrypt(req.TLSKey)
-	encSSHPassword, _ := krakencrypto.Encrypt(req.SSHPassword)
-	encSSHPrivateKey, _ := krakencrypto.Encrypt(req.SSHPrivateKey)
-	encSSHKeyPassphrase, _ := krakencrypto.Encrypt(req.SSHKeyPassphrase)
+	// Credential Policy: "save_securely" (default) or "always_prompt"
+	credPolicy := strings.ToLower(strings.TrimSpace(req.CredentialPolicy))
+	if credPolicy != "always_prompt" {
+		credPolicy = "save_securely"
+	}
+
+	var encTLSKey, encSSHPassword, encSSHPrivateKey, encSSHKeyPassphrase string
+	if credPolicy == "save_securely" {
+		encTLSKey, _ = krakencrypto.Encrypt(req.TLSKey)
+		encSSHPassword, _ = krakencrypto.Encrypt(req.SSHPassword)
+		encSSHPrivateKey, _ = krakencrypto.Encrypt(req.SSHPrivateKey)
+		encSSHKeyPassphrase, _ = krakencrypto.Encrypt(req.SSHKeyPassphrase)
+	}
+
+	// Sudo Policy: "save_securely" or "always_prompt"
+	sudoPolicy := strings.ToLower(strings.TrimSpace(req.SudoPolicy))
+	var encSudoPassword string
+	if sudoPolicy == "save_securely" && req.SudoPassword != "" {
+		encSudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
+	} else if sudoPolicy != "always_prompt" && req.SudoPassword != "" {
+		sudoPolicy = "save_securely"
+		encSudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
+	}
 
 	server := models.DockerServer{
 		Name:             name,
@@ -489,6 +531,10 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 		SSHPassword:      encSSHPassword,
 		SSHPrivateKey:    encSSHPrivateKey,
 		SSHKeyPassphrase: encSSHKeyPassphrase,
+		CredentialPolicy: credPolicy,
+		SudoPolicy:       sudoPolicy,
+		SudoPassword:     encSudoPassword,
+		PackageManager:   strings.ToLower(strings.TrimSpace(req.PackageManager)),
 		IsDefault:        req.IsDefault,
 		Status:           status,
 		ErrMsg:           errMsg,
@@ -558,6 +604,39 @@ func (s *DockerService) UpdateServer(ctx context.Context, id uint, req models.Up
 	}
 	if req.SSHKeyPassphrase != "" {
 		server.SSHKeyPassphrase, _ = krakencrypto.Encrypt(req.SSHKeyPassphrase)
+	}
+
+	if req.CredentialPolicy != "" {
+		cleanPolicy := strings.ToLower(strings.TrimSpace(req.CredentialPolicy))
+		if cleanPolicy == "always_prompt" {
+			server.CredentialPolicy = "always_prompt"
+			server.TLSKey = ""
+			server.SSHPassword = ""
+			server.SSHPrivateKey = ""
+			server.SSHKeyPassphrase = ""
+		} else if cleanPolicy == "save_securely" {
+			server.CredentialPolicy = "save_securely"
+		}
+	}
+
+	if req.SudoPolicy != "" {
+		cleanSudoPolicy := strings.ToLower(strings.TrimSpace(req.SudoPolicy))
+		if cleanSudoPolicy == "always_prompt" {
+			server.SudoPolicy = "always_prompt"
+			server.SudoPassword = ""
+		} else if cleanSudoPolicy == "save_securely" {
+			server.SudoPolicy = "save_securely"
+			if req.SudoPassword != "" {
+				server.SudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
+			}
+		}
+	} else if req.SudoPassword != "" {
+		server.SudoPolicy = "save_securely"
+		server.SudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
+	}
+
+	if req.PackageManager != "" {
+		server.PackageManager = strings.ToLower(strings.TrimSpace(req.PackageManager))
 	}
 
 	if req.IsDefault {

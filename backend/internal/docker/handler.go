@@ -596,3 +596,183 @@ func (h *Handler) RemoveImageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Image removed successfully"})
 }
+
+// --- Docker Compose Stack Handlers ---
+
+// ListComposeStacksHandler handles GET /api/docker/stacks
+func (h *Handler) ListComposeStacksHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	stacks, err := h.Service.ListComposeStacks(r.Context(), serverID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+			"data":  []interface{}{},
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"data": stacks,
+	})
+}
+
+// GetComposeStackHandler handles GET /api/docker/stacks/{name}
+func (h *Handler) GetComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	stack, err := h.Service.GetComposeStack(r.Context(), serverID, name)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"data": stack,
+	})
+}
+
+// StartComposeStackHandler handles POST /api/docker/stacks/{name}/start
+func (h *Handler) StartComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.StartComposeStack(r.Context(), serverID, name); err != nil {
+		audit.Log(h.DB, userID, username, "START_STACK", "docker_compose", name, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "START_STACK", "docker_compose", name, "Started compose stack successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack started successfully"})
+}
+
+// StopComposeStackHandler handles POST /api/docker/stacks/{name}/stop
+func (h *Handler) StopComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.StopComposeStack(r.Context(), serverID, name); err != nil {
+		audit.Log(h.DB, userID, username, "STOP_STACK", "docker_compose", name, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "STOP_STACK", "docker_compose", name, "Stopped compose stack successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack stopped successfully"})
+}
+
+// RestartComposeStackHandler handles POST /api/docker/stacks/{name}/restart
+func (h *Handler) RestartComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.RestartComposeStack(r.Context(), serverID, name); err != nil {
+		audit.Log(h.DB, userID, username, "RESTART_STACK", "docker_compose", name, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "RESTART_STACK", "docker_compose", name, "Restarted compose stack successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack restarted successfully"})
+}
+
+// RemoveComposeStackHandler handles DELETE /api/docker/stacks/{name}
+func (h *Handler) RemoveComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+	removeVolumes := r.URL.Query().Get("volumes") == "true"
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.RemoveComposeStack(r.Context(), serverID, name, removeVolumes); err != nil {
+		audit.Log(h.DB, userID, username, "REMOVE_STACK", "docker_compose", name, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "REMOVE_STACK", "docker_compose", name, "Removed compose stack successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack removed successfully"})
+}
+
+// DeployComposeStackHandler handles POST /api/docker/stacks/deploy
+func (h *Handler) DeployComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+
+	var req models.DeployStackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.DeployComposeStack(r.Context(), serverID, req); err != nil {
+		audit.Log(h.DB, userID, username, "DEPLOY_STACK", "docker_compose", req.Name, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "DEPLOY_STACK", "docker_compose", req.Name, "Deployed compose stack successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack deployed successfully"})
+}
+

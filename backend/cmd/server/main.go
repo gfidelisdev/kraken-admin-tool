@@ -21,6 +21,7 @@ import (
 	"github.com/kraken/admin-tool/backend/internal/config"
 	"github.com/kraken/admin-tool/backend/internal/database"
 	"github.com/kraken/admin-tool/backend/internal/docker"
+	"github.com/kraken/admin-tool/backend/internal/host"
 	"github.com/kraken/admin-tool/backend/internal/k8s"
 	"github.com/kraken/admin-tool/backend/internal/system"
 	krakews "github.com/kraken/admin-tool/backend/internal/websocket"
@@ -49,6 +50,7 @@ func main() {
 	// 4. Initialize Handlers
 	authHandler := auth.NewHandler(dbHandle.DB, cfg.JWTSecret, cfg.AllowRegistration)
 	dockerHandler := docker.NewHandler(dockerService, dbHandle.DB)
+	hostHandler := host.NewHandler(dbHandle.DB, dockerService)
 	k8sHandler := k8s.NewHandler(k8sService, dbHandle.DB)
 	auditHandler := audit.NewHandler(dbHandle.DB)
 	systemHandler := system.NewHandler(dbHandle, dockerService, k8sService, startTime)
@@ -82,7 +84,7 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.CorsOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Server-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Server-ID", "X-Host-Password", "X-Host-Key", "X-Host-Key-Passphrase", "X-Sudo-Password"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -147,6 +149,19 @@ func main() {
 				opRouter.Delete("/containers/{id}", dockerHandler.RemoveContainerHandler)
 			})
 
+			// Compose Stacks: List & Detail for all, mutations restricted to Admin & Operator
+			r.Get("/stacks", dockerHandler.ListComposeStacksHandler)
+			r.Get("/stacks/{name}", dockerHandler.GetComposeStackHandler)
+
+			r.Group(func(opRouter chi.Router) {
+				opRouter.Use(auth.RequireRoles("admin", "operator"))
+				opRouter.Post("/stacks/{name}/start", dockerHandler.StartComposeStackHandler)
+				opRouter.Post("/stacks/{name}/stop", dockerHandler.StopComposeStackHandler)
+				opRouter.Post("/stacks/{name}/restart", dockerHandler.RestartComposeStackHandler)
+				opRouter.Delete("/stacks/{name}", dockerHandler.RemoveComposeStackHandler)
+				opRouter.Post("/stacks/deploy", dockerHandler.DeployComposeStackHandler)
+			})
+
 			// Images: List & Search for all, Pull & Delete restricted to Admin & Operator
 			r.Get("/images", dockerHandler.ListImagesHandler)
 			r.Get("/images/search", dockerHandler.SearchImagesHandler)
@@ -156,6 +171,28 @@ func main() {
 				opRouter.Post("/images/pull", dockerHandler.PullImageHandler)
 				opRouter.Post("/images/pull/stream", dockerHandler.PullImageStreamHandler)
 				opRouter.Delete("/images/{id}", dockerHandler.RemoveImageHandler)
+			})
+		})
+
+		// Host & Server Management Endpoints (Package updates, Sudo policy)
+		r.Route("/api/hosts", func(r chi.Router) {
+			// Read-only package info for all authenticated users
+			r.Get("/{id}/packages", hostHandler.GetPackageStatusHandler)
+
+			// Package operations restricted to Admin & Operator
+			r.Group(func(opRouter chi.Router) {
+				opRouter.Use(auth.RequireRoles("admin", "operator"))
+				opRouter.Post("/{id}/packages/check", hostHandler.CheckPackagesHandler)
+				opRouter.Post("/{id}/packages/upgrade", hostHandler.UpgradePackagesHandler)
+				opRouter.Post("/{id}/packages/upgrade/stream", hostHandler.UpgradePackagesStreamHandler)
+				opRouter.Put("/{id}/package-manager", hostHandler.UpdatePackageManagerHandler)
+			})
+
+			// Host credential and sudo policy management restricted to Admin only
+			r.Group(func(adminRouter chi.Router) {
+				adminRouter.Use(auth.RequireRole("admin"))
+				adminRouter.Post("/{id}/sudo-policy", hostHandler.UpdateSudoPolicyHandler)
+				adminRouter.Delete("/{id}/sudo-password", hostHandler.ClearSudoPasswordHandler)
 			})
 		})
 

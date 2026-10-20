@@ -3,6 +3,11 @@ import {
   ServerDiagnosticLog,
   TestServerPayload,
   TestServerResult,
+  ComposeStack,
+  DeployStackRequest,
+  HostPackageStatus,
+  PackageUpgradeLog,
+  PackageUpgradeResult,
 } from "@/types";
 
 const TOKEN_KEY = "kraken_auth_token";
@@ -98,7 +103,9 @@ async function request<T>(
     const response = await fetch(url, config);
 
     if (response.status === 401) {
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      // Do not treat host-level operations (like sudo password prompts) as JWT authentication logout
+      const isHostEndpoint = cleanEndpoint.startsWith("/api/hosts/");
+      if (!isHostEndpoint && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
         removeToken();
         window.location.href = "/login";
       }
@@ -342,4 +349,211 @@ export async function getWsTicket(): Promise<string | null> {
     return null;
   }
 }
+
+// Docker Compose Stacks
+export async function getComposeStacks(serverId?: number): Promise<ComposeStack[]> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.get<ComposeStack[]>("/api/docker/stacks", { headers });
+}
+
+export async function getComposeStack(name: string, serverId?: number): Promise<ComposeStack> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.get<ComposeStack>(`/api/docker/stacks/${name}`, { headers });
+}
+
+export async function startComposeStack(name: string, serverId?: number): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string }>(`/api/docker/stacks/${name}/start`, {}, { headers });
+}
+
+export async function stopComposeStack(name: string, serverId?: number): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string }>(`/api/docker/stacks/${name}/stop`, {}, { headers });
+}
+
+export async function restartComposeStack(name: string, serverId?: number): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string }>(`/api/docker/stacks/${name}/restart`, {}, { headers });
+}
+
+export async function removeComposeStack(name: string, serverId?: number, removeVolumes: boolean = false): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.delete<{ message: string }>(`/api/docker/stacks/${name}?volumes=${removeVolumes}`, { headers });
+}
+
+export async function deployComposeStack(payload: DeployStackRequest, serverId?: number): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string }>("/api/docker/stacks/deploy", payload, { headers });
+}
+
+// Host Packages & Sudo Policy
+export async function getHostPackages(serverId: number): Promise<HostPackageStatus> {
+  return api.get<HostPackageStatus>(`/api/hosts/${serverId}/packages`);
+}
+
+export async function updateHostPackageManager(
+  serverId: number,
+  packageManager: string
+): Promise<{ message: string; package_manager: string }> {
+  return api.put<{ message: string; package_manager: string }>(`/api/hosts/${serverId}/package-manager`, {
+    package_manager: packageManager,
+  });
+}
+
+export async function checkHostPackages(
+  serverId: number,
+  sudoPassword?: string,
+  packageManager?: string
+): Promise<HostPackageStatus> {
+  const headers: Record<string, string> = {};
+  if (sudoPassword) headers["X-Sudo-Password"] = sudoPassword;
+  return api.post<HostPackageStatus>(
+    `/api/hosts/${serverId}/packages/check`,
+    { sudo_password: sudoPassword, package_manager: packageManager },
+    { headers }
+  );
+}
+
+export async function upgradeHostPackages(
+  serverId: number,
+  packages?: string[],
+  sudoPassword?: string,
+  packageManager?: string
+): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (sudoPassword) headers["X-Sudo-Password"] = sudoPassword;
+  return api.post<{ message: string }>(
+    `/api/hosts/${serverId}/packages/upgrade`,
+    { packages, sudo_password: sudoPassword, package_manager: packageManager },
+    { headers }
+  );
+}
+
+export async function upgradeHostPackagesStream(
+  serverId: number,
+  packages?: string[],
+  sudoPassword?: string,
+  packageManager?: string,
+  onLog?: (log: PackageUpgradeLog) => void,
+  signal?: AbortSignal
+): Promise<PackageUpgradeResult> {
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  if (sudoPassword) {
+    headers["X-Sudo-Password"] = sudoPassword;
+  }
+
+  const response = await fetch(`${baseUrl}/api/hosts/${serverId}/packages/upgrade/stream`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      packages,
+      sudo_password: sudoPassword,
+      package_manager: packageManager,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    let errText = `Falha ao iniciar atualização de pacotes (${response.status})`;
+    let errData: any = null;
+    try {
+      errData = await response.json();
+      errText = errData.error || errData.message || errText;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(errText, response.status, errData);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new ApiError("Streaming não suportado pelo navegador", 0);
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: PackageUpgradeResult = {
+    success: false,
+    message: "Nenhuma resposta final recebida do servidor",
+  };
+
+  const processLine = (rawLine: string) => {
+    const trimmed = rawLine.trim();
+    if (!trimmed) return;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.type === "result") {
+        finalResult = {
+          success: Boolean(parsed.success),
+          message: parsed.message || (parsed.success ? "Atualização concluída com sucesso" : "Falha na atualização"),
+          output: parsed.output,
+          remaining_updates_count: parsed.remaining_updates_count,
+          security_updates_count: parsed.security_updates_count,
+          error: parsed.error,
+          code: parsed.code,
+        };
+      } else if (parsed.type === "log" || parsed.message) {
+        if (onLog) {
+          onLog({
+            type: "log",
+            message: parsed.message,
+            level: parsed.level || "stdout",
+            timestamp: parsed.timestamp || new Date().toISOString(),
+          });
+        }
+      }
+    } catch {
+      if (onLog && trimmed) {
+        onLog({
+          type: "log",
+          message: trimmed,
+          level: "stdout",
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      processLine(line);
+    }
+  }
+
+  if (buffer.trim()) {
+    processLine(buffer.trim());
+  }
+
+  return finalResult;
+}
+
+export async function updateHostSudoPolicy(serverId: number, sudoPolicy: string, sudoPassword?: string): Promise<{ message: string }> {
+  return api.post<{ message: string }>(`/api/hosts/${serverId}/sudo-policy`, { sudo_policy: sudoPolicy, sudo_password: sudoPassword });
+}
+
+export async function clearHostSudoPassword(serverId: number): Promise<{ message: string }> {
+  return api.delete<{ message: string }>(`/api/hosts/${serverId}/sudo-password`);
+}
+
 

@@ -56,7 +56,7 @@ func InitDB(cfg *config.Config) (*Handle, error) {
 
 	// Auto-migration
 	log.Printf("[DB] Running database migrations...")
-	if err := gormDB.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.DockerServer{}); err != nil {
+	if err := gormDB.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.DockerServer{}, &models.HostPackageUpdate{}); err != nil {
 		return nil, err
 	}
 

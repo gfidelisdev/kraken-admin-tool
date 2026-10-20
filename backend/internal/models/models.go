@@ -97,26 +97,46 @@ type ImageSearchResult struct {
 }
 
 type DockerServer struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	Name       string    `gorm:"size:128;not null" json:"name"`
-	HostURL    string    `gorm:"size:255;not null" json:"host_url"`
-	TLSVerify  bool      `gorm:"default:false" json:"tls_verify"`
-	TLSCACert  string    `gorm:"type:text" json:"tls_ca_cert,omitempty"`
-	TLSCert    string    `gorm:"type:text" json:"tls_cert,omitempty"`
-	TLSKey           string    `gorm:"type:text" json:"-"`
-	SSHUser          string    `gorm:"size:128" json:"ssh_user,omitempty"`
-	SSHAuthMethod    string    `gorm:"size:32" json:"ssh_auth_method,omitempty"`
-	SSHPassword      string    `gorm:"type:text" json:"-"`
-	SSHPrivateKey    string    `gorm:"type:text" json:"-"`
-	SSHKeyPassphrase string    `gorm:"type:text" json:"-"`
-	IsDefault        bool      `gorm:"default:false;index" json:"is_default"`
-	Status           string    `gorm:"size:32;default:'UNKNOWN'" json:"status"`
-	ErrMsg           string    `gorm:"type:text" json:"err_msg,omitempty"`
-	Containers       int       `gorm:"-" json:"containers_count"`
-	Images           int       `gorm:"-" json:"images_count"`
-	Version          string    `gorm:"size:64" json:"version,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                   uint      `gorm:"primaryKey" json:"id"`
+	Name                 string    `gorm:"size:128;not null" json:"name"`
+	HostURL              string    `gorm:"size:255;not null" json:"host_url"`
+	TLSVerify            bool      `gorm:"default:false" json:"tls_verify"`
+	TLSCACert            string    `gorm:"type:text" json:"tls_ca_cert,omitempty"`
+	TLSCert              string    `gorm:"type:text" json:"tls_cert,omitempty"`
+	TLSKey               string    `gorm:"type:text" json:"-"`
+	SSHUser              string    `gorm:"size:128" json:"ssh_user,omitempty"`
+	SSHAuthMethod        string    `gorm:"size:32" json:"ssh_auth_method,omitempty"`
+	SSHPassword          string    `gorm:"type:text" json:"-"`
+	SSHPrivateKey        string    `gorm:"type:text" json:"-"`
+	SSHKeyPassphrase     string    `gorm:"type:text" json:"-"`
+	CredentialPolicy     string    `gorm:"size:32;default:'save_securely'" json:"credential_policy"` // "save_securely" | "always_prompt"
+	SudoPolicy           string    `gorm:"size:32;default:''" json:"sudo_policy"`                   // "save_securely" | "always_prompt" | ""
+	SudoPassword         string    `gorm:"type:text" json:"-"`
+	HasSavedSudoPassword bool      `gorm:"-" json:"has_saved_sudo_password"`
+	PackageManager        string    `gorm:"size:32" json:"package_manager,omitempty"`
+	PackagesLastChecked   *time.Time `json:"packages_last_checked,omitempty"`
+	AvailableUpdatesCount int       `gorm:"default:0" json:"available_updates_count"`
+	SecurityUpdatesCount  int       `gorm:"default:0" json:"security_updates_count"`
+	IsDefault             bool      `gorm:"default:false;index" json:"is_default"`
+	Status                string    `gorm:"size:32;default:'UNKNOWN'" json:"status"`
+	ErrMsg                string    `gorm:"type:text" json:"err_msg,omitempty"`
+	Containers            int       `gorm:"-" json:"containers_count"`
+	Images                int       `gorm:"-" json:"images_count"`
+	Version               string    `gorm:"size:64" json:"version,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+type HostPackageUpdate struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	ServerID       uint      `gorm:"index;not null" json:"server_id"`
+	Name           string    `gorm:"size:128;not null" json:"name"`
+	CurrentVersion string    `gorm:"size:128" json:"current_version"`
+	NewVersion     string    `gorm:"size:128;not null" json:"new_version"`
+	Repository     string    `gorm:"size:128" json:"repository,omitempty"`
+	IsSecurity     bool      `gorm:"default:false" json:"is_security"`
+	Description    string    `gorm:"type:text" json:"description,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type CreateServerRequest struct {
@@ -133,6 +153,10 @@ type CreateServerRequest struct {
 	SSHPassword      string `json:"ssh_password"`
 	SSHPrivateKey    string `json:"ssh_private_key"`
 	SSHKeyPassphrase string `json:"ssh_key_passphrase"`
+	CredentialPolicy string `json:"credential_policy,omitempty"` // "save_securely" | "always_prompt"
+	SudoPolicy       string `json:"sudo_policy,omitempty"`       // "save_securely" | "always_prompt"
+	SudoPassword     string `json:"sudo_password,omitempty"`
+	PackageManager   string `json:"package_manager,omitempty"`
 	IsDefault        bool   `json:"is_default"`
 }
 
@@ -150,6 +174,10 @@ type UpdateServerRequest struct {
 	SSHPassword      string `json:"ssh_password"`
 	SSHPrivateKey    string `json:"ssh_private_key"`
 	SSHKeyPassphrase string `json:"ssh_key_passphrase"`
+	CredentialPolicy string `json:"credential_policy,omitempty"`
+	SudoPolicy       string `json:"sudo_policy,omitempty"`
+	SudoPassword     string `json:"sudo_password,omitempty"`
+	PackageManager   string `json:"package_manager,omitempty"`
 	IsDefault        bool   `json:"is_default"`
 }
 
@@ -166,6 +194,79 @@ type TestServerRequest struct {
 	SSHPassword      string `json:"ssh_password"`
 	SSHPrivateKey    string `json:"ssh_private_key"`
 	SSHKeyPassphrase string `json:"ssh_key_passphrase"`
+}
+
+// Package Management DTOs
+type PackageUpdate struct {
+	Name           string `json:"name"`
+	CurrentVersion string `json:"current_version"`
+	NewVersion     string `json:"new_version"`
+	Repository     string `json:"repository,omitempty"`
+	IsSecurity     bool   `json:"is_security"`
+	Description    string `json:"description,omitempty"`
+}
+
+type HostPackageStatus struct {
+	ServerID             uint            `json:"server_id"`
+	ServerName           string          `json:"server_name"`
+	PackageManager       string          `json:"package_manager"` // "apt", "dnf", "yum", "apk", "pacman", "zypper", "unknown"
+	UpdatesCount         int             `json:"updates_count"`
+	SecurityCount        int             `json:"security_count"`
+	Updates              []PackageUpdate `json:"updates"`
+	LastChecked          time.Time       `json:"last_checked"`
+	RequiresSudo         bool            `json:"requires_sudo"`
+	SudoPolicy           string          `json:"sudo_policy"` // "save_securely" | "always_prompt" | ""
+	HasSavedSudoPassword bool            `json:"has_saved_sudo_password"`
+}
+
+type CheckPackagesRequest struct {
+	SudoPassword   string `json:"sudo_password,omitempty"`
+	SaveSudoPolicy string `json:"save_sudo_policy,omitempty"` // "save_securely" | "always_prompt"
+	RefreshRepos   bool   `json:"refresh_repos"`
+	PackageManager string `json:"package_manager,omitempty"`
+}
+
+type UpgradePackagesRequest struct {
+	Packages       []string `json:"packages,omitempty"`
+	SudoPassword   string   `json:"sudo_password,omitempty"`
+	SaveSudoPolicy string   `json:"save_sudo_policy,omitempty"` // "save_securely" | "always_prompt"
+	PackageManager string   `json:"package_manager,omitempty"`
+}
+
+type UpdateSudoPolicyRequest struct {
+	SudoPolicy   string `json:"sudo_policy"` // "save_securely" | "always_prompt"
+	SudoPassword string `json:"sudo_password,omitempty"`
+}
+
+type UpdatePackageManagerRequest struct {
+	PackageManager string `json:"package_manager"`
+}
+
+// Docker Compose Stacks DTOs
+type ComposeService struct {
+	Name             string             `json:"name"`
+	Image            string             `json:"image"`
+	Status           string             `json:"status"` // "running", "partial", "stopped"
+	Replicas         int                `json:"replicas"`
+	RunningReplicas  int                `json:"running_replicas"`
+	Containers       []ContainerSummary `json:"containers"`
+}
+
+type ComposeStack struct {
+	Name              string           `json:"name"`
+	Status            string           `json:"status"` // "running", "partial", "stopped"
+	TotalContainers   int              `json:"total_containers"`
+	RunningContainers int              `json:"running_containers"`
+	ConfigFiles       string           `json:"config_files,omitempty"`
+	WorkingDir        string           `json:"working_dir,omitempty"`
+	Created           int64            `json:"created"`
+	Services          []ComposeService `json:"services"`
+}
+
+type DeployStackRequest struct {
+	Name        string            `json:"name"`
+	ComposeYAML string            `json:"compose_yaml"`
+	EnvVars     map[string]string `json:"env_vars,omitempty"`
 }
 
 // DTOs for K8s
