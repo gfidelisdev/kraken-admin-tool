@@ -3,6 +3,7 @@
 import React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
+import { CheckCircle2, XCircle, AlertCircle, Circle } from "lucide-react";
 
 const badgeVariants = cva(
   "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
@@ -36,9 +37,11 @@ export function Badge({ className, variant, ...props }: BadgeProps) {
 export function StatusBadge({ status }: { status: string }) {
   const s = status.toLowerCase();
   let variant: VariantProps<typeof badgeVariants>["variant"] = "default";
+  let Icon = Circle;
 
   if (s.includes("running") || s.includes("up") || s === "success" || s === "ready") {
     variant = "running";
+    Icon = CheckCircle2;
   } else if (
     s.includes("stop") ||
     s.includes("exit") ||
@@ -47,21 +50,21 @@ export function StatusBadge({ status }: { status: string }) {
     s === "error"
   ) {
     variant = "stopped";
-  } else if (s.includes("pending") || s.includes("wait") || s.includes("restart") || s.includes("containercreating")) {
+    Icon = XCircle;
+  } else if (
+    s.includes("pending") ||
+    s.includes("wait") ||
+    s.includes("restart") ||
+    s.includes("containercreating")
+  ) {
     variant = "pending";
+    Icon = AlertCircle;
   }
 
   return (
     <Badge variant={variant} className="capitalize flex items-center gap-1.5 w-fit">
-      <span
-        className={cn("h-1.5 w-1.5 rounded-full", {
-          "bg-emerald-400 animate-pulse": variant === "running",
-          "bg-rose-400": variant === "stopped",
-          "bg-amber-400 animate-bounce": variant === "pending",
-          "bg-slate-400": variant === "default",
-        })}
-      />
-      {status}
+      <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
+      <span>{status}</span>
     </Badge>
   );
 }

@@ -10,6 +10,10 @@ import {
   AlertCircle,
   Tag,
   HardDrive,
+  FileCode,
+  Hammer,
+  ArrowUpCircle,
+  FolderSearch,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { DockerImage } from "@/types";
@@ -21,11 +25,17 @@ import {
   TableHeader,
   TableRow,
   TableHead,
+  SortableTableHead,
   TableBody,
   TableCell,
   TableEmpty,
 } from "@/components/ui/Table";
+import { SortControl } from "@/components/ui/SortControl";
+import { sortItems, SortDirection } from "@/lib/sort";
 import { PullImageModal } from "@/components/modals/PullImageModal";
+import { DockerfileModal } from "@/components/modals/DockerfileModal";
+import { ImageUpdateModal } from "@/components/modals/ImageUpdateModal";
+import { SourceDirsModal } from "@/components/modals/SourceDirsModal";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import { useServer } from "@/context/ServerContext";
 import { formatBytes, formatDate } from "@/lib/utils";
@@ -36,9 +46,25 @@ export default function ImagesPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<string>("tag");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection("asc");
+    }
+  };
 
   const [pullModalOpen, setPullModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DockerImage | null>(null);
+  const [dockerfileModalOpen, setDockerfileModalOpen] = useState(false);
+  const [dockerfileTargetImage, setDockerfileTargetImage] = useState<DockerImage | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [updateTargetImage, setUpdateTargetImage] = useState<DockerImage | null>(null);
+  const [sourceDirsModalOpen, setSourceDirsModalOpen] = useState(false);
 
   const fetchImages = useCallback(async () => {
     setIsLoading(true);
@@ -74,14 +100,25 @@ export default function ImagesPage() {
   };
 
   const filteredImages = useMemo(() => {
-    if (!search.trim()) return images;
-    const query = search.toLowerCase();
-    return images.filter((img) => {
-      const tagMatch = img.repo_tags?.some((t) => t.toLowerCase().includes(query));
-      const idMatch = img.id.toLowerCase().includes(query);
-      return tagMatch || idMatch;
-    });
-  }, [images, search]);
+    let list = images;
+    if (search.trim()) {
+      const query = search.toLowerCase();
+      list = images.filter((img) => {
+        const tagMatch = img.repo_tags?.some((t) => t.toLowerCase().includes(query));
+        const idMatch = img.id.toLowerCase().includes(query);
+        return tagMatch || idMatch;
+      });
+    }
+
+    const customGetters = {
+      tag: (img: DockerImage) => img.repo_tags?.[0] || img.id,
+      id: (img: DockerImage) => img.id,
+      size: (img: DockerImage) => img.size || 0,
+      created: (img: DockerImage) => img.created || 0,
+    };
+
+    return sortItems(list, sortKey, sortDirection, customGetters);
+  }, [images, search, sortKey, sortDirection]);
 
   const totalBytes = useMemo(() => {
     return images.reduce((acc, curr) => acc + (curr.size || 0), 0);
@@ -101,7 +138,7 @@ export default function ImagesPage() {
           </p>
         </div>
 
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 flex-wrap">
           <Button
             variant="outline"
             size="sm"
@@ -111,6 +148,27 @@ export default function ImagesPage() {
           >
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             Refresh
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setSourceDirsModalOpen(true)}
+            className="text-xs border-indigo-800/60 bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-300"
+          >
+            <FolderSearch className="mr-1.5 h-3.5 w-3.5" />
+            Source Directories
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setDockerfileTargetImage(null);
+              setDockerfileModalOpen(true);
+            }}
+            className="text-xs border-sky-800/60 bg-sky-950/30 hover:bg-sky-900/40 text-sky-300"
+          >
+            <FileCode className="mr-1.5 h-3.5 w-3.5" />
+            Build from Dockerfile
           </Button>
           <Button
             variant="docker"
@@ -131,24 +189,69 @@ export default function ImagesPage() {
         </div>
       )}
 
-      {/* Search Input */}
-      <div className="w-full sm:w-80">
-        <Input
-          placeholder="Filter by repository tag or ID..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          icon={<Search className="h-4 w-4 text-slate-500" />}
+      {/* Search and Sort Toolbar */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div className="w-full sm:w-80">
+          <Input
+            placeholder="Filter by repository tag or ID..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            icon={<Search className="h-4 w-4 text-slate-500" />}
+          />
+        </div>
+
+        <SortControl
+          options={[
+            { value: "tag", label: "Tag / Repo" },
+            { value: "size", label: "Virtual Size" },
+            { value: "created", label: "Created" },
+            { value: "id", label: "Image ID" },
+          ]}
+          currentKey={sortKey}
+          currentDirection={sortDirection}
+          onKeyChange={(k) => setSortKey(k)}
+          onDirectionToggle={() =>
+            setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
+          }
         />
       </div>
 
       {/* Images Table */}
-      <Table>
+      <Table aria-label="Docker images table">
         <TableHeader>
           <TableRow>
-            <TableHead>Repository & Tag</TableHead>
-            <TableHead>Image ID</TableHead>
-            <TableHead>Virtual Size</TableHead>
-            <TableHead>Created</TableHead>
+            <SortableTableHead
+              sortKey="tag"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Repository & Tag
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="id"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Image ID
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="size"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Virtual Size
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="created"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Created
+            </SortableTableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -207,15 +310,41 @@ export default function ImagesPage() {
 
                   {/* Actions */}
                   <TableCell className="text-right">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-rose-400 hover:text-rose-300"
-                      title="Delete image"
-                      onClick={() => setDeleteTarget(image)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10"
+                        title="Check & apply Docker Hub updates (remediate vulnerabilities)"
+                        onClick={() => {
+                          setUpdateTargetImage(image);
+                          setUpdateModalOpen(true);
+                        }}
+                      >
+                        <ArrowUpCircle className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-sky-400 hover:text-sky-300 hover:bg-sky-500/10"
+                        title="View/Edit Dockerfile & Rebuild image"
+                        onClick={() => {
+                          setDockerfileTargetImage(image);
+                          setDockerfileModalOpen(true);
+                        }}
+                      >
+                        <FileCode className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-rose-400 hover:text-rose-300"
+                        title="Delete image"
+                        onClick={() => setDeleteTarget(image)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               );
@@ -223,6 +352,33 @@ export default function ImagesPage() {
           )}
         </TableBody>
       </Table>
+
+      {/* Dockerfile & Build Modal */}
+      <DockerfileModal
+        isOpen={dockerfileModalOpen}
+        onClose={() => setDockerfileModalOpen(false)}
+        image={dockerfileTargetImage}
+        serverId={activeServer?.id}
+        onSuccess={fetchImages}
+      />
+
+      {/* Image Update Modal */}
+      <ImageUpdateModal
+        isOpen={updateModalOpen}
+        onClose={() => setUpdateModalOpen(false)}
+        image={updateTargetImage}
+        serverId={activeServer?.id}
+        onSuccess={fetchImages}
+      />
+
+      {/* Source Search Directories Modal */}
+      <SourceDirsModal
+        isOpen={sourceDirsModalOpen}
+        onClose={() => setSourceDirsModalOpen(false)}
+        serverId={activeServer?.id || 1}
+        serverName={activeServer?.name}
+        onScanCompleted={fetchImages}
+      />
 
       {/* Pull Image Modal */}
       <PullImageModal

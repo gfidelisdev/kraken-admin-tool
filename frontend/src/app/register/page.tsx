@@ -19,6 +19,7 @@ import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { api } from "@/lib/api";
+import Image from "next/image";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -71,9 +72,22 @@ export default function RegisterPage() {
         setPassword("");
         setConfirmPassword("");
       } else {
-        // Public / initial registration
-        await register(username, email, password);
-        router.push("/");
+        // Public registration or bootstrap
+        const res = await register(username, email, password);
+        if (res?.token) {
+          // Initial bootstrap admin
+          router.push("/");
+        } else {
+          // Account is pending approval by admin
+          setSuccess(
+            res?.message ||
+            "Account registration submitted! Your account is pending administrator approval. An administrator will review your account, assign your role, and activate your access."
+          );
+          setUsername("");
+          setEmail("");
+          setPassword("");
+          setConfirmPassword("");
+        }
       }
     } catch (err: any) {
       const msg = err?.message || "Registration failed. Please check your data.";
@@ -99,7 +113,8 @@ export default function RegisterPage() {
         {/* Brand header */}
         <div className="text-center space-y-2">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-sky-500 to-indigo-600 shadow-xl shadow-sky-500/25">
-            <Anchor className="h-8 w-8 text-white" />
+            {/*<Anchor className="h-8 w-8 text-white" />*/}
+            <Image src="/kraken.png" alt="" width={50} height={50} />
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-white">
             {isAdmin ? "Add New System User" : "Create Account"}
@@ -132,13 +147,22 @@ export default function RegisterPage() {
               <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p>{success}</p>
-                <div className="mt-2 flex space-x-2">
-                  <Link
-                    href="/"
-                    className="inline-flex items-center text-xs font-semibold text-emerald-300 underline hover:text-emerald-200"
-                  >
-                    Return to Dashboard &rarr;
-                  </Link>
+                <div className="mt-3 flex space-x-3">
+                  {isAdmin ? (
+                    <Link
+                      href="/"
+                      className="inline-flex items-center text-xs font-semibold text-emerald-300 underline hover:text-emerald-200"
+                    >
+                      Return to Dashboard &rarr;
+                    </Link>
+                  ) : (
+                    <Link
+                      href="/login"
+                      className="inline-flex items-center text-xs font-semibold text-emerald-300 underline hover:text-emerald-200"
+                    >
+                      Go to Sign In &rarr;
+                    </Link>
+                  )}
                 </div>
               </div>
             </div>

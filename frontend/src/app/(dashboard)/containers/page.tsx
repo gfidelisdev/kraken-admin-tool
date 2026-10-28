@@ -24,10 +24,13 @@ import {
   TableHeader,
   TableRow,
   TableHead,
+  SortableTableHead,
   TableBody,
   TableCell,
   TableEmpty,
 } from "@/components/ui/Table";
+import { SortControl } from "@/components/ui/SortControl";
+import { sortItems, SortDirection } from "@/lib/sort";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import { useServer } from "@/context/ServerContext";
@@ -41,6 +44,17 @@ export default function ContainersPage() {
   const [tabFilter, setTabFilter] = useState("all");
   const [error, setError] = useState<string | null>(null);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<string>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection("asc");
+    }
+  };
 
   // Confirm delete modal state
   const [deleteTarget, setDeleteTarget] = useState<DockerContainer | null>(null);
@@ -109,9 +123,9 @@ export default function ContainersPage() {
     }
   };
 
-  // Filter logic
+  // Filter & sort logic
   const filteredContainers = useMemo(() => {
-    return containers.filter((c) => {
+    const list = containers.filter((c) => {
       // Tab filter
       const isRunning =
         c.state === "running" || c.status?.toLowerCase().includes("up");
@@ -129,7 +143,16 @@ export default function ContainersPage() {
 
       return true;
     });
-  }, [containers, tabFilter, search]);
+
+    const customGetters = {
+      name: (c: DockerContainer) => c.names?.[0]?.replace(/^\//, "") || c.id,
+      status: (c: DockerContainer) => c.state || c.status,
+      image: (c: DockerContainer) => c.image,
+      created: (c: DockerContainer) => c.created,
+    };
+
+    return sortItems(list, sortKey, sortDirection, customGetters);
+  }, [containers, tabFilter, search, sortKey, sortDirection]);
 
   const runningCount = containers.filter(
     (c) => c.state === "running" || c.status?.toLowerCase().includes("up")
@@ -186,25 +209,70 @@ export default function ContainersPage() {
           </TabsList>
         </Tabs>
 
-        <div className="w-full sm:w-72">
-          <Input
-            placeholder="Search container by name, image, or ID..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            icon={<Search className="h-4 w-4 text-slate-500" />}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+          <SortControl
+            options={[
+              { value: "name", label: "Name" },
+              { value: "status", label: "Status" },
+              { value: "image", label: "Image" },
+              { value: "created", label: "Created" },
+            ]}
+            currentKey={sortKey}
+            currentDirection={sortDirection}
+            onKeyChange={(k) => setSortKey(k)}
+            onDirectionToggle={() =>
+              setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
+            }
           />
+
+          <div className="w-full sm:w-72">
+            <Input
+              placeholder="Search container by name, image, or ID..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              icon={<Search className="h-4 w-4 text-slate-500" />}
+            />
+          </div>
         </div>
       </div>
 
       {/* Table */}
-      <Table>
+      <Table aria-label="Docker containers table">
         <TableHeader>
           <TableRow>
-            <TableHead>Container Name</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Image</TableHead>
+            <SortableTableHead
+              sortKey="name"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Container Name
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="status"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Status
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="image"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Image
+            </SortableTableHead>
             <TableHead>Ports</TableHead>
-            <TableHead>Created</TableHead>
+            <SortableTableHead
+              sortKey="created"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Created
+            </SortableTableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>

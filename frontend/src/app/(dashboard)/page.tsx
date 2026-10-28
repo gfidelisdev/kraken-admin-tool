@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import {
   Box,
@@ -18,6 +18,7 @@ import {
   XCircle,
   Clock,
   ShieldCheck,
+  Puzzle,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import {
@@ -31,13 +32,17 @@ import {
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
-import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell, TableEmpty } from "@/components/ui/Table";
+import { Table, TableHeader, TableRow, TableHead, SortableTableHead, TableBody, TableCell, TableEmpty } from "@/components/ui/Table";
+import { sortItems, SortDirection } from "@/lib/sort";
 import { useServer } from "@/context/ServerContext";
+import { usePlugins } from "@/context/PluginContext";
+import { PluginSurfaceRenderer } from "@/components/plugins/PluginSurfaceRenderer";
 import { PullImageModal } from "@/components/modals/PullImageModal";
 import { formatDate } from "@/lib/utils";
 
 export default function DashboardOverviewPage() {
   const { activeServer } = useServer();
+  const { dashboardWidgets } = usePlugins();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [containers, setContainers] = useState<DockerContainer[]>([]);
   const [images, setImages] = useState<DockerImage[]>([]);
@@ -46,6 +51,29 @@ export default function DashboardOverviewPage() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pullModalOpen, setPullModalOpen] = useState(false);
+  const [auditSortKey, setAuditSortKey] = useState<string>("timestamp");
+  const [auditSortDir, setAuditSortDir] = useState<SortDirection>("desc");
+
+  const handleAuditSort = (key: string) => {
+    if (auditSortKey === key) {
+      setAuditSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setAuditSortKey(key);
+      setAuditSortDir(key === "timestamp" ? "desc" : "asc");
+    }
+  };
+
+  const sortedAuditLogs = useMemo(() => {
+    const customGetters = {
+      user: (l: AuditLog) => l.username,
+      action: (l: AuditLog) => l.action,
+      resource: (l: AuditLog) => l.resource_type,
+      resource_id: (l: AuditLog) => l.resource_id,
+      status: (l: AuditLog) => l.status,
+      timestamp: (l: AuditLog) => l.created_at || "",
+    };
+    return sortItems(auditLogs, auditSortKey, auditSortDir, customGetters);
+  }, [auditLogs, auditSortKey, auditSortDir]);
 
   const fetchDashboardData = useCallback(async () => {
     setIsLoading(true);
@@ -218,6 +246,42 @@ export default function DashboardOverviewPage() {
         </Card>
       </div>
 
+      {/* Plugin Dashboard Widgets */}
+      {dashboardWidgets.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <Puzzle className="h-4 w-4 text-sky-400" />
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Widgets de Plugins Ativos
+            </h3>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {dashboardWidgets.map((item) => (
+              <Card key={`${item.plugin.plugin_id}-${item.ext.id}`} className="border-slate-800 bg-slate-900/60 shadow-lg">
+                <CardHeader className="pb-3 border-b border-slate-800/60 flex flex-row items-center justify-between">
+                  <div>
+                    <CardTitle className="text-sm font-semibold text-white">{item.ext.title}</CardTitle>
+                    <CardDescription className="text-[11px] text-slate-400">
+                      Plugin: {item.plugin.name}
+                    </CardDescription>
+                  </div>
+                  <Badge variant="outline" className="text-[10px]">
+                    Extensão
+                  </Badge>
+                </CardHeader>
+                <CardContent className="pt-4">
+                  <PluginSurfaceRenderer
+                    pluginId={item.plugin.plugin_id}
+                    surface="widget"
+                    contextParams={{ widgetId: item.ext.id }}
+                  />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Cluster & Engine Infrastructure Health */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Docker Engine Card */}
@@ -384,22 +448,57 @@ export default function DashboardOverviewPage() {
           </Link>
         </div>
 
-        <Table>
+        <Table aria-label="Recent operations audit trail">
           <TableHeader>
             <TableRow>
-              <TableHead>User</TableHead>
-              <TableHead>Action</TableHead>
-              <TableHead>Resource</TableHead>
+              <SortableTableHead
+                sortKey="user"
+                currentSortKey={auditSortKey}
+                currentDirection={auditSortDir}
+                onSort={handleAuditSort}
+              >
+                User
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="action"
+                currentSortKey={auditSortKey}
+                currentDirection={auditSortDir}
+                onSort={handleAuditSort}
+              >
+                Action
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="resource"
+                currentSortKey={auditSortKey}
+                currentDirection={auditSortDir}
+                onSort={handleAuditSort}
+              >
+                Resource
+              </SortableTableHead>
               <TableHead>Resource ID</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Timestamp</TableHead>
+              <SortableTableHead
+                sortKey="status"
+                currentSortKey={auditSortKey}
+                currentDirection={auditSortDir}
+                onSort={handleAuditSort}
+              >
+                Status
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="timestamp"
+                currentSortKey={auditSortKey}
+                currentDirection={auditSortDir}
+                onSort={handleAuditSort}
+              >
+                Timestamp
+              </SortableTableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {auditLogs.length === 0 ? (
+            {sortedAuditLogs.length === 0 ? (
               <TableEmpty colSpan={6} message="No recent audit logs recorded." />
             ) : (
-              auditLogs.slice(0, 6).map((log) => (
+              sortedAuditLogs.slice(0, 6).map((log) => (
                 <TableRow key={log.id}>
                   <TableCell className="font-medium text-white">{log.username}</TableCell>
                   <TableCell>

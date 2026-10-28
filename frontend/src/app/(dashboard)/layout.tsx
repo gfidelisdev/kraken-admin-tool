@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { ServerProvider } from "@/context/ServerContext";
+import { PluginProvider } from "@/context/PluginContext";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
 import { Loader2, X } from "lucide-react";
@@ -40,37 +41,39 @@ export default function DashboardLayout({
 
   return (
     <ServerProvider>
-      <div className="flex min-h-screen bg-[#0b0f19] text-slate-100">
-        {/* Desktop Sidebar */}
-        <Sidebar className="hidden md:flex" />
+      <PluginProvider>
+        <div className="flex min-h-screen bg-[#0b0f19] text-slate-100">
+          {/* Desktop Sidebar */}
+          <Sidebar className="hidden md:flex" />
 
-        {/* Mobile Drawer Sidebar */}
-        {mobileSidebarOpen && (
-          <div className="fixed inset-0 z-50 flex md:hidden">
-            <div
-              className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm"
-              onClick={() => setMobileSidebarOpen(false)}
-            />
-            <div className="relative flex w-64 flex-col bg-[#090d16] z-50">
-              <button
+          {/* Mobile Drawer Sidebar */}
+          {mobileSidebarOpen && (
+            <div className="fixed inset-0 z-50 flex md:hidden">
+              <div
+                className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm"
                 onClick={() => setMobileSidebarOpen(false)}
-                className="absolute right-3 top-4 rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-              >
-                <X className="h-5 w-5" />
-              </button>
-              <Sidebar className="w-full border-r-0" />
+              />
+              <div className="relative flex w-64 flex-col bg-[#090d16] z-50">
+                <button
+                  onClick={() => setMobileSidebarOpen(false)}
+                  className="absolute right-3 top-4 rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+                <Sidebar className="w-full border-r-0" />
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Main Content Area */}
-        <div className="flex flex-1 flex-col overflow-x-hidden min-w-0">
-          <Header onToggleMobileSidebar={() => setMobileSidebarOpen(true)} />
-          <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto">
-            {children}
-          </main>
+          {/* Main Content Area */}
+          <div className="flex flex-1 flex-col overflow-x-hidden min-w-0">
+            <Header onToggleMobileSidebar={() => setMobileSidebarOpen(true)} />
+            <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto">
+              {children}
+            </main>
+          </div>
         </div>
-      </div>
+      </PluginProvider>
     </ServerProvider>
   );
 }

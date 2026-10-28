@@ -108,3 +108,29 @@ func TestComposeStack_RBAC(t *testing.T) {
 	}
 }
 
+func TestComposeStackYAML_Persistence(t *testing.T) {
+	svc := NewDockerService("", nil)
+	ctx := context.Background()
+
+	t.Run("invalid yaml syntax rejected", func(t *testing.T) {
+		err := svc.UpdateComposeStackYAML(ctx, 1, "my-stack", models.UpdateStackYAMLRequest{
+			ComposeYAML: "services:\n  broken: [this is: invalid: yaml",
+			Redeploy:    false,
+		})
+		if err == nil {
+			t.Error("expected syntax error for broken YAML, got nil")
+		}
+	})
+
+	t.Run("empty yaml rejected", func(t *testing.T) {
+		err := svc.UpdateComposeStackYAML(ctx, 1, "my-stack", models.UpdateStackYAMLRequest{
+			ComposeYAML: "   ",
+			Redeploy:    false,
+		})
+		if err == nil {
+			t.Error("expected error for empty YAML, got nil")
+		}
+	})
+}
+
+

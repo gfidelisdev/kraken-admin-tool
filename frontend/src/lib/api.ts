@@ -5,9 +5,36 @@ import {
   TestServerResult,
   ComposeStack,
   DeployStackRequest,
+  ComposeStackYAMLResponse,
+  UpdateStackYAMLRequest,
+  ImageDockerfileResponse,
+  BuildImageRequest,
+  DockerBuildMessage,
   HostPackageStatus,
   PackageUpgradeLog,
   PackageUpgradeResult,
+  ActiveUpgradeJob,
+  OTPSetupResponse,
+  RecoverPasswordOTPPayload,
+  ProvisionKeyPayload,
+  ProvisionKeyResult,
+  SourceSearchDir,
+  CreateSourceDirRequest,
+  UpdateSourceDirRequest,
+  SourceLink,
+  SourceScanProgress,
+  ImageUpdateInfo,
+  UpdateImageRequest,
+  UpdateImageResult,
+  BindSourceRequest,
+  UnbindSourceRequest,
+  InstalledPlugin,
+  PluginUIExtensions,
+  PluginInspectResponse,
+  PluginCatalogItem,
+  PluginCatalogSource,
+  PluginTrustedKey,
+  PluginCallResponse,
 } from "@/types";
 
 const TOKEN_KEY = "kraken_auth_token";
@@ -393,6 +420,119 @@ export async function deployComposeStack(payload: DeployStackRequest, serverId?:
   return api.post<{ message: string }>("/api/docker/stacks/deploy", payload, { headers });
 }
 
+export async function getComposeStackYAML(name: string, serverId?: number): Promise<ComposeStackYAMLResponse> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.get<ComposeStackYAMLResponse>(`/api/docker/stacks/${name}/yaml`, { headers });
+}
+
+export async function updateComposeStackYAML(
+  name: string,
+  payload: UpdateStackYAMLRequest,
+  serverId?: number
+): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.put<{ message: string }>(`/api/docker/stacks/${name}/yaml`, payload, { headers });
+}
+
+// Docker Image Dockerfile & Build
+export async function getImageDockerfile(idOrTag: string, serverId?: number): Promise<ImageDockerfileResponse> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.get<ImageDockerfileResponse>(`/api/docker/images/dockerfile?id=${encodeURIComponent(idOrTag)}`, { headers });
+}
+
+export async function saveImageDockerfile(
+  payload: { tag: string; image_id?: string; dockerfile: string },
+  serverId?: number
+): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.put<{ message: string }>("/api/docker/images/dockerfile", payload, { headers });
+}
+
+export async function buildImageStream(
+  payload: BuildImageRequest,
+  onMessage: (msg: DockerBuildMessage) => void,
+  signal?: AbortSignal,
+  serverId?: number
+): Promise<void> {
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const activeServerId = serverId || getActiveServerId();
+  if (activeServerId) {
+    headers["X-Server-ID"] = activeServerId.toString();
+  }
+
+  const response = await fetch(`${baseUrl}/api/docker/images/build/stream`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!response.ok) {
+    let errText = `Failed to build image (${response.status})`;
+    try {
+      const errJson = await response.json();
+      errText = errJson.error || errJson.message || errText;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(errText, response.status);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new ApiError("Streaming unsupported by browser", 0);
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as DockerBuildMessage;
+        onMessage(parsed);
+        if (parsed.error) {
+          throw new ApiError(parsed.error, 500, parsed);
+        }
+      } catch (e) {
+        if (e instanceof ApiError) throw e;
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const parsed = JSON.parse(buffer.trim()) as DockerBuildMessage;
+      onMessage(parsed);
+      if (parsed.error) {
+        throw new ApiError(parsed.error, 500, parsed);
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+    }
+  }
+}
+
 // Host Packages & Sudo Policy
 export async function getHostPackages(serverId: number): Promise<HostPackageStatus> {
   return api.get<HostPackageStatus>(`/api/hosts/${serverId}/packages`);
@@ -410,13 +550,14 @@ export async function updateHostPackageManager(
 export async function checkHostPackages(
   serverId: number,
   sudoPassword?: string,
-  packageManager?: string
+  packageManager?: string,
+  saveSudoPolicy?: string
 ): Promise<HostPackageStatus> {
   const headers: Record<string, string> = {};
   if (sudoPassword) headers["X-Sudo-Password"] = sudoPassword;
   return api.post<HostPackageStatus>(
     `/api/hosts/${serverId}/packages/check`,
-    { sudo_password: sudoPassword, package_manager: packageManager },
+    { sudo_password: sudoPassword, package_manager: packageManager, save_sudo_policy: saveSudoPolicy },
     { headers }
   );
 }
@@ -425,13 +566,14 @@ export async function upgradeHostPackages(
   serverId: number,
   packages?: string[],
   sudoPassword?: string,
-  packageManager?: string
+  packageManager?: string,
+  saveSudoPolicy?: string
 ): Promise<{ message: string }> {
   const headers: Record<string, string> = {};
   if (sudoPassword) headers["X-Sudo-Password"] = sudoPassword;
   return api.post<{ message: string }>(
     `/api/hosts/${serverId}/packages/upgrade`,
-    { packages, sudo_password: sudoPassword, package_manager: packageManager },
+    { packages, sudo_password: sudoPassword, package_manager: packageManager, save_sudo_policy: saveSudoPolicy },
     { headers }
   );
 }
@@ -442,13 +584,16 @@ export async function upgradeHostPackagesStream(
   sudoPassword?: string,
   packageManager?: string,
   onLog?: (log: PackageUpgradeLog) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  saveSudoPolicy?: string,
+  method: "GET" | "POST" = "POST"
 ): Promise<PackageUpgradeResult> {
   const baseUrl = getBaseApiUrl();
   const token = getToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const headers: Record<string, string> = {};
+  if (method === "POST") {
+    headers["Content-Type"] = "application/json";
+  }
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
@@ -457,13 +602,14 @@ export async function upgradeHostPackagesStream(
   }
 
   const response = await fetch(`${baseUrl}/api/hosts/${serverId}/packages/upgrade/stream`, {
-    method: "POST",
+    method,
     headers,
-    body: JSON.stringify({
+    body: method === "POST" ? JSON.stringify({
       packages,
       sudo_password: sudoPassword,
       package_manager: packageManager,
-    }),
+      save_sudo_policy: saveSudoPolicy,
+    }) : undefined,
     signal,
   });
 
@@ -556,4 +702,332 @@ export async function clearHostSudoPassword(serverId: number): Promise<{ message
   return api.delete<{ message: string }>(`/api/hosts/${serverId}/sudo-password`);
 }
 
+export async function getActiveHostUpgradeJob(serverId: number): Promise<ActiveUpgradeJob> {
+  return api.get<ActiveUpgradeJob>(`/api/hosts/${serverId}/packages/upgrade/active`);
+}
 
+export async function listActiveHostUpgradeJobs(): Promise<Array<{
+  server_id: number;
+  server_name: string;
+  status: string;
+  package_manager: string;
+  started_at: string;
+  logs_count: number;
+}>> {
+  return api.get(`/api/hosts/packages/upgrade/active`);
+}
+
+export async function getOTPSetup(): Promise<OTPSetupResponse> {
+  return api.get<OTPSetupResponse>("/api/auth/otp/setup");
+}
+
+export async function verifyOTPSetup(code: string): Promise<{ message: string; otp_enabled: boolean }> {
+  return api.post<{ message: string; otp_enabled: boolean }>("/api/auth/otp/verify-setup", { code });
+}
+
+export async function disableOTP(password: string, code: string): Promise<{ message: string; otp_enabled: boolean }> {
+  return api.post<{ message: string; otp_enabled: boolean }>("/api/auth/otp/disable", { password, code });
+}
+
+export async function recoverPasswordOTP(payload: RecoverPasswordOTPPayload): Promise<{ message: string }> {
+  return api.post<{ message: string }>("/api/auth/recover-password/otp", payload);
+}
+
+
+
+
+// Configures key-based SSH access on a remote host using a one-time user/password (never persisted)
+export async function provisionHostKey(payload: ProvisionKeyPayload): Promise<ProvisionKeyResult> {
+  return api.post<ProvisionKeyResult>("/api/hosts/provision-key", payload);
+}
+
+// Source Search Directories & Host File Discovery
+export async function listSourceDirs(serverId: number): Promise<SourceSearchDir[]> {
+  return api.get<SourceSearchDir[]>(`/api/hosts/${serverId}/source-dirs`);
+}
+
+export async function createSourceDir(serverId: number, payload: CreateSourceDirRequest): Promise<SourceSearchDir> {
+  return api.post<SourceSearchDir>(`/api/hosts/${serverId}/source-dirs`, payload);
+}
+
+export async function updateSourceDir(serverId: number, dirId: number, payload: UpdateSourceDirRequest): Promise<SourceSearchDir> {
+  return api.put<SourceSearchDir>(`/api/hosts/${serverId}/source-dirs/${dirId}`, payload);
+}
+
+export async function deleteSourceDir(serverId: number, dirId: number): Promise<{ message: string }> {
+  return api.delete<{ message: string }>(`/api/hosts/${serverId}/source-dirs/${dirId}`);
+}
+
+export async function listSourceLinks(serverId: number, kind?: string, ref?: string): Promise<SourceLink[]> {
+  let url = `/api/hosts/${serverId}/sources/links`;
+  const params: string[] = [];
+  if (kind) params.push(`kind=${encodeURIComponent(kind)}`);
+  if (ref) params.push(`ref=${encodeURIComponent(ref)}`);
+  if (params.length > 0) url += `?${params.join("&")}`;
+  return api.get<SourceLink[]>(url);
+}
+
+export async function confirmSourceLink(serverId: number, linkId: number): Promise<{ message: string }> {
+  return api.post<{ message: string }>(`/api/hosts/${serverId}/sources/links/${linkId}/confirm`, {});
+}
+
+export async function rejectSourceLink(serverId: number, linkId: number): Promise<{ message: string }> {
+  return api.post<{ message: string }>(`/api/hosts/${serverId}/sources/links/${linkId}/reject`, {});
+}
+
+export async function listDiscoveredFiles(serverId: number, kind?: string): Promise<SourceLink[]> {
+  let url = `/api/hosts/${serverId}/sources/files`;
+  if (kind) url += `?kind=${encodeURIComponent(kind)}`;
+  return api.get<SourceLink[]>(url);
+}
+
+export async function getSourceContent(serverId: number, path: string): Promise<{ file_path: string; content: string; is_read_only: boolean }> {
+  return api.get<{ file_path: string; content: string; is_read_only: boolean }>(
+    `/api/hosts/${serverId}/sources/content?path=${encodeURIComponent(path)}`
+  );
+}
+
+export async function bindSource(serverId: number, payload: BindSourceRequest): Promise<SourceLink> {
+  return api.post<SourceLink>(`/api/hosts/${serverId}/sources/bind`, payload);
+}
+
+export async function unbindSource(serverId: number, target: number | UnbindSourceRequest): Promise<{ message: string }> {
+  const payload = typeof target === "number" ? { link_id: target } : target;
+  return api.post<{ message: string }>(`/api/hosts/${serverId}/sources/unbind`, payload);
+}
+
+export async function scanSourcesStream(
+  serverId: number,
+  onProgress?: (p: SourceScanProgress) => void,
+  sudoPassword?: string,
+  signal?: AbortSignal
+): Promise<{ total_files_found: number; image_matches: number; stack_matches: number }> {
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (sudoPassword) headers["X-Sudo-Password"] = sudoPassword;
+
+  const res = await fetch(`${baseUrl}/api/hosts/${serverId}/sources/scan`, {
+    method: "POST",
+    headers,
+    signal,
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to scan host sources (${res.status})`);
+  }
+
+  let finalSummary = { total_files_found: 0, image_matches: 0, stack_matches: 0 };
+  const reader = res.body?.getReader();
+  if (!reader) return finalSummary;
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n\n");
+    buffer = lines.pop() || "";
+
+    for (const chunk of lines) {
+      const dataLine = chunk.trim();
+      if (dataLine.startsWith("data:")) {
+        try {
+          const raw = dataLine.slice(5).trim();
+          const parsed: SourceScanProgress = JSON.parse(raw);
+          if (onProgress) onProgress(parsed);
+          finalSummary = {
+            total_files_found: parsed.files_found || finalSummary.total_files_found,
+            image_matches: parsed.matches_made || finalSummary.image_matches,
+            stack_matches: 0,
+          };
+        } catch {
+          // ignore malformed SSE line
+        }
+      }
+    }
+  }
+
+  return finalSummary;
+}
+
+// Docker Hub Image Updates
+export async function checkImageUpdates(
+  serverId: number,
+  imageIdOrTag?: string
+): Promise<ImageUpdateInfo | { data: ImageUpdateInfo[] }> {
+  const headers: Record<string, string> = {
+    "X-Server-ID": serverId.toString(),
+  };
+  const url = imageIdOrTag
+    ? `/api/docker/images/updates?id=${encodeURIComponent(imageIdOrTag)}`
+    : `/api/docker/images/updates`;
+  return api.get<ImageUpdateInfo | { data: ImageUpdateInfo[] }>(url, { headers });
+}
+
+export async function updateImage(payload: UpdateImageRequest): Promise<UpdateImageResult> {
+  const headers: Record<string, string> = {
+    "X-Server-ID": payload.server_id.toString(),
+  };
+  return api.post<UpdateImageResult>("/api/docker/images/update", payload, { headers });
+}
+
+// ==========================================
+// Plugin System & Store APIs
+// ==========================================
+
+export async function getPlugins(): Promise<{ plugins: InstalledPlugin[]; ui_extensions: PluginUIExtensions }> {
+  return api.get<{ plugins: InstalledPlugin[]; ui_extensions: PluginUIExtensions }>("/api/plugins");
+}
+
+export async function getStorePlugins(): Promise<{ plugins: PluginCatalogItem[] }> {
+  return api.get<{ plugins: PluginCatalogItem[] }>("/api/plugins/store");
+}
+
+export async function inspectPluginUpload(file: File): Promise<PluginInspectResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${baseUrl}/api/plugins/inspect-upload`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new ApiError(err.error || `Falha ao inspecionar plugin (${res.status})`, res.status, err);
+  }
+  return res.json();
+}
+
+export async function inspectPluginURL(url: string): Promise<PluginInspectResponse> {
+  return api.post<PluginInspectResponse>("/api/plugins/inspect-url", { url });
+}
+
+export async function installPluginUpload(
+  file: File,
+  expectedSHA256?: string,
+  permissions?: string[],
+  enableImmediately?: boolean
+): Promise<InstalledPlugin> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (expectedSHA256) formData.append("expected_sha256", expectedSHA256);
+  if (permissions) formData.append("permissions", JSON.stringify(permissions));
+  if (enableImmediately) formData.append("enable_immediately", "true");
+
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${baseUrl}/api/plugins/install-upload`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new ApiError(err.error || `Falha ao instalar plugin (${res.status})`, res.status, err);
+  }
+  return res.json();
+}
+
+export async function installPluginURL(
+  url: string,
+  expectedSHA256?: string,
+  grantedPermissions?: string[],
+  enableImmediately?: boolean
+): Promise<InstalledPlugin> {
+  return api.post<InstalledPlugin>("/api/plugins/install-url", {
+    url,
+    expected_sha256: expectedSHA256,
+    granted_permissions: grantedPermissions,
+    enable_immediately: enableImmediately,
+  });
+}
+
+export async function enablePlugin(pluginId: string): Promise<{ message: string }> {
+  return api.post<{ message: string }>(`/api/plugins/${encodeURIComponent(pluginId)}/enable`);
+}
+
+export async function disablePlugin(pluginId: string): Promise<{ message: string }> {
+  return api.post<{ message: string }>(`/api/plugins/${encodeURIComponent(pluginId)}/disable`);
+}
+
+export async function rebuildPlugin(pluginId: string): Promise<{ message: string; result: any }> {
+  return api.post<{ message: string; result: any }>(`/api/plugins/${encodeURIComponent(pluginId)}/rebuild`);
+}
+
+export async function deletePlugin(pluginId: string): Promise<{ message: string }> {
+  return api.delete<{ message: string }>(`/api/plugins/${encodeURIComponent(pluginId)}`);
+}
+
+export async function callPlugin<T = any>(pluginId: string, action: string, payload?: any): Promise<PluginCallResponse<T>> {
+  return api.post<PluginCallResponse<T>>(`/api/plugins/${encodeURIComponent(pluginId)}/call`, {
+    action,
+    payload,
+  });
+}
+
+export async function getPluginWorkerJS(pluginId: string): Promise<string> {
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${baseUrl}/api/plugins/${encodeURIComponent(pluginId)}/worker.js`, {
+    headers,
+  });
+  if (!res.ok) {
+    throw new ApiError(`Falha ao obter worker.js do plugin (${res.status})`, res.status);
+  }
+  return res.text();
+}
+
+export async function getCatalogSources(): Promise<PluginCatalogSource[]> {
+  return api.get<PluginCatalogSource[]>("/api/plugins/catalogs");
+}
+
+export async function addCatalogSource(name: string, url: string): Promise<PluginCatalogSource> {
+  return api.post<PluginCatalogSource>("/api/plugins/catalogs", { name, url });
+}
+
+export async function deleteCatalogSource(id: number): Promise<{ message: string }> {
+  return api.delete<{ message: string }>(`/api/plugins/catalogs/${id}`);
+}
+
+export async function syncCatalogSource(id: number): Promise<any> {
+  return api.post<any>(`/api/plugins/catalogs/${id}/sync`);
+}
+
+export async function getTrustedKeys(): Promise<PluginTrustedKey[]> {
+  return api.get<PluginTrustedKey[]>("/api/plugins/trusted-keys");
+}
+
+export async function addTrustedKey(name: string, publicKeyEd25519: string): Promise<PluginTrustedKey> {
+  return api.post<PluginTrustedKey>("/api/plugins/trusted-keys", {
+    name,
+    public_key_ed25519: publicKeyEd25519,
+  });
+}
+
+export async function deleteTrustedKey(id: number): Promise<{ message: string }> {
+  return api.delete<{ message: string }>(`/api/plugins/trusted-keys/${id}`);
+}
+
+export async function getAIGuide(): Promise<{ filename: string; content: string }> {
+  return api.get<{ filename: string; content: string }>("/api/plugins/ai-guide?format=json");
+}

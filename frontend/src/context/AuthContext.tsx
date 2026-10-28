@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { User, AuthResponse } from "@/types";
 import { api, getToken, setToken, removeToken } from "@/lib/api";
+import { SetupOTPModal } from "@/components/auth/SetupOTPModal";
 
 interface AuthContextType {
   user: User | null;
@@ -10,9 +11,10 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (username: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string) => Promise<any>;
   logout: () => void;
   refreshUser: () => Promise<void>;
+  openOTPSetup: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -65,14 +67,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const register = async (username: string, email: string, password: string) => {
     setIsLoading(true);
     try {
-      const res = await api.post<AuthResponse>("/api/auth/register", {
+      const res = await api.post<any>("/api/auth/register", {
         username,
         email,
         password,
       });
-      setToken(res.token);
-      setTokenState(res.token);
-      setUser(res.user);
+      if (res?.token) {
+        setToken(res.token);
+        setTokenState(res.token);
+        setUser(res.user);
+      }
+      return res;
     } finally {
       setIsLoading(false);
     }
@@ -83,8 +88,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     setTokenState(null);
     if (typeof window !== "undefined") {
+      sessionStorage.removeItem("kraken_otp_dismissed");
       window.location.href = "/login";
     }
+  };
+
+  const [isOTPModalOpen, setIsOTPModalOpen] = useState(false);
+  const [isInitialOTPPrompt, setIsInitialOTPPrompt] = useState(false);
+
+  useEffect(() => {
+    if (user && user.status === "active" && !user.otp_enabled) {
+      if (typeof window !== "undefined") {
+        const dismissed = sessionStorage.getItem("kraken_otp_dismissed");
+        if (!dismissed) {
+          setIsInitialOTPPrompt(true);
+          setIsOTPModalOpen(true);
+        }
+      }
+    }
+  }, [user]);
+
+  const openOTPSetup = () => {
+    setIsInitialOTPPrompt(false);
+    setIsOTPModalOpen(true);
   };
 
   return (
@@ -98,9 +124,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         register,
         logout,
         refreshUser: fetchCurrentUser,
+        openOTPSetup,
       }}
     >
       {children}
+      {user && (
+        <SetupOTPModal
+          isOpen={isOTPModalOpen}
+          onClose={() => setIsOTPModalOpen(false)}
+          isInitialPrompt={isInitialOTPPrompt}
+        />
+      )}
     </AuthContext.Provider>
   );
 }

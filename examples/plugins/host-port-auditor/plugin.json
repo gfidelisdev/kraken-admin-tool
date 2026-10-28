@@ -1,0 +1,39 @@
+{
+  "id": "com.kraken.port-auditor",
+  "name": "Host Port Auditor",
+  "version": "1.0.0",
+  "description": "Audita portas TCP abertas e serviços expostos nos servidores e containers gerenciados",
+  "author": "Kraken Core Team",
+  "homepage": "https://kraken.dev",
+  "license": "Apache-2.0",
+  "min_kraken_version": "1.0.0",
+  "runtime": {
+    "type": "wasm",
+    "entrypoint": "backend/plugin.wasm"
+  },
+  "frontend": {
+    "entrypoint": "frontend/worker.js"
+  },
+  "permissions": [
+    "ui:sidebar",
+    "ui:dashboard_widget",
+    "docker:read",
+    "storage:kv"
+  ],
+  "ui_extensions": {
+    "sidebar": [
+      {
+        "id": "port-auditor-nav",
+        "title": "Port Auditor",
+        "icon": "shield-alert",
+        "badge": "Audit"
+      }
+    ],
+    "dashboard_widgets": [
+      {
+        "id": "port-auditor-widget",
+        "title": "Portas Críticas Expostas"
+      }
+    ]
+  }
+}

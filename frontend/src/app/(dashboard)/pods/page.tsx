@@ -22,10 +22,13 @@ import {
   TableHeader,
   TableRow,
   TableHead,
+  SortableTableHead,
   TableBody,
   TableCell,
   TableEmpty,
 } from "@/components/ui/Table";
+import { SortControl } from "@/components/ui/SortControl";
+import { sortItems, SortDirection } from "@/lib/sort";
 import { Select } from "@/components/ui/Select";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import { useServer } from "@/context/ServerContext";
@@ -37,6 +40,17 @@ export default function PodsPage() {
   const [selectedNamespace, setSelectedNamespace] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<string>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection("asc");
+    }
+  };
 
   const [deleteTarget, setDeleteTarget] = useState<K8sPod | null>(null);
 
@@ -88,17 +102,29 @@ export default function PodsPage() {
     ];
   }, [pods]);
 
-  // Search filter
+  // Search & sort filter
   const filteredPods = useMemo(() => {
-    if (!search.trim()) return pods;
-    const q = search.toLowerCase();
-    return pods.filter((p) => {
-      const nameMatch = p.name?.toLowerCase().includes(q);
-      const nodeMatch = p.node?.toLowerCase().includes(q);
-      const ipMatch = p.ip?.toLowerCase().includes(q);
-      return nameMatch || nodeMatch || ipMatch;
-    });
-  }, [pods, search]);
+    let list = pods;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = pods.filter((p) => {
+        const nameMatch = p.name?.toLowerCase().includes(q);
+        const nodeMatch = p.node?.toLowerCase().includes(q);
+        const ipMatch = p.ip?.toLowerCase().includes(q);
+        return nameMatch || nodeMatch || ipMatch;
+      });
+    }
+
+    const customGetters = {
+      name: (p: K8sPod) => p.name,
+      namespace: (p: K8sPod) => p.namespace,
+      status: (p: K8sPod) => p.status,
+      restarts: (p: K8sPod) => p.restarts || 0,
+      age: (p: K8sPod) => p.age || "",
+    };
+
+    return sortItems(list, sortKey, sortDirection, customGetters);
+  }, [pods, search, sortKey, sortDirection]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -138,8 +164,8 @@ export default function PodsPage() {
         </div>
       )}
 
-      {/* Namespace Filter & Search Row */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      {/* Namespace Filter & Search & Sort Row */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
         <div className="w-full sm:w-56">
           <Select
             value={selectedNamespace}
@@ -148,26 +174,79 @@ export default function PodsPage() {
           />
         </div>
 
-        <div className="w-full sm:w-80">
-          <Input
-            placeholder="Search pod by name, node or IP..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            icon={<Search className="h-4 w-4 text-slate-500" />}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+          <SortControl
+            options={[
+              { value: "name", label: "Pod Name" },
+              { value: "namespace", label: "Namespace" },
+              { value: "status", label: "Status" },
+              { value: "restarts", label: "Restarts" },
+              { value: "age", label: "Age" },
+            ]}
+            currentKey={sortKey}
+            currentDirection={sortDirection}
+            onKeyChange={(k) => setSortKey(k)}
+            onDirectionToggle={() =>
+              setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
+            }
           />
+
+          <div className="w-full sm:w-80">
+            <Input
+              placeholder="Search pod by name, node or IP..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              icon={<Search className="h-4 w-4 text-slate-500" />}
+            />
+          </div>
         </div>
       </div>
 
       {/* Pods Table */}
-      <Table>
+      <Table aria-label="Kubernetes pods table">
         <TableHeader>
           <TableRow>
-            <TableHead>Pod Name</TableHead>
-            <TableHead>Namespace</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Restarts</TableHead>
+            <SortableTableHead
+              sortKey="name"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Pod Name
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="namespace"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Namespace
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="status"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Status
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="restarts"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Restarts
+            </SortableTableHead>
             <TableHead>Node & IP</TableHead>
-            <TableHead>Age</TableHead>
+            <SortableTableHead
+              sortKey="age"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Age
+            </SortableTableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>

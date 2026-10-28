@@ -20,10 +20,13 @@ import {
   TableHeader,
   TableRow,
   TableHead,
+  SortableTableHead,
   TableBody,
   TableCell,
   TableEmpty,
 } from "@/components/ui/Table";
+import { SortControl } from "@/components/ui/SortControl";
+import { sortItems, SortDirection } from "@/lib/sort";
 import { Select } from "@/components/ui/Select";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate } from "@/lib/utils";
@@ -34,6 +37,17 @@ export default function AuditPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [sortKey, setSortKey] = useState<string>("timestamp");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection(key === "timestamp" ? "desc" : "asc");
+    }
+  };
   const [error, setError] = useState<string | null>(null);
 
   // Detail Modal
@@ -58,7 +72,7 @@ export default function AuditPage() {
   }, [fetchAuditLogs]);
 
   const filteredLogs = useMemo(() => {
-    return logs.filter((log) => {
+    const list = logs.filter((log) => {
       // Status filter
       if (statusFilter !== "all" && log.status?.toUpperCase() !== statusFilter) {
         return false;
@@ -83,7 +97,17 @@ export default function AuditPage() {
 
       return true;
     });
-  }, [logs, statusFilter, typeFilter, search]);
+
+    const customGetters = {
+      user: (l: AuditLog) => l.username,
+      action: (l: AuditLog) => l.action,
+      resource_type: (l: AuditLog) => l.resource_type,
+      status: (l: AuditLog) => l.status,
+      timestamp: (l: AuditLog) => l.created_at || "",
+    };
+
+    return sortItems(list, sortKey, sortDirection, customGetters);
+  }, [logs, statusFilter, typeFilter, search, sortKey, sortDirection]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -121,46 +145,99 @@ export default function AuditPage() {
       )}
 
       {/* Filter Toolbar */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <Input
-          placeholder="Search by user, action, resource..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          icon={<Search className="h-4 w-4 text-slate-500" />}
-        />
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 flex-1">
+          <Input
+            placeholder="Search by user, action, resource..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            icon={<Search className="h-4 w-4 text-slate-500" />}
+          />
 
-        <Select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          options={[
-            { label: "All Statuses", value: "all" },
-            { label: "Success only", value: "SUCCESS" },
-            { label: "Failed only", value: "FAILED" },
-          ]}
-        />
+          <Select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            options={[
+              { label: "All Statuses", value: "all" },
+              { label: "Success only", value: "SUCCESS" },
+              { label: "Failed only", value: "FAILED" },
+            ]}
+          />
 
-        <Select
-          value={typeFilter}
-          onChange={(e) => setTypeFilter(e.target.value)}
+          <Select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            options={[
+              { label: "All Resource Types", value: "all" },
+              { label: "Docker Resources", value: "docker" },
+              { label: "Kubernetes Resources", value: "k8s" },
+              { label: "Auth / System", value: "auth" },
+            ]}
+          />
+        </div>
+
+        <SortControl
           options={[
-            { label: "All Resource Types", value: "all" },
-            { label: "Docker Resources", value: "docker" },
-            { label: "Kubernetes Resources", value: "k8s" },
-            { label: "Auth / System", value: "auth" },
+            { value: "timestamp", label: "Timestamp" },
+            { value: "user", label: "User" },
+            { value: "action", label: "Action" },
+            { value: "resource_type", label: "Resource" },
+            { value: "status", label: "Status" },
           ]}
+          currentKey={sortKey}
+          currentDirection={sortDirection}
+          onKeyChange={(k) => setSortKey(k)}
+          onDirectionToggle={() =>
+            setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
+          }
         />
       </div>
 
       {/* Audit Table */}
-      <Table>
+      <Table aria-label="Audit operations log table">
         <TableHeader>
           <TableRow>
-            <TableHead>User</TableHead>
-            <TableHead>Action</TableHead>
-            <TableHead>Resource Type</TableHead>
+            <SortableTableHead
+              sortKey="user"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              User
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="action"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Action
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="resource_type"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Resource Type
+            </SortableTableHead>
             <TableHead>Target ID</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Timestamp</TableHead>
+            <SortableTableHead
+              sortKey="status"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Status
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="timestamp"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Timestamp
+            </SortableTableHead>
             <TableHead className="text-right">Details</TableHead>
           </TableRow>
         </TableHeader>

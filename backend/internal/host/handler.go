@@ -1,13 +1,12 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,12 +21,14 @@ import (
 type Handler struct {
 	DB            *gorm.DB
 	DockerService *docker.DockerService
+	JobMgr        *JobManager
 }
 
 func NewHandler(db *gorm.DB, dockerService *docker.DockerService) *Handler {
 	return &Handler{
 		DB:            db,
 		DockerService: dockerService,
+		JobMgr:        GetJobManager(),
 	}
 }
 
@@ -113,16 +114,18 @@ func (h *Handler) GetPackageStatusHandler(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.HostPackageStatus{
-		ServerID:             server.ID,
-		ServerName:           server.Name,
-		PackageManager:       server.PackageManager,
-		UpdatesCount:         len(pkgUpdates),
-		SecurityCount:        securityCount,
-		Updates:              pkgUpdates,
-		LastChecked:          lastChecked,
-		RequiresSudo:         requiresSudo,
-		SudoPolicy:           server.SudoPolicy,
-		HasSavedSudoPassword: hasSavedSudo,
+		ServerID:              server.ID,
+		ServerName:            server.Name,
+		PackageManager:        server.PackageManager,
+		UpdatesCount:          len(pkgUpdates),
+		SecurityCount:         securityCount,
+		AvailableUpdatesCount: len(pkgUpdates),
+		SecurityUpdatesCount:  securityCount,
+		Updates:               pkgUpdates,
+		LastChecked:           lastChecked,
+		RequiresSudo:          requiresSudo,
+		SudoPolicy:            server.SudoPolicy,
+		HasSavedSudoPassword:  hasSavedSudo,
 	})
 }
 
@@ -153,10 +156,14 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 	if sudoPassword == "" {
 		sudoPassword = r.Header.Get("X-Sudo-Password")
 	}
-	if sudoPassword == "" && server.SudoPolicy == "save_securely" && server.SudoPassword != "" {
+	if sudoPassword == "" && server.SudoPassword != "" && server.SudoPolicy != "always_prompt" {
 		decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
 		if decErr == nil {
 			sudoPassword = decrypted
+			if server.SudoPolicy == "" {
+				server.SudoPolicy = "save_securely"
+				h.DB.Model(server).Update("sudo_policy", "save_securely")
+			}
 		}
 	}
 
@@ -195,7 +202,7 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	// If refreshing repositories requested, sudo might be needed
 	if req.RefreshRepos {
-		if sudoPassword == "" && server.SSHUser != "root" {
+		if sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -295,16 +302,18 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.HostPackageStatus{
-		ServerID:             server.ID,
-		ServerName:           server.Name,
-		PackageManager:       pkgManager,
-		UpdatesCount:         len(updates),
-		SecurityCount:        secCount,
-		Updates:              updates,
-		LastChecked:          now,
-		RequiresSudo:         server.SSHUser != "root",
-		SudoPolicy:           server.SudoPolicy,
-		HasSavedSudoPassword: server.SudoPassword != "",
+		ServerID:              server.ID,
+		ServerName:            server.Name,
+		PackageManager:        pkgManager,
+		UpdatesCount:          len(updates),
+		SecurityCount:         secCount,
+		AvailableUpdatesCount: len(updates),
+		SecurityUpdatesCount:  secCount,
+		Updates:               updates,
+		LastChecked:           now,
+		RequiresSudo:          server.SSHUser != "root",
+		SudoPolicy:            server.SudoPolicy,
+		HasSavedSudoPassword:  server.SudoPassword != "",
 	})
 }
 
@@ -340,14 +349,18 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 	if sudoPassword == "" {
 		sudoPassword = r.Header.Get("X-Sudo-Password")
 	}
-	if sudoPassword == "" && server.SudoPolicy == "save_securely" && server.SudoPassword != "" {
+	if sudoPassword == "" && server.SudoPassword != "" && server.SudoPolicy != "always_prompt" {
 		decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
 		if decErr == nil {
 			sudoPassword = decrypted
+			if server.SudoPolicy == "" {
+				server.SudoPolicy = "save_securely"
+				h.DB.Model(server).Update("sudo_policy", "save_securely")
+			}
 		}
 	}
 
-	if sudoPassword == "" && server.SSHUser != "root" {
+	if sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -471,7 +484,77 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// UpgradePackagesStreamHandler streams live package upgrade output and delivers a final result
+// GetActiveUpgradeJobHandler returns the status of any active or recently finished background upgrade job
+func (h *Handler) GetActiveUpgradeJobHandler(w http.ResponseWriter, r *http.Request) {
+	idParam := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idParam, 10, 32)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid server ID"})
+		return
+	}
+
+	job := h.JobMgr.GetJob(uint(id))
+	w.Header().Set("Content-Type", "application/json")
+	if job == nil {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"has_active_job": false,
+		})
+		return
+	}
+
+	job.mu.RLock()
+	defer job.mu.RUnlock()
+
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"has_active_job":   job.Status == "running",
+		"job_id":           job.ID,
+		"server_id":        job.ServerID,
+		"server_name":      job.ServerName,
+		"status":           job.Status,
+		"package_manager":  job.PackageManager,
+		"packages":         job.Packages,
+		"started_at":       job.StartedAt,
+		"finished_at":      job.FinishedAt,
+		"duration_seconds": job.DurationSec,
+		"logs_count":       len(job.Logs),
+		"result":           job.Result,
+	})
+}
+
+// ListActiveUpgradeJobsHandler returns all currently running upgrade jobs across all servers
+func (h *Handler) ListActiveUpgradeJobsHandler(w http.ResponseWriter, r *http.Request) {
+	jobs := h.JobMgr.GetActiveJobs()
+	type activeItem struct {
+		ServerID       uint      `json:"server_id"`
+		ServerName     string    `json:"server_name"`
+		Status         string    `json:"status"`
+		PackageManager string    `json:"package_manager"`
+		StartedAt      time.Time `json:"started_at"`
+		LogsCount      int       `json:"logs_count"`
+	}
+
+	list := make([]activeItem, 0, len(jobs))
+	for _, j := range jobs {
+		j.mu.RLock()
+		list = append(list, activeItem{
+			ServerID:       j.ServerID,
+			ServerName:     j.ServerName,
+			Status:         j.Status,
+			PackageManager: j.PackageManager,
+			StartedAt:      j.StartedAt,
+			LogsCount:      len(j.Logs),
+		})
+		j.mu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(list)
+}
+
+// UpgradePackagesStreamHandler streams live package upgrade output and delivers a final result.
+// It supports detached execution, backgrounding, and reattaching even across network disconnects.
 func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Request) {
 	idParam := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idParam, 10, 32)
@@ -482,93 +565,189 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var req models.UpgradePackagesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
-		return
-	}
+	serverID := uint(id)
+	existingJob := h.JobMgr.GetJob(serverID)
 
-	server, exec, err := h.resolveServerAndExecutor(r, uint(id))
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to connect to host: " + err.Error()})
-		return
-	}
+	var job *UpgradeJob
 
-	// Resolve sudo password
-	sudoPassword := req.SudoPassword
-	if sudoPassword == "" {
-		sudoPassword = r.Header.Get("X-Sudo-Password")
-	}
-	if sudoPassword == "" && server.SudoPolicy == "save_securely" && server.SudoPassword != "" {
-		decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
-		if decErr == nil {
-			sudoPassword = decrypted
-		}
-	}
-
-	if sudoPassword == "" && server.SSHUser != "root" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"error":         "Sudo password required to upgrade packages",
-			"code":          "SUDO_PASSWORD_REQUIRED",
-			"sudo_policy":   server.SudoPolicy,
-			"requires_sudo": true,
-		})
-		return
-	}
-
-	// Update policy if requested
-	if req.SaveSudoPolicy == "save_securely" && req.SudoPassword != "" {
-		enc, _ := krakencrypto.Encrypt(req.SudoPassword)
-		h.DB.Model(server).Updates(map[string]interface{}{
-			"sudo_policy":   "save_securely",
-			"sudo_password": enc,
-		})
-		server.SudoPolicy = "save_securely"
-		server.SudoPassword = enc
-	} else if req.SaveSudoPolicy == "always_prompt" {
-		h.DB.Model(server).Updates(map[string]interface{}{
-			"sudo_policy":   "always_prompt",
-			"sudo_password": "",
-		})
-		server.SudoPolicy = "always_prompt"
-		server.SudoPassword = ""
-	}
-
-	pkgManager := strings.ToLower(strings.TrimSpace(req.PackageManager))
-	if pkgManager != "" && pkgManager != "unknown" {
-		if !IsValidPackageManager(pkgManager) {
+	// If job is already running on this host, reattach directly to it!
+	if existingJob != nil && existingJob.Status == "running" {
+		job = existingJob
+	} else if r.Method == "GET" {
+		// If GET method was called, client expects to attach to an existing job
+		if existingJob == nil {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unsupported package manager: " + pkgManager})
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "No upgrade job found for host"})
 			return
 		}
-		h.DB.Model(server).Update("package_manager", pkgManager)
-		server.PackageManager = pkgManager
+		job = existingJob
 	} else {
-		pkgManager = server.PackageManager
-	}
+		// POST request to initiate a new upgrade job
+		var req models.UpgradePackagesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			// If body was empty but existingJob was completed, we can still reattach to completed result
+			if existingJob != nil {
+				job = existingJob
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+				return
+			}
+		}
 
-	if pkgManager == "" || pkgManager == "unknown" {
-		detected, dErr := DetectPackageManager(r.Context(), exec)
-		if dErr == nil && detected != "unknown" {
-			pkgManager = detected
-			h.DB.Model(server).Update("package_manager", pkgManager)
-			server.PackageManager = pkgManager
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":                      "Could not identify package manager on host. Please select one manually from the dropdown.",
-				"code":                       "PACKAGE_MANAGER_UNKNOWN",
-				"available_package_managers": []string{"apt", "dnf", "yum", "apk", "pacman", "zypper"},
-			})
-			return
+		if job == nil {
+			server, exec, err := h.resolveServerAndExecutor(r, serverID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to connect to host: " + err.Error()})
+				return
+			}
+
+			// Resolve sudo password
+			sudoPassword := req.SudoPassword
+			if sudoPassword == "" {
+				sudoPassword = r.Header.Get("X-Sudo-Password")
+			}
+			if sudoPassword == "" && server.SudoPassword != "" && server.SudoPolicy != "always_prompt" {
+				decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
+				if decErr == nil {
+					sudoPassword = decrypted
+					if server.SudoPolicy == "" {
+						server.SudoPolicy = "save_securely"
+						h.DB.Model(server).Update("sudo_policy", "save_securely")
+					}
+				}
+			}
+
+			if sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":         "Sudo password required to upgrade packages",
+					"code":          "SUDO_PASSWORD_REQUIRED",
+					"sudo_policy":   server.SudoPolicy,
+					"requires_sudo": true,
+				})
+				return
+			}
+
+			// Update policy if requested
+			if req.SaveSudoPolicy == "save_securely" && req.SudoPassword != "" {
+				enc, _ := krakencrypto.Encrypt(req.SudoPassword)
+				h.DB.Model(server).Updates(map[string]interface{}{
+					"sudo_policy":   "save_securely",
+					"sudo_password": enc,
+				})
+				server.SudoPolicy = "save_securely"
+				server.SudoPassword = enc
+			} else if req.SaveSudoPolicy == "always_prompt" {
+				h.DB.Model(server).Updates(map[string]interface{}{
+					"sudo_policy":   "always_prompt",
+					"sudo_password": "",
+				})
+				server.SudoPolicy = "always_prompt"
+				server.SudoPassword = ""
+			}
+
+			pkgManager := strings.ToLower(strings.TrimSpace(req.PackageManager))
+			if pkgManager != "" && pkgManager != "unknown" {
+				if !IsValidPackageManager(pkgManager) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unsupported package manager: " + pkgManager})
+					return
+				}
+				h.DB.Model(server).Update("package_manager", pkgManager)
+				server.PackageManager = pkgManager
+			} else {
+				pkgManager = server.PackageManager
+			}
+
+			if pkgManager == "" || pkgManager == "unknown" {
+				detected, dErr := DetectPackageManager(r.Context(), exec)
+				if dErr == nil && detected != "unknown" {
+					pkgManager = detected
+					h.DB.Model(server).Update("package_manager", pkgManager)
+					server.PackageManager = pkgManager
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":                      "Could not identify package manager on host. Please select one manually from the dropdown.",
+						"code":                       "PACKAGE_MANAGER_UNKNOWN",
+						"available_package_managers": []string{"apt", "dnf", "yum", "apk", "pacman", "zypper"},
+					})
+					return
+				}
+			}
+
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Streaming unsupported"})
+				return
+			}
+			_ = flusher
+
+			claims := auth.GetUserFromContext(r.Context())
+			userID := uint(0)
+			username := "system"
+			if claims != nil {
+				userID = claims.UserID
+				username = claims.Username
+			}
+
+			transientPassword := r.Header.Get("X-Host-Password")
+			transientKey := r.Header.Get("X-Host-Key")
+			transientPassphrase := r.Header.Get("X-Host-Key-Passphrase")
+			var overrides []docker.SSHConfig
+			if transientPassword != "" || transientKey != "" {
+				overrides = append(overrides, docker.SSHConfig{
+					Password:      transientPassword,
+					PrivateKey:    transientKey,
+					KeyPassphrase: transientPassphrase,
+				})
+			}
+
+			execResolver := func(ctx context.Context) (Executor, error) {
+				cleanHost := strings.TrimSpace(server.HostURL)
+				if docker.IsSSHHost(cleanHost) {
+					if h.DockerService == nil {
+						return nil, errors.New("docker service is nil")
+					}
+					client, _, err := h.DockerService.GetSSHClient(ctx, server.ID, overrides...)
+					if err != nil {
+						return nil, err
+					}
+					return NewSSHExecutor(client), nil
+				}
+				return NewLocalExecutor(), nil
+			}
+
+			var created bool
+			job, created = h.JobMgr.CreateOrGetJob(server.ID, server.Name, pkgManager, req.Packages)
+			if created {
+				startErr := h.JobMgr.StartBackgroundUpgrade(job, h.DB, h.DockerService, execResolver, server, sudoPassword, userID, username)
+				if startErr != nil {
+					if errors.Is(startErr, ErrInvalidSudoPassword) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"error": "Invalid sudo password",
+							"code":  "INVALID_SUDO_PASSWORD",
+						})
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to launch detached upgrade on host: " + startErr.Error()})
+					return
+				}
+			}
 		}
 	}
 
@@ -596,125 +775,69 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Initial informational event
-	initMsg := fmt.Sprintf("Iniciando atualização de pacotes usando gerenciador '%s'...", pkgManager)
-	if len(req.Packages) > 0 {
-		initMsg = fmt.Sprintf("Iniciando atualização de %d pacote(s) [%s] usando '%s'...", len(req.Packages), strings.Join(req.Packages, ", "), pkgManager)
-	}
-	sendEvent(map[string]interface{}{
-		"type":      "log",
-		"message":   initMsg,
-		"level":     "info",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-	})
+	ch, existingLogs, result, status, unsubscribe := job.Subscribe()
+	defer unsubscribe()
 
-	var lineBuf strings.Builder
-	var mu sync.Mutex
-
-	onChunk := func(chunk string) {
-		mu.Lock()
-		defer mu.Unlock()
-		lineBuf.WriteString(chunk)
-		str := lineBuf.String()
-		for {
-			idx := strings.Index(str, "\n")
-			if idx == -1 {
-				lineBuf.Reset()
-				lineBuf.WriteString(str)
-				break
-			}
-			line := str[:idx]
-			str = str[idx+1:]
-			lineBuf.Reset()
-			lineBuf.WriteString(str)
-
-			sendEvent(map[string]interface{}{
-				"type":      "log",
-				"message":   line,
-				"level":     "stdout",
-				"timestamp": time.Now().UTC().Format(time.RFC3339),
-			})
-		}
-	}
-
-	output, upgradeErr := UpgradePackagesStream(r.Context(), exec, pkgManager, req.Packages, sudoPassword, onChunk)
-
-	// Flush any trailing output in lineBuf
-	mu.Lock()
-	if lineBuf.Len() > 0 {
+	// 1. Replay past buffered logs first
+	for _, l := range existingLogs {
 		sendEvent(map[string]interface{}{
 			"type":      "log",
-			"message":   lineBuf.String(),
-			"level":     "stdout",
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"message":   l.Message,
+			"level":     l.Level,
+			"timestamp": l.Timestamp,
 		})
-		lineBuf.Reset()
-	}
-	mu.Unlock()
-
-	claims := auth.GetUserFromContext(r.Context())
-	userID := uint(0)
-	username := "system"
-	if claims != nil {
-		userID = claims.UserID
-		username = claims.Username
 	}
 
-	if upgradeErr != nil {
-		audit.Log(h.DB, userID, username, "UPGRADE_PACKAGES", "host", server.Name,
-			"Package upgrade failed: "+upgradeErr.Error(), "FAILED")
-
-		resPayload := map[string]interface{}{
-			"type":    "result",
-			"success": false,
-			"message": "Falha na atualização dos pacotes: " + upgradeErr.Error(),
-			"output":  output,
-		}
-		if errors.Is(upgradeErr, ErrInvalidSudoPassword) {
-			resPayload["code"] = "INVALID_SUDO_PASSWORD"
-			resPayload["message"] = "Senha sudo inválida"
-		}
-		sendEvent(resPayload)
+	// 2. If already completed, deliver final result payload
+	if status != "running" && result != nil {
+		sendEvent(map[string]interface{}{
+			"type":                    "result",
+			"success":                 result.Success,
+			"message":                 result.Message,
+			"remaining_updates_count": result.RemainingUpdatesCount,
+			"security_updates_count":  result.SecurityUpdatesCount,
+			"error":                   result.Error,
+			"code":                    result.Code,
+		})
 		return
 	}
 
-	// Refresh remaining updates count
-	remaining, _ := CheckAvailableUpdates(r.Context(), exec, pkgManager)
-	now := time.Now()
-	h.DB.Where("server_id = ?", server.ID).Delete(&models.HostPackageUpdate{})
-	secCount := 0
-	for _, u := range remaining {
-		if u.IsSecurity {
-			secCount++
+	// 3. Stream live logs and exit when client disconnects (backgrounded) or job completes
+	for {
+		select {
+		case <-r.Context().Done():
+			// Client disconnected (sent to background or closed tab).
+			// The detached background process on the host keeps running!
+			return
+		case item, ok := <-ch:
+			if !ok {
+				return
+			}
+			if item.Type == "result" {
+				job.mu.RLock()
+				res := job.Result
+				job.mu.RUnlock()
+				if res != nil {
+					sendEvent(map[string]interface{}{
+						"type":                    "result",
+						"success":                 res.Success,
+						"message":                 res.Message,
+						"remaining_updates_count": res.RemainingUpdatesCount,
+						"security_updates_count":  res.SecurityUpdatesCount,
+						"error":                   res.Error,
+						"code":                    res.Code,
+					})
+				}
+				return
+			}
+			sendEvent(map[string]interface{}{
+				"type":      "log",
+				"message":   item.Message,
+				"level":     item.Level,
+				"timestamp": item.Timestamp,
+			})
 		}
-		h.DB.Create(&models.HostPackageUpdate{
-			ServerID:       server.ID,
-			Name:           u.Name,
-			CurrentVersion: u.CurrentVersion,
-			NewVersion:     u.NewVersion,
-			Repository:     u.Repository,
-			IsSecurity:     u.IsSecurity,
-			CreatedAt:      now,
-		})
 	}
-
-	h.DB.Model(server).Updates(map[string]interface{}{
-		"packages_last_checked":   &now,
-		"available_updates_count": len(remaining),
-		"security_updates_count":  secCount,
-	})
-
-	audit.Log(h.DB, userID, username, "UPGRADE_PACKAGES", "host", server.Name,
-		"Upgraded packages on host successfully", "SUCCESS")
-
-	sendEvent(map[string]interface{}{
-		"type":                    "result",
-		"success":                 true,
-		"message":                 "Pacotes atualizados com sucesso",
-		"output":                  output,
-		"remaining_updates_count": len(remaining),
-		"security_updates_count":  secCount,
-	})
 }
 
 // UpdateSudoPolicyHandler updates the sudo credential retention policy

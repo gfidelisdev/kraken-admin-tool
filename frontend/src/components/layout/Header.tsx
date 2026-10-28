@@ -11,11 +11,14 @@ import {
   ExternalLink,
   KeyRound,
   UserPlus,
+  Users,
+  Smartphone,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { ServerSelector } from "@/components/layout/ServerSelector";
+import { ThemeSelector } from "@/components/layout/ThemeSelector";
 import { ChangePasswordModal } from "@/components/auth/ChangePasswordModal";
 import { AddUserModal } from "@/components/auth/AddUserModal";
 import Link from "next/link";
@@ -25,7 +28,7 @@ export function Header({
 }: {
   onToggleMobileSidebar?: () => void;
 }) {
-  const { user, logout } = useAuth();
+  const { user, logout, openOTPSetup } = useAuth();
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showAddUserModal, setShowAddUserModal] = useState(false);
@@ -54,6 +57,9 @@ export function Header({
       <div className="flex items-center space-x-3">
         {/* Docker Server Selector */}
         <ServerSelector />
+
+        {/* Theme Selector */}
+        <ThemeSelector />
 
         {/* API Docs link */}
         <Link
@@ -118,19 +124,53 @@ export function Header({
                     Change Password
                   </Button>
 
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setShowProfileMenu(false);
+                      openOTPSetup();
+                    }}
+                    className="w-full justify-between text-xs text-slate-300 hover:bg-slate-800 hover:text-white"
+                  >
+                    <div className="flex items-center">
+                      <Smartphone className="mr-2 h-3.5 w-3.5 text-sky-400" />
+                      <span>Two-Factor (OTP)</span>
+                    </div>
+                    {user?.otp_enabled ? (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                        Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                        Setup
+                      </span>
+                    )}
+                  </Button>
+
                   {user?.role === "admin" && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setShowProfileMenu(false);
-                        setShowAddUserModal(true);
-                      }}
-                      className="w-full justify-start text-xs text-slate-300 hover:bg-slate-800 hover:text-white"
-                    >
-                      <UserPlus className="mr-2 h-3.5 w-3.5 text-emerald-400" />
-                      Add New User
-                    </Button>
+                    <>
+                      <Link
+                        href="/users"
+                        onClick={() => setShowProfileMenu(false)}
+                        className="flex items-center w-full rounded-md px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                      >
+                        <Users className="mr-2 h-3.5 w-3.5 text-sky-400" />
+                        Users & Approvals
+                      </Link>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setShowProfileMenu(false);
+                          setShowAddUserModal(true);
+                        }}
+                        className="w-full justify-start text-xs text-slate-300 hover:bg-slate-800 hover:text-white"
+                      >
+                        <UserPlus className="mr-2 h-3.5 w-3.5 text-emerald-400" />
+                        Add New User
+                      </Button>
+                    </>
                   )}
 
                   <div className="pt-1 border-t border-slate-800/80">

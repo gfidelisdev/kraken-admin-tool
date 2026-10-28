@@ -309,6 +309,7 @@ func (s *DockerService) GetServer(serverID uint) (*models.DockerServer, error) {
 	if err := s.db.First(&server, serverID).Error; err != nil {
 		return nil, fmt.Errorf("server %d not found: %w", serverID, err)
 	}
+	server.HasSavedSudoPassword = (server.SudoPassword != "")
 	return &server, nil
 }
 

@@ -46,3 +46,30 @@ func TestInitDBSQLiteFallbackAndSeed(t *testing.T) {
 		t.Errorf("expected admin role, got %s", admin.Role)
 	}
 }
+
+func TestInitDBProductionPostgresFailureDoesNotFallbackToSQLite(t *testing.T) {
+	// In production, failure to connect to PostgreSQL must return an error and NOT fallback to SQLite
+	t.Setenv("DB_MAX_RETRIES", "2")
+	t.Setenv("DB_RETRY_INTERVAL_MS", "10")
+
+	cfg := &config.Config{
+		Environment: "production",
+		DBHost:      "127.0.0.1",
+		DBPort:      "54321",
+		DBUser:      "postgres",
+		DBPassword:  "password",
+		DBName:      "kraken_test",
+		DBSSLMode:   "disable",
+	}
+
+	handle, err := InitDB(cfg)
+	if err == nil {
+		t.Fatalf("expected InitDB to return an error in production when postgres is unavailable, but got handle: %+v", handle)
+	}
+
+	// Verify that kraken_data.db was NOT created
+	if _, statErr := os.Stat("kraken_data.db"); statErr == nil {
+		_ = os.Remove("kraken_data.db")
+		t.Errorf("kraken_data.db should not have been created as a fallback in production")
+	}
+}

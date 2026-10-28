@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -21,6 +22,7 @@ var (
 // Executor defines the interface for executing system commands either locally or over SSH
 type Executor interface {
 	Execute(ctx context.Context, cmd string) (stdout string, stderr string, exitCode int, err error)
+	ExecuteStream(ctx context.Context, cmd string, onChunk func(chunk string)) (stdout string, stderr string, exitCode int, err error)
 	ExecuteSudo(ctx context.Context, cmd string, sudoPassword string) (stdout string, stderr string, exitCode int, err error)
 	ExecuteSudoStream(ctx context.Context, cmd string, sudoPassword string, onChunk func(chunk string)) (stdout string, stderr string, exitCode int, err error)
 }
@@ -47,8 +49,24 @@ func NewSSHExecutor(client *ssh.Client) *SSHExecutor {
 	return &SSHExecutor{client: client}
 }
 
+func (e *SSHExecutor) isRoot() bool {
+	if e.client != nil && strings.EqualFold(e.client.User(), "root") {
+		return true
+	}
+	return false
+}
+
+func quoteShell(cmd string) string {
+	return "'" + strings.ReplaceAll(cmd, "'", "'\\''") + "'"
+}
+
 // Execute runs a command as the SSH user
 func (e *SSHExecutor) Execute(ctx context.Context, cmd string) (string, string, int, error) {
+	return e.ExecuteStream(ctx, cmd, nil)
+}
+
+// ExecuteStream runs a command as the SSH user and invokes onChunk for real-time output
+func (e *SSHExecutor) ExecuteStream(ctx context.Context, cmd string, onChunk func(string)) (string, string, int, error) {
 	if e.client == nil {
 		return "", "", -1, errors.New("ssh client is nil")
 	}
@@ -60,8 +78,13 @@ func (e *SSHExecutor) Execute(ctx context.Context, cmd string) (string, string, 
 	defer session.Close()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	session.Stderr = &stderrBuf
+	if onChunk != nil {
+		session.Stdout = &streamWriter{buf: &stdoutBuf, onChunk: onChunk}
+		session.Stderr = &streamWriter{buf: &stderrBuf, onChunk: onChunk}
+	} else {
+		session.Stdout = &stdoutBuf
+		session.Stderr = &stderrBuf
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -112,6 +135,34 @@ func (e *SSHExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoPas
 		session.Stderr = &stderrBuf
 	}
 
+	if e.isRoot() {
+		// Already root: execute directly without sudo prompt or stdin piping
+		rootCmd := fmt.Sprintf("sh -c %s", quoteShell(cmd))
+		if err := session.Start(rootCmd); err != nil {
+			return "", "", -1, fmt.Errorf("failed to start root session: %w", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- session.Wait()
+		}()
+		select {
+		case <-ctx.Done():
+			_ = session.Signal(ssh.SIGKILL)
+			return stdoutBuf.String(), stderrBuf.String(), -1, ctx.Err()
+		case err := <-done:
+			exitCode := 0
+			if err != nil {
+				var exitErr *ssh.ExitError
+				if errors.As(err, &exitErr) {
+					exitCode = exitErr.ExitStatus()
+				} else {
+					exitCode = 1
+				}
+			}
+			return stdoutBuf.String(), stderrBuf.String(), exitCode, err
+		}
+	}
+
 	stdinPipe, err := session.StdinPipe()
 	if err != nil {
 		return "", "", -1, fmt.Errorf("failed to open stdin pipe for sudo: %w", err)
@@ -120,8 +171,8 @@ func (e *SSHExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoPas
 	// Sudo invocation flags:
 	// -S : Read password from stdin
 	// -p '' : Suppress standard prompt text to avoid polluting stream
-	// -- : End of sudo options, followed by env wrapper and the command
-	sudoCmd := fmt.Sprintf("LANG=C LC_ALL=C sudo -S -p '' -- env %s", cmd)
+	// -- : End of sudo options, followed by sh -c with safely quoted command
+	sudoCmd := fmt.Sprintf("LANG=C LC_ALL=C sudo -S -p '' -- sh -c %s", quoteShell(cmd))
 
 	if err := session.Start(sudoCmd); err != nil {
 		return "", "", -1, fmt.Errorf("failed to start sudo session: %w", err)
@@ -177,10 +228,19 @@ func NewLocalExecutor() *LocalExecutor {
 }
 
 func (e *LocalExecutor) Execute(ctx context.Context, cmd string) (string, string, int, error) {
+	return e.ExecuteStream(ctx, cmd, nil)
+}
+
+func (e *LocalExecutor) ExecuteStream(ctx context.Context, cmd string, onChunk func(string)) (string, string, int, error) {
 	execCmd := exec.CommandContext(ctx, "sh", "-c", cmd)
 	var stdoutBuf, stderrBuf bytes.Buffer
-	execCmd.Stdout = &stdoutBuf
-	execCmd.Stderr = &stderrBuf
+	if onChunk != nil {
+		execCmd.Stdout = &streamWriter{buf: &stdoutBuf, onChunk: onChunk}
+		execCmd.Stderr = &streamWriter{buf: &stderrBuf, onChunk: onChunk}
+	} else {
+		execCmd.Stdout = &stdoutBuf
+		execCmd.Stderr = &stderrBuf
+	}
 
 	err := execCmd.Run()
 	exitCode := 0
@@ -195,12 +255,26 @@ func (e *LocalExecutor) Execute(ctx context.Context, cmd string) (string, string
 	return stdoutBuf.String(), stderrBuf.String(), exitCode, err
 }
 
+func (e *LocalExecutor) isRoot() bool {
+	return os.Geteuid() == 0
+}
+
 func (e *LocalExecutor) ExecuteSudo(ctx context.Context, cmd string, sudoPassword string) (string, string, int, error) {
 	return e.ExecuteSudoStream(ctx, cmd, sudoPassword, nil)
 }
 
 func (e *LocalExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoPassword string, onChunk func(string)) (string, string, int, error) {
-	execCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("LANG=C LC_ALL=C sudo -S -p '' -- env %s", cmd))
+	var execCmd *exec.Cmd
+	if e.isRoot() {
+		execCmd = exec.CommandContext(ctx, "sh", "-c", cmd)
+	} else {
+		sudoCmd := fmt.Sprintf("LANG=C LC_ALL=C sudo -S -p '' -- sh -c %s", quoteShell(cmd))
+		execCmd = exec.CommandContext(ctx, "sh", "-c", sudoCmd)
+		if sudoPassword != "" {
+			execCmd.Stdin = strings.NewReader(sudoPassword + "\n")
+		}
+	}
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	if onChunk != nil {
 		execCmd.Stdout = &streamWriter{buf: &stdoutBuf, onChunk: onChunk}
@@ -208,10 +282,6 @@ func (e *LocalExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoP
 	} else {
 		execCmd.Stdout = &stdoutBuf
 		execCmd.Stderr = &stderrBuf
-	}
-
-	if sudoPassword != "" {
-		execCmd.Stdin = strings.NewReader(sudoPassword + "\n")
 	}
 
 	err := execCmd.Run()

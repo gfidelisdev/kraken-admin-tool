@@ -6,13 +6,31 @@ import (
 
 // User represents an administrative user in the database
 type User struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	Username     string    `gorm:"size:64;uniqueIndex;not null" json:"username"`
-	Email        string    `gorm:"size:128;uniqueIndex;not null" json:"email"`
-	PasswordHash string    `gorm:"size:255;not null" json:"-"`
-	Role         string    `gorm:"size:32;default:'admin';not null" json:"role"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	Username         string    `gorm:"size:64;uniqueIndex;not null" json:"username"`
+	Email            string    `gorm:"size:128;uniqueIndex;not null" json:"email"`
+	PasswordHash     string    `gorm:"size:255;not null" json:"-"`
+	Role             string    `gorm:"size:32;default:'admin';not null" json:"role"`
+	Status           string    `gorm:"size:32;default:'active';not null" json:"status"` // "active" | "pending" | "rejected"
+	OTPEnabled       bool      `gorm:"default:false" json:"otp_enabled"`
+	OTPSecret        string    `gorm:"type:text" json:"-"`
+	OTPPendingSecret string    `gorm:"type:text" json:"-"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// PasswordResetRequest represents a request submitted by a user to recover their password via an admin
+type PasswordResetRequest struct {
+	ID         uint       `gorm:"primaryKey" json:"id"`
+	UserID     uint       `gorm:"index;not null" json:"user_id"`
+	Username   string     `gorm:"size:64;not null" json:"username"`
+	Email      string     `gorm:"size:128;not null" json:"email"`
+	Note       string     `gorm:"type:text" json:"note,omitempty"`
+	Status     string     `gorm:"size:32;default:'pending';not null" json:"status"` // "pending" | "resolved" | "rejected"
+	ResolvedBy string     `gorm:"size:64" json:"resolved_by,omitempty"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // AuditLog tracks administrative actions performed across Docker, K8s, and Auth
@@ -47,11 +65,56 @@ type ChangePasswordRequest struct {
 }
 
 type UserResponse struct {
-	ID        uint      `json:"id"`
-	Username  string    `json:"username"`
-	Email     string    `json:"email"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         uint      `json:"id"`
+	Username   string    `json:"username"`
+	Email      string    `json:"email"`
+	Role       string    `json:"role"`
+	Status     string    `json:"status"`
+	OTPEnabled bool      `json:"otp_enabled"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type OTPSetupResponse struct {
+	Secret     string `json:"secret"`
+	AuthURL    string `json:"otpauth_url"`
+	OTPEnabled bool   `json:"otp_enabled"`
+}
+
+type OTPVerifyRequest struct {
+	Code string `json:"code"`
+}
+
+type OTPDisableRequest struct {
+	Password string `json:"password"`
+	Code     string `json:"code"`
+}
+
+type RecoverPasswordOTPRequest struct {
+	UsernameOrEmail string `json:"username_or_email"`
+	Code            string `json:"code"`
+	NewPassword     string `json:"new_password"`
+}
+
+type ApproveUserRequest struct {
+	Role string `json:"role"`
+}
+
+type UpdateUserRoleRequest struct {
+	Role string `json:"role"`
+}
+
+type AdminResetPasswordRequest struct {
+	NewPassword string `json:"new_password,omitempty"`
+}
+
+type RecoverPasswordRequest struct {
+	UsernameOrEmail string `json:"username_or_email"`
+	Note            string `json:"note,omitempty"`
+}
+
+type MasterRecoveryRequest struct {
+	Username    string `json:"username"`
+	NewPassword string `json:"new_password"`
 }
 
 type AuthResponse struct {
@@ -207,16 +270,18 @@ type PackageUpdate struct {
 }
 
 type HostPackageStatus struct {
-	ServerID             uint            `json:"server_id"`
-	ServerName           string          `json:"server_name"`
-	PackageManager       string          `json:"package_manager"` // "apt", "dnf", "yum", "apk", "pacman", "zypper", "unknown"
-	UpdatesCount         int             `json:"updates_count"`
-	SecurityCount        int             `json:"security_count"`
-	Updates              []PackageUpdate `json:"updates"`
-	LastChecked          time.Time       `json:"last_checked"`
-	RequiresSudo         bool            `json:"requires_sudo"`
-	SudoPolicy           string          `json:"sudo_policy"` // "save_securely" | "always_prompt" | ""
-	HasSavedSudoPassword bool            `json:"has_saved_sudo_password"`
+	ServerID              uint            `json:"server_id"`
+	ServerName            string          `json:"server_name"`
+	PackageManager        string          `json:"package_manager"` // "apt", "dnf", "yum", "apk", "pacman", "zypper", "unknown"
+	UpdatesCount          int             `json:"updates_count"`
+	SecurityCount         int             `json:"security_count"`
+	AvailableUpdatesCount int             `json:"available_updates_count"`
+	SecurityUpdatesCount  int             `json:"security_updates_count"`
+	Updates               []PackageUpdate `json:"updates"`
+	LastChecked           time.Time       `json:"last_checked"`
+	RequiresSudo          bool            `json:"requires_sudo"`
+	SudoPolicy            string          `json:"sudo_policy"` // "save_securely" | "always_prompt" | ""
+	HasSavedSudoPassword  bool            `json:"has_saved_sudo_password"`
 }
 
 type CheckPackagesRequest struct {
@@ -264,9 +329,185 @@ type ComposeStack struct {
 }
 
 type DeployStackRequest struct {
-	Name        string            `json:"name"`
-	ComposeYAML string            `json:"compose_yaml"`
-	EnvVars     map[string]string `json:"env_vars,omitempty"`
+	Name          string            `json:"name"`
+	ComposeYAML   string            `json:"compose_yaml"`
+	EnvVars       map[string]string `json:"env_vars,omitempty"`
+	ForceRecreate bool              `json:"force_recreate,omitempty"`
+}
+
+// ComposeStackConfig persists the docker-compose.yaml content for a stack on a given server
+type ComposeStackConfig struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	ServerID    uint      `gorm:"uniqueIndex:idx_server_stack;not null" json:"server_id"`
+	StackName   string    `gorm:"size:128;uniqueIndex:idx_server_stack;not null" json:"stack_name"`
+	ComposeYAML string    `gorm:"type:text;not null" json:"compose_yaml"`
+	WorkingDir  string    `gorm:"size:512" json:"working_dir,omitempty"`
+	ConfigFile  string    `gorm:"size:512" json:"config_file,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ComposeStackYAMLResponse returned by GET /api/docker/stacks/{name}/yaml
+type ComposeStackYAMLResponse struct {
+	Name        string  `json:"name"`
+	ComposeYAML string  `json:"compose_yaml"`
+	Source      string  `json:"source"` // "database" | "host_file" | "reconstructed"
+	ConfigFile  string  `json:"config_file,omitempty"`
+	WorkingDir  string  `json:"working_dir,omitempty"`
+	FilePath    string  `json:"file_path,omitempty"`
+	IsReadOnly  bool    `json:"is_read_only"`
+	MatchScore  float64 `json:"match_score,omitempty"`
+}
+
+// UpdateStackYAMLRequest used by PUT /api/docker/stacks/{name}/yaml
+type UpdateStackYAMLRequest struct {
+	ComposeYAML   string `json:"compose_yaml"`
+	Redeploy      bool   `json:"redeploy"`
+	ForceRecreate bool   `json:"force_recreate,omitempty"`
+}
+
+// ImageDockerfileConfig persists the Dockerfile content for locally built/edited images
+type ImageDockerfileConfig struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	ServerID   uint      `gorm:"index;not null" json:"server_id"`
+	ImageTag   string    `gorm:"size:255;index;not null" json:"image_tag"`
+	ImageID    string    `gorm:"size:128;index" json:"image_id"`
+	Dockerfile string    `gorm:"type:text;not null" json:"dockerfile"`
+	ContextDir string    `gorm:"size:512" json:"context_dir,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ImageDockerfileResponse returned by GET /api/docker/images/dockerfile
+type ImageDockerfileResponse struct {
+	ImageID          string   `json:"image_id"`
+	RepoTags         []string `json:"repo_tags"`
+	Dockerfile       string   `json:"dockerfile"`
+	ExtendDockerfile string   `json:"extend_dockerfile"`
+	Source           string   `json:"source"` // "database" | "host_file" | "reconstructed"
+	ContextDir       string   `json:"context_dir,omitempty"`
+	FilePath         string   `json:"file_path,omitempty"`
+	IsReadOnly       bool     `json:"is_read_only"`
+	MatchScore       float64  `json:"match_score,omitempty"`
+	Env              []string `json:"env,omitempty"`
+	WorkingDir       string   `json:"working_dir,omitempty"`
+	ExposedPorts     []string `json:"exposed_ports,omitempty"`
+	Entrypoint       []string `json:"entrypoint,omitempty"`
+	Cmd              []string `json:"cmd,omitempty"`
+}
+
+// SourceSearchDir represents an administrator-defined directory on a target host to scan for source files
+type SourceSearchDir struct {
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	ServerID        uint       `gorm:"index;not null" json:"server_id"`
+	Path            string     `gorm:"size:512;not null" json:"path"`
+	Recursive       bool       `gorm:"default:true" json:"recursive"`
+	MaxDepth        int        `gorm:"default:5" json:"max_depth"`
+	Enabled         bool       `gorm:"default:true" json:"enabled"`
+	ScheduleEnabled bool       `gorm:"default:false" json:"schedule_enabled"`
+	ScheduleCron    string     `gorm:"size:64;default:'@daily'" json:"schedule_cron"`
+	LastScannedAt   *time.Time `json:"last_scanned_at,omitempty"`
+	LastScanError   string     `gorm:"type:text" json:"last_scan_error,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// CreateSourceDirRequest used to add a new search directory
+type CreateSourceDirRequest struct {
+	Path            string `json:"path"`
+	Recursive       *bool  `json:"recursive,omitempty"`
+	MaxDepth        int    `json:"max_depth,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty"`
+	ScheduleEnabled *bool  `json:"schedule_enabled,omitempty"`
+	ScheduleCron    string `json:"schedule_cron,omitempty"`
+}
+
+// UpdateSourceDirRequest used to update search directory settings
+type UpdateSourceDirRequest struct {
+	Path            string `json:"path,omitempty"`
+	Recursive       *bool  `json:"recursive,omitempty"`
+	MaxDepth        int    `json:"max_depth,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty"`
+	ScheduleEnabled *bool  `json:"schedule_enabled,omitempty"`
+	ScheduleCron    string `json:"schedule_cron,omitempty"`
+}
+
+// SourceLink represents a reverse-engineered relationship between a Docker image/stack and a host source file
+type SourceLink struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	ServerID    uint      `gorm:"index;not null" json:"server_id"`
+	Kind        string    `gorm:"size:32;index;not null" json:"kind"` // "image" | "stack"
+	TargetRef   string    `gorm:"size:255;index" json:"target_ref"`  // image tag/ID or stack name (empty if unbound)
+	FilePath    string    `gorm:"size:512;not null" json:"file_path"`
+	FileMTime   int64     `gorm:"column:file_mtime" json:"file_mtime"`
+	ContentHash string    `gorm:"size:64;not null" json:"content_hash"`
+	MatchScore  float64   `gorm:"default:0" json:"match_score"`
+	Status      string    `gorm:"size:32;default:'unbound'" json:"status"` // "auto_matched" | "candidate" | "user_confirmed" | "user_rejected" | "unbound" | "stale"
+	Metadata    string    `gorm:"type:text" json:"metadata,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// BindSourceRequest allows administrators to manually bind a discovered host source file to a workload
+type BindSourceRequest struct {
+	LinkID    uint   `json:"link_id,omitempty"`
+	FilePath  string `json:"file_path,omitempty"`
+	Kind      string `json:"kind"`       // "image" | "stack"
+	TargetRef string `json:"target_ref"` // image tag/ID or stack name
+}
+
+// UnbindSourceRequest unbinds a source file from a workload
+type UnbindSourceRequest struct {
+	LinkID   uint   `json:"link_id,omitempty"`
+	FilePath string `json:"file_path,omitempty"`
+}
+
+// SourceScanProgress represents real-time progress events sent during a scan
+type SourceScanProgress struct {
+	Stage       string `json:"stage"` // "discovering", "reading", "matching", "completed", "error"
+	Message     string `json:"message"`
+	FilesFound  int    `json:"files_found"`
+	MatchesMade int    `json:"matches_made"`
+	CurrentPath string `json:"current_path,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// ImageUpdateInfo represents Docker Hub update checks for an image
+type ImageUpdateInfo struct {
+	ImageID           string    `json:"image_id"`
+	RepoTags          []string  `json:"repo_tags"`
+	Repository        string    `json:"repository"`
+	CurrentTag        string    `json:"current_tag"`
+	CurrentDigest     string    `json:"current_digest,omitempty"`
+	RetainTag         string    `json:"retain_tag,omitempty"`
+	RetainDigest      string    `json:"retain_digest,omitempty"`
+	RetainHasUpdate   bool      `json:"retain_has_update"`
+	FullTag           string    `json:"full_tag,omitempty"`
+	FullDigest        string    `json:"full_digest,omitempty"`
+	FullHasUpdate     bool      `json:"full_has_update"`
+	IsRebuildDigest   bool      `json:"is_rebuild_digest"` // true if upstream has rebuilt the same tag with security patches
+	CurrentCreatedAt  time.Time `json:"current_created_at,omitempty"`
+	UpstreamCreatedAt time.Time `json:"upstream_created_at,omitempty"`
+}
+
+// UpdateImageRequest used to trigger an image update
+type UpdateImageRequest struct {
+	ServerID           uint   `json:"server_id"`
+	ImageID            string `json:"image_id"`
+	TargetTag          string `json:"target_tag"` // e.g. "redis:7.0.14-alpine"
+	Mode               string `json:"mode"`       // "retain" | "full"
+	RecreateContainers bool   `json:"recreate_containers"`
+	RemoveOldImage     bool   `json:"remove_old_image"`
+}
+
+// BuildImageRequest used by POST /api/docker/images/build and /api/docker/images/build/stream
+type BuildImageRequest struct {
+	Tag        string            `json:"tag"`
+	Dockerfile string            `json:"dockerfile"`
+	NoCache    bool              `json:"no_cache,omitempty"`
+	PullParent bool              `json:"pull_parent,omitempty"`
+	BuildArgs  map[string]string `json:"build_args,omitempty"`
+	ContextDir string            `json:"context_dir,omitempty"`
 }
 
 // DTOs for K8s
@@ -309,4 +550,174 @@ type SystemStatusResponse struct {
 	K8sDeployments       int    `json:"k8s_deployments"`
 	DatabaseType         string `json:"database_type"`
 	DatabaseStatus       string `json:"database_status"`
+}
+
+// --- Plugin System Models & DTOs ---
+
+// InstalledPlugin represents a plugin installed in Kraken
+type InstalledPlugin struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	PluginID           string    `gorm:"size:128;uniqueIndex;not null" json:"plugin_id"`
+	Name               string    `gorm:"size:128;not null" json:"name"`
+	Version            string    `gorm:"size:64;not null" json:"version"`
+	Description        string    `gorm:"type:text" json:"description"`
+	Author             string    `gorm:"size:128" json:"author"`
+	Homepage           string    `gorm:"size:255" json:"homepage"`
+	License            string    `gorm:"size:64" json:"license"`
+	RuntimeType        string    `gorm:"size:32;default:'none';not null" json:"runtime_type"` // "none" | "wasm" | "container"
+	Status             string    `gorm:"size:32;default:'installed';not null" json:"status"`   // "installed" | "enabled" | "disabled" | "error"
+	LastError          string    `gorm:"type:text" json:"last_error,omitempty"`
+	ManifestJSON       string    `gorm:"type:text;not null" json:"manifest_json"`
+	GrantedPermissions string    `gorm:"type:text" json:"granted_permissions"` // JSON array
+	SHA256             string    `gorm:"size:64" json:"sha256"`
+	SignatureVerified  bool      `gorm:"default:false" json:"signature_verified"`
+	SignerKeyID        string    `gorm:"size:128" json:"signer_key_id,omitempty"`
+	SourceURL          string    `gorm:"type:text" json:"source_url,omitempty"`
+	InstallPath        string    `gorm:"type:text" json:"install_path"`
+	ContainerID        string    `gorm:"size:128" json:"container_id,omitempty"`
+	InstalledBy        string    `gorm:"size:64" json:"installed_by,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// PluginKVStore provides isolated key-value storage for plugins
+type PluginKVStore struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	PluginID  string    `gorm:"size:128;index:idx_plugin_kv,unique;not null" json:"plugin_id"`
+	Key       string    `gorm:"size:255;index:idx_plugin_kv,unique;not null" json:"key"`
+	Value     string    `gorm:"type:text" json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PluginCatalogSource represents an online repository of plugins (index.json)
+type PluginCatalogSource struct {
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	Name            string     `gorm:"size:128;not null" json:"name"`
+	URL             string     `gorm:"size:512;uniqueIndex;not null" json:"url"`
+	Enabled         bool       `gorm:"default:true" json:"enabled"`
+	LastSyncedAt    *time.Time `json:"last_synced_at,omitempty"`
+	CachedIndexJSON string     `gorm:"type:text" json:"cached_index_json,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// PluginTrustedKey represents a trusted Ed25519 public key for verifying signed plugins
+type PluginTrustedKey struct {
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	Name             string    `gorm:"size:128;not null" json:"name"`
+	PublicKeyEd25519 string    `gorm:"type:text;not null" json:"public_key_ed25519"`
+	Fingerprint      string    `gorm:"size:64;uniqueIndex;not null" json:"fingerprint"`
+	AddedBy          string    `gorm:"size:64" json:"added_by,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// PluginManifest represents the deserialized plugin.json manifest
+type PluginManifest struct {
+	ID               string               `json:"id"`
+	Name             string               `json:"name"`
+	Version          string               `json:"version"`
+	Description      string               `json:"description"`
+	Author           string               `json:"author"`
+	Homepage         string               `json:"homepage,omitempty"`
+	License          string               `json:"license,omitempty"`
+	MinKrakenVersion string               `json:"min_kraken_version,omitempty"`
+	Runtime          PluginRuntimeConfig  `json:"runtime,omitempty"`
+	Frontend         PluginFrontendConfig `json:"frontend,omitempty"`
+	Permissions      []string             `json:"permissions,omitempty"`
+	AllowedHosts     []string             `json:"allowed_hosts,omitempty"`
+	UIExtensions     PluginUIExtensions   `json:"ui_extensions,omitempty"`
+}
+
+type PluginRuntimeConfig struct {
+	Type       string `json:"type"`                 // "none" | "wasm" | "container"
+	Entrypoint string `json:"entrypoint,omitempty"` // e.g. "backend/plugin.wasm" or image name
+	Port       int    `json:"port,omitempty"`       // container port, e.g. 8080
+}
+
+type PluginFrontendConfig struct {
+	Entrypoint string `json:"entrypoint,omitempty"` // e.g. "frontend/worker.js"
+}
+
+type PluginUIExtensions struct {
+	Sidebar          []PluginSidebarExtension   `json:"sidebar,omitempty"`
+	DashboardWidgets []PluginDashboardExtension `json:"dashboard_widgets,omitempty"`
+	ServerTabs       []PluginServerTabExtension `json:"server_tabs,omitempty"`
+}
+
+type PluginSidebarExtension struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Icon  string `json:"icon,omitempty"`
+	Badge string `json:"badge,omitempty"`
+}
+
+type PluginDashboardExtension struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+type PluginServerTabExtension struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// DTOs for Plugin Store & Install
+type PluginInspectResponse struct {
+	Manifest          PluginManifest `json:"manifest"`
+	SHA256            string         `json:"sha256"`
+	HasSignature      bool           `json:"has_signature"`
+	SignatureVerified bool           `json:"signature_verified"`
+	SignerKeyID       string         `json:"signer_key_id,omitempty"`
+	SignerName        string         `json:"signer_name,omitempty"`
+	ArchiveFormat     string         `json:"archive_format"` // "zip" | "tar.gz"
+	SizeBytes         int64          `json:"size_bytes"`
+	ReadmeMarkdown    string         `json:"readme_markdown,omitempty"`
+	IconSVG           string         `json:"icon_svg,omitempty"`
+}
+
+type InstallPluginRequest struct {
+	URL                string   `json:"url,omitempty"`
+	ExpectedSHA256     string   `json:"expected_sha256,omitempty"`
+	GrantedPermissions []string `json:"granted_permissions,omitempty"`
+	EnableImmediately  bool     `json:"enable_immediately,omitempty"`
+}
+
+type PluginCallRequest struct {
+	Action  string      `json:"action"`
+	Payload interface{} `json:"payload,omitempty"`
+}
+
+type PluginCallResponse struct {
+	Success bool        `json:"success"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
+
+type PluginCatalogIndex struct {
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	URL         string              `json:"url,omitempty"`
+	UpdatedAt   string              `json:"updated_at,omitempty"`
+	Plugins     []PluginCatalogItem `json:"plugins"`
+}
+
+type PluginCatalogItem struct {
+	ID               string               `json:"id"`
+	Name             string               `json:"name"`
+	Version          string               `json:"version"`
+	Description      string               `json:"description"`
+	Author           string               `json:"author"`
+	Homepage         string               `json:"homepage,omitempty"`
+	License          string               `json:"license,omitempty"`
+	DownloadURL      string               `json:"download_url"`
+	SHA256           string               `json:"sha256"`
+	IconURL          string               `json:"icon_url,omitempty"`
+	IconSVG          string               `json:"icon_svg,omitempty"`
+	ReadmeMarkdown   string               `json:"readme_markdown,omitempty"`
+	RuntimeType      string               `json:"runtime_type"`
+	Permissions      []string             `json:"permissions"`
+	UIExtensions     PluginUIExtensions   `json:"ui_extensions,omitempty"`
+	IsInstalled      bool                 `json:"is_installed,omitempty"`
+	InstalledVersion string               `json:"installed_version,omitempty"`
+	HasUpdate        bool                 `json:"has_update,omitempty"`
 }

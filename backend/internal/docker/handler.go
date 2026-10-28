@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/kraken/admin-tool/backend/internal/audit"
 	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/models"
+	"github.com/kraken/admin-tool/backend/internal/registry"
 	"gorm.io/gorm"
 )
 
@@ -597,6 +599,119 @@ func (h *Handler) RemoveImageHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Image removed successfully"})
 }
 
+// CheckImageUpdatesHandler handles GET /api/docker/images/updates
+func (h *Handler) CheckImageUpdatesHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	imageID := strings.TrimSpace(r.URL.Query().Get("id"))
+
+	regClient := registry.NewClient()
+	cli, err := h.Service.GetClient(r.Context(), serverID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	if imageID != "" {
+		inspect, _, err := cli.ImageInspectWithRaw(r.Context(), imageID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		targetRef := imageID
+		if len(inspect.RepoTags) > 0 && inspect.RepoTags[0] != "<none>:<none>" {
+			targetRef = inspect.RepoTags[0]
+		}
+
+		var created time.Time
+		if inspect.Created != "" {
+			created, _ = time.Parse(time.RFC3339Nano, inspect.Created)
+		}
+
+		info, err := regClient.CheckUpdates(r.Context(), targetRef, inspect.ID, created)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		info.ImageID = inspect.ID
+		info.RepoTags = inspect.RepoTags
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(info)
+		return
+	}
+
+	// Bulk check for images on server
+	images, err := h.Service.ListImagesOnServer(r.Context(), serverID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	var results []models.ImageUpdateInfo
+	for _, img := range images {
+		if len(img.RepoTags) == 0 || img.RepoTags[0] == "<none>:<none>" {
+			continue
+		}
+		created := time.Unix(img.Created, 0)
+		info, err := regClient.CheckUpdates(r.Context(), img.RepoTags[0], img.ID, created)
+		if err == nil {
+			info.ImageID = img.ID
+			info.RepoTags = img.RepoTags
+			results = append(results, *info)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"data": results,
+	})
+}
+
+// UpdateImageHandler handles POST /api/docker/images/update
+func (h *Handler) UpdateImageHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	var req models.UpdateImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+	if req.ServerID == 0 {
+		req.ServerID = serverID
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	res, err := h.Service.UpdateImageOnServer(r.Context(), req)
+	if err != nil {
+		audit.Log(h.DB, userID, username, "UPDATE_IMAGE", "docker_image", req.TargetTag, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "UPDATE_IMAGE", "docker_image", req.TargetTag, fmt.Sprintf("Updated to %s (mode: %s, recreated: %d)", req.TargetTag, req.Mode, len(res.RecreatedContainers)), "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
+}
+
 // --- Docker Compose Stack Handlers ---
 
 // ListComposeStacksHandler handles GET /api/docker/stacks
@@ -775,4 +890,200 @@ func (h *Handler) DeployComposeStackHandler(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack deployed successfully"})
 }
+
+// GetComposeStackYAMLHandler handles GET /api/docker/stacks/{name}/yaml
+func (h *Handler) GetComposeStackYAMLHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	resp, err := h.Service.GetComposeStackYAML(r.Context(), serverID, name)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// UpdateComposeStackYAMLHandler handles PUT /api/docker/stacks/{name}/yaml
+func (h *Handler) UpdateComposeStackYAMLHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	var req models.UpdateStackYAMLRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.UpdateComposeStackYAML(r.Context(), serverID, name, req); err != nil {
+		audit.Log(h.DB, userID, username, "UPDATE_STACK_YAML", "docker_compose", name, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	actionDesc := "Updated compose YAML successfully"
+	if req.Redeploy {
+		actionDesc = "Updated compose YAML and redeployed stack successfully"
+	}
+	audit.Log(h.DB, userID, username, "UPDATE_STACK_YAML", "docker_compose", name, actionDesc, "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": actionDesc})
+}
+
+// GetImageDockerfileHandler handles GET /api/docker/images/dockerfile?id=... or GET /api/docker/images/{id}/dockerfile
+func (h *Handler) GetImageDockerfileHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	imageRef := chi.URLParam(r, "id")
+	if imageRef == "" {
+		imageRef = r.URL.Query().Get("id")
+	}
+	if imageRef == "" {
+		imageRef = r.URL.Query().Get("tag")
+	}
+
+	if strings.TrimSpace(imageRef) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Image ID or tag is required"})
+		return
+	}
+
+	resp, err := h.Service.GetImageDockerfile(r.Context(), serverID, imageRef)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// SaveImageDockerfileHandler handles PUT /api/docker/images/dockerfile
+func (h *Handler) SaveImageDockerfileHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+
+	var payload struct {
+		Tag        string `json:"tag"`
+		ImageID    string `json:"image_id"`
+		Dockerfile string `json:"dockerfile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	if err := h.Service.SaveImageDockerfile(r.Context(), serverID, payload.Tag, payload.ImageID, payload.Dockerfile); err != nil {
+		audit.Log(h.DB, userID, username, "SAVE_IMAGE_DOCKERFILE", "docker_image", payload.Tag, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "SAVE_IMAGE_DOCKERFILE", "docker_image", payload.Tag, "Saved Dockerfile successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Dockerfile saved successfully"})
+}
+
+// BuildImageStreamHandler handles POST /api/docker/images/build/stream
+func (h *Handler) BuildImageStreamHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+
+	var req models.BuildImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Tag) == "" || strings.TrimSpace(req.Dockerfile) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Tag and Dockerfile are required"})
+		return
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	out, err := h.Service.BuildImageStreamOnServer(r.Context(), serverID, req)
+	if err != nil {
+		audit.Log(h.DB, userID, username, "BUILD_IMAGE", "docker_image", req.Tag, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer out.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Streaming unsupported"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	dec := json.NewDecoder(out)
+	var lastErr error
+	for dec.More() {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			lastErr = err
+			break
+		}
+
+		var errCheck struct {
+			Error string `json:"error"`
+		}
+		if _ = json.Unmarshal(raw, &errCheck); errCheck.Error != "" {
+			lastErr = errors.New(errCheck.Error)
+		}
+
+		_, _ = w.Write(raw)
+		_, _ = w.Write([]byte("\n"))
+		flusher.Flush()
+	}
+
+	if lastErr != nil {
+		audit.Log(h.DB, userID, username, "BUILD_IMAGE", "docker_image", req.Tag, lastErr.Error(), "FAILED")
+	} else {
+		audit.Log(h.DB, userID, username, "BUILD_IMAGE", "docker_image", req.Tag, "Built Docker image successfully", "SUCCESS")
+	}
+}
+
 

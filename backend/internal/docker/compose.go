@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/kraken/admin-tool/backend/internal/models"
+	"gopkg.in/yaml.v3"
 )
 
 var safeStackNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
@@ -342,9 +343,20 @@ func (s *DockerService) DeployComposeStack(ctx context.Context, serverID uint, r
 		return errors.New("compose file exceeds maximum permitted size of 2MB")
 	}
 
+	// Validate YAML syntax
+	var yamlCheck interface{}
+	if err := yaml.Unmarshal([]byte(cleanYAML), &yamlCheck); err != nil {
+		return fmt.Errorf("invalid YAML syntax: %w", err)
+	}
+
 	server, err := s.GetServer(serverID)
 	if err != nil {
 		return err
+	}
+
+	upFlags := "up -d --remove-orphans"
+	if req.ForceRecreate {
+		upFlags = "up -d --force-recreate --remove-orphans"
 	}
 
 	// If host is SSH, deploy through SSH session using docker compose CLI
@@ -364,13 +376,15 @@ func (s *DockerService) DeployComposeStack(ctx context.Context, serverID uint, r
 		// Write compose file securely using base64 decoding on remote host
 		remoteDir := fmt.Sprintf("/tmp/kraken-compose-%s", req.Name)
 		encodedYAML := base64.StdEncoding.EncodeToString([]byte(cleanYAML))
-		writeCmd := fmt.Sprintf("mkdir -p %s && echo '%s' | base64 -d > %s/docker-compose.yml && cd %s && docker compose -p %s up -d",
-			remoteDir, encodedYAML, remoteDir, remoteDir, req.Name)
+		writeCmd := fmt.Sprintf("mkdir -p %s && echo '%s' | base64 -d > %s/docker-compose.yml && cd %s && docker compose -p %s %s",
+			remoteDir, encodedYAML, remoteDir, remoteDir, req.Name, upFlags)
 
 		output, err := session.CombinedOutput(writeCmd)
 		if err != nil {
 			return fmt.Errorf("docker compose deployment failed: %s %w", string(output), err)
 		}
+
+		s.persistStackConfig(serverID, req.Name, cleanYAML, remoteDir, remoteDir+"/docker-compose.yml")
 		return nil
 	}
 
@@ -389,11 +403,328 @@ func (s *DockerService) DeployComposeStack(ctx context.Context, serverID uint, r
 	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "docker", "compose", "-p", req.Name, "-f", composeFile, "up", "-d")
+	cmdArgs := []string{"compose", "-p", req.Name, "-f", composeFile, "up", "-d", "--remove-orphans"}
+	if req.ForceRecreate {
+		cmdArgs = []string{"compose", "-p", req.Name, "-f", composeFile, "up", "-d", "--force-recreate", "--remove-orphans"}
+	}
+
+	cmd := exec.CommandContext(cmdCtx, "docker", cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker compose up failed: %s %w", string(out), err)
 	}
 
+	s.persistStackConfig(serverID, req.Name, cleanYAML, tmpDir, composeFile)
 	return nil
+}
+
+// persistStackConfig saves or updates ComposeStackConfig in DB
+func (s *DockerService) persistStackConfig(serverID uint, stackName, composeYAML, workingDir, configFile string) {
+	if s.db == nil {
+		return
+	}
+	var existing models.ComposeStackConfig
+	err := s.db.Where("server_id = ? AND stack_name = ?", serverID, stackName).First(&existing).Error
+	if err == nil {
+		s.db.Model(&existing).Updates(map[string]interface{}{
+			"compose_yaml": composeYAML,
+			"working_dir":  workingDir,
+			"config_file":  configFile,
+			"updated_at":   time.Now(),
+		})
+	} else {
+		newCfg := models.ComposeStackConfig{
+			ServerID:    serverID,
+			StackName:   stackName,
+			ComposeYAML: composeYAML,
+			WorkingDir:  workingDir,
+			ConfigFile:  configFile,
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		s.db.Create(&newCfg)
+	}
+}
+
+// GetComposeStackYAML retrieves the docker-compose.yaml for a stack from DB, host filesystem, or synthesizes it
+func (s *DockerService) GetComposeStackYAML(ctx context.Context, serverID uint, stackName string) (*models.ComposeStackYAMLResponse, error) {
+	if err := ValidateStackName(stackName); err != nil {
+		return nil, err
+	}
+
+	stack, err := s.GetComposeStack(ctx, serverID, stackName)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. Check database first (user customized override)
+	if s.db != nil {
+		var cfg models.ComposeStackConfig
+		if err := s.db.Where("server_id = ? AND stack_name = ?", serverID, stackName).First(&cfg).Error; err == nil {
+			if strings.TrimSpace(cfg.ComposeYAML) != "" {
+				return &models.ComposeStackYAMLResponse{
+					Name:        stackName,
+					ComposeYAML: cfg.ComposeYAML,
+					Source:      "database",
+					ConfigFile:  cfg.ConfigFile,
+					WorkingDir:  cfg.WorkingDir,
+					IsReadOnly:  false,
+				}, nil
+			}
+		}
+
+		// 2. Check source_links table for reverse-engineered source files on host
+		var link models.SourceLink
+		if err := s.db.Where("server_id = ? AND kind = 'stack' AND target_ref = ? AND status != 'user_rejected'", serverID, stackName).
+			Order("match_score desc, updated_at desc").First(&link).Error; err == nil {
+			content, readErr := s.ReadFileFromHost(ctx, serverID, link.FilePath)
+			if readErr == nil && strings.TrimSpace(content) != "" {
+				return &models.ComposeStackYAMLResponse{
+					Name:        stackName,
+					ComposeYAML: content,
+					Source:      "source_file",
+					ConfigFile:  link.FilePath,
+					FilePath:    link.FilePath,
+					WorkingDir:  stack.WorkingDir,
+					IsReadOnly:  true,
+					MatchScore:  link.MatchScore,
+				}, nil
+			}
+		}
+	}
+
+	server, serverErr := s.GetServer(serverID)
+	firstConfigFile := ""
+	if stack.ConfigFiles != "" {
+		parts := strings.Split(stack.ConfigFiles, ",")
+		if len(parts) > 0 {
+			firstConfigFile = strings.TrimSpace(parts[0])
+		}
+	}
+
+	// 3. Check conventional host filesystem paths (local file or SSH)
+	if serverErr == nil && server != nil {
+		if IsSSHHost(server.HostURL) && firstConfigFile != "" {
+			sshClient, _, sshErr := s.GetSSHClient(ctx, serverID)
+			if sshErr == nil {
+				defer sshClient.Close()
+				session, sessErr := sshClient.NewSession()
+				if sessErr == nil {
+					defer session.Close()
+					catCmd := fmt.Sprintf("cat %s", firstConfigFile)
+					content, catErr := session.Output(catCmd)
+					if catErr == nil && len(strings.TrimSpace(string(content))) > 0 {
+						cleanContent := string(content)
+						s.persistStackConfig(serverID, stackName, cleanContent, stack.WorkingDir, firstConfigFile)
+						return &models.ComposeStackYAMLResponse{
+							Name:        stackName,
+							ComposeYAML: cleanContent,
+							Source:      "host_file",
+							ConfigFile:  firstConfigFile,
+							WorkingDir:  stack.WorkingDir,
+						}, nil
+					}
+				}
+			}
+		} else if !IsSSHHost(server.HostURL) {
+			// Local host check
+			candidates := []string{}
+			if firstConfigFile != "" {
+				candidates = append(candidates, firstConfigFile)
+			}
+			if stack.WorkingDir != "" {
+				candidates = append(candidates, filepath.Join(stack.WorkingDir, "docker-compose.yml"))
+				candidates = append(candidates, filepath.Join(stack.WorkingDir, "docker-compose.yaml"))
+				candidates = append(candidates, filepath.Join(stack.WorkingDir, "compose.yml"))
+				candidates = append(candidates, filepath.Join(stack.WorkingDir, "compose.yaml"))
+			}
+			candidates = append(candidates, filepath.Join(os.TempDir(), "kraken-stacks", stackName, "docker-compose.yml"))
+
+			for _, candidate := range candidates {
+				if data, readErr := os.ReadFile(candidate); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+					cleanContent := string(data)
+					s.persistStackConfig(serverID, stackName, cleanContent, stack.WorkingDir, candidate)
+					return &models.ComposeStackYAMLResponse{
+						Name:        stackName,
+						ComposeYAML: cleanContent,
+						Source:      "host_file",
+						ConfigFile:  candidate,
+						WorkingDir:  stack.WorkingDir,
+					}, nil
+				}
+			}
+		}
+	}
+
+	// 3. Fallback: synthesize compose YAML from running containers
+	reconstructedYAML, err := s.SynthesizeComposeYAML(ctx, serverID, stackName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reconstruct compose YAML: %w", err)
+	}
+
+	return &models.ComposeStackYAMLResponse{
+		Name:        stackName,
+		ComposeYAML: reconstructedYAML,
+		Source:      "reconstructed",
+		ConfigFile:  firstConfigFile,
+		WorkingDir:  stack.WorkingDir,
+	}, nil
+}
+
+// UpdateComposeStackYAML updates the stack YAML configuration and optionally redeploys
+func (s *DockerService) UpdateComposeStackYAML(ctx context.Context, serverID uint, stackName string, req models.UpdateStackYAMLRequest) error {
+	if err := ValidateStackName(stackName); err != nil {
+		return err
+	}
+
+	cleanYAML := strings.TrimSpace(req.ComposeYAML)
+	if cleanYAML == "" {
+		return errors.New("compose YAML content cannot be empty")
+	}
+
+	var yamlCheck interface{}
+	if err := yaml.Unmarshal([]byte(cleanYAML), &yamlCheck); err != nil {
+		return fmt.Errorf("invalid YAML syntax: %w", err)
+	}
+
+	// Update DB record
+	stack, _ := s.GetComposeStack(ctx, serverID, stackName)
+	workingDir := ""
+	configFile := ""
+	if stack != nil {
+		workingDir = stack.WorkingDir
+		configFile = stack.ConfigFiles
+	}
+	s.persistStackConfig(serverID, stackName, cleanYAML, workingDir, configFile)
+
+	// If redeploy requested, run deploy workflow
+	if req.Redeploy {
+		deployReq := models.DeployStackRequest{
+			Name:          stackName,
+			ComposeYAML:   cleanYAML,
+			ForceRecreate: req.ForceRecreate,
+		}
+		if err := s.DeployComposeStack(ctx, serverID, deployReq); err != nil {
+			return fmt.Errorf("saved configuration, but redeploy failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// SynthesizeComposeYAML builds a docker-compose.yaml equivalent by inspecting containers in the stack
+func (s *DockerService) SynthesizeComposeYAML(ctx context.Context, serverID uint, stackName string) (string, error) {
+	cli, err := s.GetClient(ctx, serverID)
+	if err != nil {
+		return "", err
+	}
+
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return "", fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	services := make(map[string]interface{})
+
+	for _, c := range containers {
+		if !strings.EqualFold(c.Labels["com.docker.compose.project"], stackName) {
+			continue
+		}
+
+		serviceName := strings.TrimSpace(c.Labels["com.docker.compose.service"])
+		if serviceName == "" {
+			serviceName = "service-" + c.ID[:8]
+		}
+
+		if _, exists := services[serviceName]; exists {
+			continue // Already processed a replica
+		}
+
+		inspect, inspectErr := cli.ContainerInspect(ctx, c.ID)
+		if inspectErr != nil {
+			// Fallback to basic summary
+			services[serviceName] = map[string]interface{}{
+				"image": c.Image,
+			}
+			continue
+		}
+
+		svcMap := make(map[string]interface{})
+		svcMap["image"] = inspect.Config.Image
+
+		// Restart policy
+		if inspect.HostConfig != nil && inspect.HostConfig.RestartPolicy.Name != "" {
+			svcMap["restart"] = inspect.HostConfig.RestartPolicy.Name
+		}
+
+		// Environment variables (exclude standard container envs)
+		var envList []string
+		for _, env := range inspect.Config.Env {
+			if strings.HasPrefix(env, "PATH=") || strings.HasPrefix(env, "HOSTNAME=") || strings.HasPrefix(env, "HOME=") {
+				continue
+			}
+			envList = append(envList, env)
+		}
+		if len(envList) > 0 {
+			sort.Strings(envList)
+			svcMap["environment"] = envList
+		}
+
+		// Ports
+		if inspect.HostConfig != nil && inspect.HostConfig.PortBindings != nil {
+			var portList []string
+			for portProto, bindings := range inspect.HostConfig.PortBindings {
+				for _, b := range bindings {
+					hostPort := b.HostPort
+					containerPort := string(portProto)
+					if b.HostIP != "" && b.HostIP != "0.0.0.0" {
+						portList = append(portList, fmt.Sprintf("%s:%s:%s", b.HostIP, hostPort, containerPort))
+					} else {
+						portList = append(portList, fmt.Sprintf("%s:%s", hostPort, containerPort))
+					}
+				}
+			}
+			if len(portList) > 0 {
+				sort.Strings(portList)
+				svcMap["ports"] = portList
+			}
+		}
+
+		// Volumes / Binds
+		if inspect.HostConfig != nil && len(inspect.HostConfig.Binds) > 0 {
+			var volList []string
+			for _, b := range inspect.HostConfig.Binds {
+				volList = append(volList, b)
+			}
+			sort.Strings(volList)
+			svcMap["volumes"] = volList
+		}
+
+		// Command & Entrypoint
+		if len(inspect.Config.Cmd) > 0 {
+			svcMap["command"] = strings.Join(inspect.Config.Cmd, " ")
+		}
+		if len(inspect.Config.Entrypoint) > 0 {
+			svcMap["entrypoint"] = strings.Join(inspect.Config.Entrypoint, " ")
+		}
+
+		services[serviceName] = svcMap
+	}
+
+	if len(services) == 0 {
+		return "", fmt.Errorf("no containers found for compose stack '%s'", stackName)
+	}
+
+	composeDoc := map[string]interface{}{
+		"version":  "3.8",
+		"services": services,
+	}
+
+	out, err := yaml.Marshal(composeDoc)
+	if err != nil {
+		return "", err
+	}
+
+	header := fmt.Sprintf("# Generated by Kraken Admin Tool from running containers of stack '%s'\n# You can edit, add services, and click 'Save & Redeploy' to apply.\n\n", stackName)
+	return header + string(out), nil
 }

@@ -43,11 +43,16 @@ services:
       KUBECONFIG: /home/kraken/.kube/config
       CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      PLUGINS_DIR: /app/data/plugins
     volumes:
       # Host Docker daemon socket to inspect and manage Docker containers & images
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host root filesystem mounted read-only to allow scanning host directories
+      - /:/host:ro
       # Host Kubeconfig to manage Kubernetes Pods & Deployments (optional, graceful fallback if absent)
       - ${HOME}/.kube/config:/home/kraken/.kube/config:ro
+      # Persistent plugins storage
+      - plugins_data:/app/data/plugins
     ports:
       - "8080:8080"
     networks:
@@ -74,6 +79,8 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  plugins_data:
     driver: local
 
 networks:

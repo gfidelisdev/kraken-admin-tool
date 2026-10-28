@@ -4,23 +4,29 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/kraken/admin-tool/backend/internal/models"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
+var dbCounter uint64
+
 func setupTestDB(t *testing.T) *gorm.DB {
-	dbFile := t.TempDir() + "/test.db"
-	db, err := gorm.Open(sqlite.Open(dbFile), &gorm.Config{})
+	idx := atomic.AddUint64(&dbCounter, 1)
+	dsn := fmt.Sprintf("file:memdb%d?mode=memory&cache=shared", idx)
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to connect database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.PasswordResetRequest{}); err != nil {
 		t.Fatalf("failed to migrate database: %v", err)
 	}
 	return db
@@ -49,25 +55,32 @@ func TestHandler_Register_Bootstrap(t *testing.T) {
 	if res.User.Role != "admin" {
 		t.Errorf("expected role 'admin' for first user, got '%s'", res.User.Role)
 	}
+	if res.User.Status != "active" {
+		t.Errorf("expected status 'active' for bootstrap admin, got '%s'", res.User.Status)
+	}
+	if res.Token == "" {
+		t.Errorf("expected token for bootstrap admin, got empty")
+	}
 }
 
-func TestHandler_Register_RestrictedWhenUsersExist(t *testing.T) {
+func TestHandler_Register_PublicUserPendingApproval(t *testing.T) {
 	db := setupTestDB(t)
 	h := NewHandler(db, "test-secret", false)
 
-	// Seed first user
+	// Seed existing admin
 	firstUser := models.User{
 		Username:     "existingadmin",
 		Email:        "admin@test.com",
 		PasswordHash: "xyz",
 		Role:         "admin",
+		Status:       "active",
 	}
 	db.Create(&firstUser)
 
-	// Attempt unauthenticated registration with AllowRegistration = false
+	// Public self-registration attempt
 	reqBody, _ := json.Marshal(models.RegisterRequest{
-		Username: "newuser",
-		Email:    "new@test.com",
+		Username: "pendinguser",
+		Email:    "pending@test.com",
 		Password: "password123",
 	})
 	req := httptest.NewRequest("POST", "/api/auth/register", bytes.NewReader(reqBody))
@@ -75,24 +88,339 @@ func TestHandler_Register_RestrictedWhenUsersExist(t *testing.T) {
 
 	h.Register(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected status 403 Forbidden, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status 201 Created for registration, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Attempt with AllowRegistration = true
-	h.AllowRegistration = true
-	req2 := httptest.NewRequest("POST", "/api/auth/register", bytes.NewReader(reqBody))
-	w2 := httptest.NewRecorder()
-	h.Register(w2, req2)
+	var resp map[string]interface{}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 
-	if w2.Code != http.StatusCreated {
-		t.Fatalf("expected status 201 Created with AllowRegistration, got %d: %s", w2.Code, w2.Body.String())
+	if resp["status"] != "pending" {
+		t.Errorf("expected status 'pending', got %v", resp["status"])
 	}
 
-	var res models.AuthResponse
-	_ = json.NewDecoder(w2.Body).Decode(&res)
-	if res.User.Role != "viewer" {
-		t.Errorf("expected public registered user to have 'viewer' role, got '%s'", res.User.Role)
+	// Try logging in before approval -> MUST be forbidden with pending message
+	loginBody, _ := json.Marshal(models.LoginRequest{
+		Username: "pendinguser",
+		Password: "password123",
+	})
+	loginReq := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for pending user login, got %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+}
+
+func TestHandler_AdminApproveUser_WithRole(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHandler(db, "test-secret", false)
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
+	pendingUser := models.User{
+		Username:     "alice",
+		Email:        "alice@test.local",
+		PasswordHash: string(hash),
+		Role:         "pending",
+		Status:       "pending",
+	}
+	db.Create(&pendingUser)
+
+	adminClaims := &Claims{
+		UserID:   1,
+		Username: "admin",
+		Role:     "admin",
+	}
+
+	// Admin approves user and attributes "operator" role
+	approveBody, _ := json.Marshal(models.ApproveUserRequest{
+		Role: "operator",
+	})
+	r := chi.NewRouter()
+	r.Post("/api/auth/users/{id}/approve", h.ApproveUser)
+
+	approveReq := httptest.NewRequest("POST", fmt.Sprintf("/api/auth/users/%d/approve", pendingUser.ID), bytes.NewReader(approveBody))
+	approveReq = approveReq.WithContext(context.WithValue(approveReq.Context(), UserContextKey, adminClaims))
+	approveRec := httptest.NewRecorder()
+
+	r.ServeHTTP(approveRec, approveReq)
+
+	if approveRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for approval, got %d: %s", approveRec.Code, approveRec.Body.String())
+	}
+
+	var updatedUser models.User
+	db.First(&updatedUser, pendingUser.ID)
+	if updatedUser.Status != "active" {
+		t.Errorf("expected status 'active', got '%s'", updatedUser.Status)
+	}
+	if updatedUser.Role != "operator" {
+		t.Errorf("expected attributed role 'operator', got '%s'", updatedUser.Role)
+	}
+
+	// Now alice can log in
+	loginBody, _ := json.Marshal(models.LoginRequest{
+		Username: "alice",
+		Password: "password123",
+	})
+	loginReq := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for approved user login, got %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+
+	var loginRes models.AuthResponse
+	_ = json.NewDecoder(loginRec.Body).Decode(&loginRes)
+	if loginRes.User.Role != "operator" {
+		t.Errorf("expected user role 'operator', got '%s'", loginRes.User.Role)
+	}
+}
+
+func TestHandler_AdminRejectUser(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHandler(db, "test-secret", false)
+
+	adminUser := models.User{
+		Username:     "admin",
+		Email:        "admin@test.local",
+		PasswordHash: "xyz",
+		Role:         "admin",
+		Status:       "active",
+	}
+	db.Create(&adminUser)
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
+	pendingUser := models.User{
+		Username:     "bob",
+		Email:        "bob@test.local",
+		PasswordHash: string(hash),
+		Role:         "pending",
+		Status:       "pending",
+	}
+	db.Create(&pendingUser)
+
+	adminClaims := &Claims{
+		UserID:   adminUser.ID,
+		Username: "admin",
+		Role:     "admin",
+	}
+
+	r := chi.NewRouter()
+	r.Post("/api/auth/users/{id}/reject", h.RejectUser)
+
+	rejectReq := httptest.NewRequest("POST", fmt.Sprintf("/api/auth/users/%d/reject", pendingUser.ID), nil)
+	rejectReq = rejectReq.WithContext(context.WithValue(rejectReq.Context(), UserContextKey, adminClaims))
+	rejectRec := httptest.NewRecorder()
+
+	r.ServeHTTP(rejectRec, rejectReq)
+
+	if rejectRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for rejection, got %d: %s", rejectRec.Code, rejectRec.Body.String())
+	}
+
+	var user models.User
+	db.First(&user, pendingUser.ID)
+	if user.Status != "rejected" {
+		t.Errorf("expected status 'rejected', got '%s'", user.Status)
+	}
+
+	// Login attempt must fail
+	loginBody, _ := json.Marshal(models.LoginRequest{
+		Username: "bob",
+		Password: "password123",
+	})
+	loginReq := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for rejected user login, got %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+}
+
+func TestHandler_PasswordRecovery_Flow(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHandler(db, "test-secret", false)
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("oldpassword123"), bcrypt.DefaultCost)
+	user := models.User{
+		Username:     "carol",
+		Email:        "carol@kraken.local",
+		PasswordHash: string(hash),
+		Role:         "operator",
+		Status:       "active",
+	}
+	db.Create(&user)
+
+	// 1. User requests password recovery from admin
+	recoveryBody, _ := json.Marshal(models.RecoverPasswordRequest{
+		UsernameOrEmail: "carol@kraken.local",
+		Note:            "Forgot my password on Monday",
+	})
+	recReq := httptest.NewRequest("POST", "/api/auth/recover-password", bytes.NewReader(recoveryBody))
+	recRes := httptest.NewRecorder()
+	h.RequestPasswordRecovery(recRes, recReq)
+
+	if recRes.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for recovery request, got %d: %s", recRes.Code, recRes.Body.String())
+	}
+
+	// 2. Admin lists password recovery requests
+	listReq := httptest.NewRequest("GET", "/api/auth/password-recovery-requests", nil)
+	listRec := httptest.NewRecorder()
+	h.ListPasswordRecoveryRequests(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for list requests, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+
+	var requests []models.PasswordResetRequest
+	_ = json.NewDecoder(listRec.Body).Decode(&requests)
+	if len(requests) != 1 || requests[0].Username != "carol" {
+		t.Fatalf("expected 1 recovery request for carol, got %v", requests)
+	}
+
+	// 3. Admin resolves request by setting new password
+	adminClaims := &Claims{
+		UserID:   1,
+		Username: "admin",
+		Role:     "admin",
+	}
+
+	r := chi.NewRouter()
+	r.Post("/api/auth/password-recovery-requests/{id}/resolve", h.ResolvePasswordRecoveryRequest)
+
+	resolveBody, _ := json.Marshal(models.AdminResetPasswordRequest{
+		NewPassword: "newsecretpassword123",
+	})
+	resolveReq := httptest.NewRequest("POST", fmt.Sprintf("/api/auth/password-recovery-requests/%d/resolve", requests[0].ID), bytes.NewReader(resolveBody))
+	resolveReq = resolveReq.WithContext(context.WithValue(resolveReq.Context(), UserContextKey, adminClaims))
+	resolveRec := httptest.NewRecorder()
+
+	r.ServeHTTP(resolveRec, resolveReq)
+
+	if resolveRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for resolving request, got %d: %s", resolveRec.Code, resolveRec.Body.String())
+	}
+
+	// 4. Carol logs in with newly assigned password
+	loginBody, _ := json.Marshal(models.LoginRequest{
+		Username: "carol",
+		Password: "newsecretpassword123",
+	})
+	loginReq := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for login with new password, got %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+}
+
+func TestHandler_AdminResetPassword_AutoGenerate(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHandler(db, "test-secret", false)
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("originalpass123"), bcrypt.DefaultCost)
+	user := models.User{
+		Username:     "david",
+		Email:        "david@kraken.local",
+		PasswordHash: string(hash),
+		Role:         "viewer",
+		Status:       "active",
+	}
+	db.Create(&user)
+
+	adminClaims := &Claims{
+		UserID:   1,
+		Username: "admin",
+		Role:     "admin",
+	}
+
+	r := chi.NewRouter()
+	r.Post("/api/auth/users/{id}/reset-password", h.AdminResetPassword)
+
+	// Admin calls reset-password with empty new_password to auto-generate
+	resetReq := httptest.NewRequest("POST", fmt.Sprintf("/api/auth/users/%d/reset-password", user.ID), bytes.NewReader([]byte("{}")))
+	resetReq = resetReq.WithContext(context.WithValue(resetReq.Context(), UserContextKey, adminClaims))
+	resetRec := httptest.NewRecorder()
+
+	r.ServeHTTP(resetRec, resetReq)
+
+	if resetRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for auto-generated password reset, got %d: %s", resetRec.Code, resetRec.Body.String())
+	}
+
+	var res map[string]interface{}
+	_ = json.NewDecoder(resetRec.Body).Decode(&res)
+	generatedPass, ok := res["new_password"].(string)
+	if !ok || len(generatedPass) < 8 {
+		t.Fatalf("expected generated password of length >= 8, got '%v'", generatedPass)
+	}
+
+	// Verify user can login with generated password
+	loginBody, _ := json.Marshal(models.LoginRequest{
+		Username: "david",
+		Password: generatedPass,
+	})
+	loginReq := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for login with auto-generated password, got %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+}
+
+func TestHandler_MasterAdminRecovery(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHandler(db, "my-super-secret-jwt-key", false)
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("lostpass123"), bcrypt.DefaultCost)
+	adminUser := models.User{
+		Username:     "admin",
+		Email:        "admin@kraken.local",
+		PasswordHash: string(hash),
+		Role:         "admin",
+		Status:       "active",
+	}
+	db.Create(&adminUser)
+
+	// Attempt with wrong key -> 401
+	recoveryBody, _ := json.Marshal(models.MasterRecoveryRequest{
+		Username:    "admin",
+		NewPassword: "newemergencyadminpassword123",
+	})
+	badReq := httptest.NewRequest("POST", "/api/auth/admin-recovery", bytes.NewReader(recoveryBody))
+	badReq.Header.Set("X-Master-Key", "wrong-key")
+	badRec := httptest.NewRecorder()
+	h.MasterAdminRecovery(badRec, badReq)
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for bad master key, got %d", badRec.Code)
+	}
+
+	// Attempt with valid master key
+	goodReq := httptest.NewRequest("POST", "/api/auth/admin-recovery", bytes.NewReader(recoveryBody))
+	goodReq.Header.Set("X-Master-Key", "my-super-secret-jwt-key")
+	goodRec := httptest.NewRecorder()
+	h.MasterAdminRecovery(goodRec, goodReq)
+	if goodRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid master recovery, got %d: %s", goodRec.Code, goodRec.Body.String())
+	}
+
+	// Login with recovered admin password
+	loginBody, _ := json.Marshal(models.LoginRequest{
+		Username: "admin",
+		Password: "newemergencyadminpassword123",
+	})
+	loginReq := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for admin login after recovery, got %d: %s", loginRec.Code, loginRec.Body.String())
 	}
 }
 
@@ -106,6 +434,7 @@ func TestHandler_ChangePassword(t *testing.T) {
 		Email:        "test@example.com",
 		PasswordHash: string(hash),
 		Role:         "operator",
+		Status:       "active",
 	}
 	db.Create(&user)
 

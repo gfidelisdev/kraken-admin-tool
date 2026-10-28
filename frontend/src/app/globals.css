@@ -48,6 +48,569 @@
   }
 }
 
+/* ==========================================================================
+   THEME: LIGHT
+   ========================================================================== */
+html[data-theme="light"],
+.theme-light {
+  color-scheme: light;
+  --background: 210 40% 98%;
+  --foreground: 222 47% 11%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 47% 11%;
+
+  --primary: 199 89% 44%;
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 210 40% 96%;
+  --secondary-foreground: 222 47% 11%;
+
+  --muted: 210 40% 95%;
+  --muted-foreground: 215 16% 47%;
+
+  --accent: 210 40% 95%;
+  --accent-foreground: 222 47% 11%;
+
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  --border: 214 32% 90%;
+  --input: 214 32% 90%;
+  --ring: 199 89% 44%;
+}
+
+html[data-theme="light"] body,
+.theme-light body {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+/* Background mappings */
+html[data-theme="light"] .bg-\[\#0b0f19\],
+.theme-light .bg-\[\#0b0f19\] {
+  background-color: #f8fafc !important;
+}
+
+html[data-theme="light"] .bg-\[\#090d16\],
+.theme-light .bg-\[\#090d16\] {
+  background-color: #ffffff !important;
+}
+
+html[data-theme="light"] header.bg-\[\#090d16\]\/80,
+.theme-light header.bg-\[\#090d16\]\/80 {
+  background-color: rgba(255, 255, 255, 0.85) !important;
+  border-color: #e2e8f0 !important;
+}
+
+html[data-theme="light"] .bg-\[\#080d18\],
+.theme-light .bg-\[\#080d18\] {
+  background-color: #f1f5f9 !important;
+}
+
+html[data-theme="light"] .bg-slate-950,
+html[data-theme="light"] .bg-slate-950\/40,
+html[data-theme="light"] .bg-slate-950\/60,
+html[data-theme="light"] .bg-slate-950\/70,
+html[data-theme="light"] .bg-slate-950\/80,
+html[data-theme="light"] .bg-black\/90,
+html[data-theme="light"] .bg-black\/75,
+html[data-theme="light"] .bg-black\/70,
+.theme-light .bg-slate-950 {
+  background-color: #f1f5f9 !important;
+}
+
+html[data-theme="light"] .bg-slate-900,
+html[data-theme="light"] .bg-slate-900\/90,
+html[data-theme="light"] .bg-slate-900\/80,
+html[data-theme="light"] .bg-slate-900\/60,
+html[data-theme="light"] .bg-slate-900\/50,
+.theme-light .bg-slate-900 {
+  background-color: #ffffff !important;
+}
+
+html[data-theme="light"] .bg-slate-800,
+html[data-theme="light"] .bg-slate-800\/90,
+html[data-theme="light"] .bg-slate-800\/80,
+html[data-theme="light"] .bg-slate-800\/60,
+html[data-theme="light"] .bg-slate-800\/40,
+.theme-light .bg-slate-800 {
+  background-color: #f1f5f9 !important;
+}
+
+/* Border mappings */
+html[data-theme="light"] .border-slate-800,
+html[data-theme="light"] .border-slate-800\/80,
+html[data-theme="light"] .border-slate-750,
+html[data-theme="light"] .border-slate-700,
+html[data-theme="light"] .border-slate-700\/60,
+.theme-light .border-slate-800 {
+  border-color: #e2e8f0 !important;
+}
+
+/* Text mappings */
+html[data-theme="light"] .text-white,
+html[data-theme="light"] .text-slate-100,
+html[data-theme="light"] .text-slate-200,
+.theme-light .text-white {
+  color: #0f172a !important;
+}
+
+html[data-theme="light"] .text-slate-300,
+html[data-theme="light"] .text-slate-400,
+.theme-light .text-slate-300 {
+  color: #334155 !important;
+}
+
+html[data-theme="light"] .text-slate-500,
+.theme-light .text-slate-500 {
+  color: #64748b !important;
+}
+
+/* Form controls & Modals */
+html[data-theme="light"] input,
+html[data-theme="light"] textarea,
+html[data-theme="light"] select,
+.theme-light input,
+.theme-light textarea,
+.theme-light select {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+html[data-theme="light"] input::placeholder,
+html[data-theme="light"] textarea::placeholder,
+.theme-light input::placeholder {
+  color: #94a3b8 !important;
+}
+
+html[data-theme="light"] .fixed.inset-0.bg-black\/75,
+html[data-theme="light"] .fixed.inset-0.bg-black\/70,
+html[data-theme="light"] .fixed.inset-0.bg-black\/50,
+html[data-theme="light"] .fixed.inset-0.bg-slate-950\/80 {
+  background-color: rgba(15, 23, 42, 0.45) !important;
+}
+
+html[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+html[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Light Mode Navigation Active Link */
+html[data-theme="light"] aside a.bg-slate-800\/90,
+.theme-light aside a.bg-slate-800\/90 {
+  background-color: #e0f2fe !important;
+  color: #0284c7 !important;
+  border-color: #bae6fd !important;
+}
+
+/* ==========================================================================
+   THEME: HIGH CONTRAST (WCAG AAA Compliance)
+   ========================================================================== */
+html[data-theme="high-contrast"],
+.theme-high-contrast {
+  color-scheme: dark;
+  --background: 0 0% 0%;
+  --foreground: 0 0% 100%;
+
+  --card: 0 0% 0%;
+  --card-foreground: 0 0% 100%;
+
+  --popover: 0 0% 0%;
+  --popover-foreground: 0 0% 100%;
+
+  --primary: 48 96% 53%;
+  --primary-foreground: 0 0% 0%;
+
+  --border: 0 0% 100%;
+  --input: 0 0% 100%;
+  --ring: 48 96% 53%;
+}
+
+html[data-theme="high-contrast"] body,
+.theme-high-contrast body {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+}
+
+html[data-theme="high-contrast"] .bg-\[\#0b0f19\],
+html[data-theme="high-contrast"] .bg-\[\#090d16\],
+html[data-theme="high-contrast"] .bg-\[\#080d18\],
+html[data-theme="high-contrast"] .bg-slate-950,
+html[data-theme="high-contrast"] .bg-slate-900,
+html[data-theme="high-contrast"] .bg-slate-800,
+html[data-theme="high-contrast"] header,
+html[data-theme="high-contrast"] aside {
+  background-color: #000000 !important;
+}
+
+html[data-theme="high-contrast"] .border-slate-800,
+html[data-theme="high-contrast"] .border-slate-750,
+html[data-theme="high-contrast"] .border-slate-700,
+html[data-theme="high-contrast"] .border {
+  border-color: #ffffff !important;
+  border-width: 1.5px !important;
+}
+
+html[data-theme="high-contrast"] .text-white,
+html[data-theme="high-contrast"] .text-slate-100,
+html[data-theme="high-contrast"] .text-slate-200,
+html[data-theme="high-contrast"] .text-slate-300,
+html[data-theme="high-contrast"] .text-slate-400 {
+  color: #ffffff !important;
+}
+
+html[data-theme="high-contrast"] .text-slate-500 {
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="high-contrast"] .text-sky-400,
+html[data-theme="high-contrast"] .text-sky-500 {
+  color: #38bdf8 !important;
+  font-weight: 700 !important;
+}
+
+html[data-theme="high-contrast"] input,
+html[data-theme="high-contrast"] textarea,
+html[data-theme="high-contrast"] select {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+  border: 2px solid #ffffff !important;
+}
+
+html[data-theme="high-contrast"] button:focus-visible,
+html[data-theme="high-contrast"] input:focus-visible,
+html[data-theme="high-contrast"] select:focus-visible,
+html[data-theme="high-contrast"] a:focus-visible {
+  outline: 3px solid #facc15 !important;
+  outline-offset: 2px !important;
+}
+
+html[data-theme="high-contrast"] ::-webkit-scrollbar-track {
+  background: #000000;
+}
+
+html[data-theme="high-contrast"] ::-webkit-scrollbar-thumb {
+  background: #ffffff;
+  border-radius: 0;
+}
+
+/* High Contrast Navigation Active Link */
+html[data-theme="high-contrast"] aside a.bg-slate-800\/90,
+.theme-high-contrast aside a.bg-slate-800\/90 {
+  background-color: #000000 !important;
+  color: #facc15 !important;
+  border: 2px solid #facc15 !important;
+}
+
+/* High contrast badges */
+html[data-theme="high-contrast"] .border-emerald-500\/30,
+html[data-theme="high-contrast"] .bg-emerald-500\/10 {
+  background-color: #000000 !important;
+  border: 2px solid #22c55e !important;
+  color: #4ade80 !important;
+  font-weight: 700 !important;
+}
+
+html[data-theme="high-contrast"] .border-rose-500\/30,
+html[data-theme="high-contrast"] .bg-rose-500\/10,
+html[data-theme="high-contrast"] .bg-red-500\/10 {
+  background-color: #000000 !important;
+  border: 2px solid #ef4444 !important;
+  color: #f87171 !important;
+  font-weight: 700 !important;
+}
+
+html[data-theme="high-contrast"] .border-amber-500\/30,
+html[data-theme="high-contrast"] .bg-amber-500\/10 {
+  background-color: #000000 !important;
+  border: 2px solid #facc15 !important;
+  color: #fde047 !important;
+  font-weight: 700 !important;
+}
+
+/* ==========================================================================
+   THEME: COLORBLIND SAFE (Okabe-Ito / Paul Tol Palette)
+   ========================================================================== */
+html[data-theme="colorblind"],
+.theme-colorblind {
+  color-scheme: dark;
+}
+
+/* Running / Success -> Sky Blue (avoiding green) */
+html[data-theme="colorblind"] .border-emerald-500\/30,
+html[data-theme="colorblind"] .bg-emerald-500\/10,
+html[data-theme="colorblind"] .bg-emerald-500\/20 {
+  background-color: rgba(2, 132, 199, 0.2) !important;
+  border-color: rgba(56, 189, 248, 0.5) !important;
+  color: #38bdf8 !important;
+}
+
+html[data-theme="colorblind"] .text-emerald-400,
+html[data-theme="colorblind"] .text-emerald-500 {
+  color: #38bdf8 !important;
+}
+
+html[data-theme="colorblind"] .bg-emerald-400,
+html[data-theme="colorblind"] .bg-emerald-500 {
+  background-color: #0284c7 !important;
+}
+
+/* Stopped / Error -> Magenta / Vermilion (avoiding confusion with green) */
+html[data-theme="colorblind"] .border-rose-500\/30,
+html[data-theme="colorblind"] .bg-rose-500\/10,
+html[data-theme="colorblind"] .bg-red-500\/10 {
+  background-color: rgba(192, 38, 211, 0.2) !important;
+  border-color: rgba(232, 121, 249, 0.5) !important;
+  color: #e879f9 !important;
+}
+
+html[data-theme="colorblind"] .text-rose-400,
+html[data-theme="colorblind"] .text-rose-500,
+html[data-theme="colorblind"] .text-red-400,
+html[data-theme="colorblind"] .text-red-500 {
+  color: #e879f9 !important;
+}
+
+html[data-theme="colorblind"] .bg-rose-400,
+html[data-theme="colorblind"] .bg-rose-500,
+html[data-theme="colorblind"] .bg-red-500 {
+  background-color: #c026d3 !important;
+}
+
+/* Pending / Warning -> Golden Amber */
+html[data-theme="colorblind"] .border-amber-500\/30,
+html[data-theme="colorblind"] .bg-amber-500\/10 {
+  background-color: rgba(245, 158, 11, 0.2) !important;
+  border-color: rgba(251, 191, 36, 0.5) !important;
+  color: #fbbf24 !important;
+}
+
+html[data-theme="colorblind"] .text-amber-400 {
+  color: #fbbf24 !important;
+}
+
+html[data-theme="colorblind"] .bg-amber-400 {
+  background-color: #f59e0b !important;
+}
+
+/* ==========================================================================
+   THEME: SEPIA / NIGHTTIME (Warm Amber & Low-Blue-Light Soothing Night Mode)
+   ========================================================================== */
+html[data-theme="sepia"],
+.theme-sepia {
+  color-scheme: dark;
+}
+
+html[data-theme="sepia"] body,
+.theme-sepia body {
+  background-color: #1a1410 !important;
+  color: #f6ebe0 !important;
+}
+
+/* Background mappings - warm roasts and espresso surfaces */
+html[data-theme="sepia"] .bg-\[\#0b0f19\],
+.theme-sepia .bg-\[\#0b0f19\] {
+  background-color: #1a1410 !important;
+}
+
+html[data-theme="sepia"] .bg-\[\#090d16\],
+.theme-sepia .bg-\[\#090d16\] {
+  background-color: #140f0c !important;
+}
+
+html[data-theme="sepia"] header.bg-\[\#090d16\]\/80,
+.theme-sepia header.bg-\[\#090d16\]\/80 {
+  background-color: rgba(20, 15, 12, 0.88) !important;
+  border-color: #3d2d22 !important;
+}
+
+html[data-theme="sepia"] .bg-\[\#080d18\],
+.theme-sepia .bg-\[\#080d18\] {
+  background-color: #120e0a !important;
+}
+
+html[data-theme="sepia"] .bg-slate-950,
+html[data-theme="sepia"] .bg-slate-950\/40,
+html[data-theme="sepia"] .bg-slate-950\/60,
+html[data-theme="sepia"] .bg-slate-950\/70,
+html[data-theme="sepia"] .bg-slate-950\/80,
+html[data-theme="sepia"] .bg-black\/90,
+html[data-theme="sepia"] .bg-black\/75,
+html[data-theme="sepia"] .bg-black\/70,
+.theme-sepia .bg-slate-950 {
+  background-color: #201812 !important;
+}
+
+html[data-theme="sepia"] .bg-slate-900,
+html[data-theme="sepia"] .bg-slate-900\/90,
+html[data-theme="sepia"] .bg-slate-900\/80,
+html[data-theme="sepia"] .bg-slate-900\/60,
+html[data-theme="sepia"] .bg-slate-900\/50,
+.theme-sepia .bg-slate-900 {
+  background-color: #281f18 !important;
+}
+
+html[data-theme="sepia"] .bg-slate-800,
+html[data-theme="sepia"] .bg-slate-800\/90,
+html[data-theme="sepia"] .bg-slate-800\/80,
+html[data-theme="sepia"] .bg-slate-800\/60,
+html[data-theme="sepia"] .bg-slate-800\/40,
+.theme-sepia .bg-slate-800 {
+  background-color: #362a21 !important;
+}
+
+/* Border mappings - warm earthy borders */
+html[data-theme="sepia"] .border-slate-800,
+html[data-theme="sepia"] .border-slate-800\/80,
+html[data-theme="sepia"] .border-slate-750,
+html[data-theme="sepia"] .border-slate-700,
+html[data-theme="sepia"] .border-slate-700\/60,
+.theme-sepia .border-slate-800 {
+  border-color: #453326 !important;
+}
+
+/* Text mappings - warm linen cream and sepia tones */
+html[data-theme="sepia"] .text-white,
+html[data-theme="sepia"] .text-slate-100,
+html[data-theme="sepia"] .text-slate-200,
+.theme-sepia .text-white {
+  color: #f6ebe0 !important;
+}
+
+html[data-theme="sepia"] .text-slate-300,
+html[data-theme="sepia"] .text-slate-400,
+.theme-sepia .text-slate-300 {
+  color: #d7c3b0 !important;
+}
+
+html[data-theme="sepia"] .text-slate-500,
+.theme-sepia .text-slate-500 {
+  color: #9e8b79 !important;
+}
+
+/* Accent & link mappings - amber / warm gold */
+html[data-theme="sepia"] .text-sky-400,
+html[data-theme="sepia"] .text-sky-500 {
+  color: #fbbf24 !important;
+}
+
+html[data-theme="sepia"] .bg-sky-500,
+html[data-theme="sepia"] .bg-sky-600 {
+  background-color: #d97706 !important;
+}
+
+/* Sepia Active Nav Link */
+html[data-theme="sepia"] aside a.bg-slate-800\/90,
+.theme-sepia aside a.bg-slate-800\/90 {
+  background-color: #38271a !important;
+  color: #fbbf24 !important;
+  border-color: #854d0e !important;
+}
+
+/* Form controls & Modals */
+html[data-theme="sepia"] input,
+html[data-theme="sepia"] textarea,
+html[data-theme="sepia"] select,
+.theme-sepia input,
+.theme-sepia textarea,
+.theme-sepia select {
+  background-color: #201812 !important;
+  color: #f6ebe0 !important;
+  border-color: #4f3b2c !important;
+}
+
+html[data-theme="sepia"] input::placeholder,
+html[data-theme="sepia"] textarea::placeholder,
+.theme-sepia input::placeholder {
+  color: #94806f !important;
+}
+
+html[data-theme="sepia"] button:focus-visible,
+html[data-theme="sepia"] input:focus-visible,
+html[data-theme="sepia"] select:focus-visible,
+html[data-theme="sepia"] a:focus-visible {
+  outline: 2px solid #d97706 !important;
+  outline-offset: 1px !important;
+}
+
+html[data-theme="sepia"] .fixed.inset-0.bg-black\/75,
+html[data-theme="sepia"] .fixed.inset-0.bg-black\/70,
+html[data-theme="sepia"] .fixed.inset-0.bg-black\/50,
+html[data-theme="sepia"] .fixed.inset-0.bg-slate-950\/80 {
+  background-color: rgba(18, 14, 10, 0.78) !important;
+}
+
+html[data-theme="sepia"] ::-webkit-scrollbar-track {
+  background: #1a1410;
+}
+
+html[data-theme="sepia"] ::-webkit-scrollbar-thumb {
+  background: #4a382b;
+}
+
+html[data-theme="sepia"] ::-webkit-scrollbar-thumb:hover {
+  background: #5e4737;
+}
+
+/* Sepia status badges - warm olive, terracotta, and amber */
+html[data-theme="sepia"] .border-emerald-500\/30,
+html[data-theme="sepia"] .bg-emerald-500\/10,
+html[data-theme="sepia"] .bg-emerald-500\/20 {
+  background-color: rgba(142, 172, 114, 0.15) !important;
+  border-color: rgba(167, 192, 128, 0.4) !important;
+  color: #a7c080 !important;
+}
+
+html[data-theme="sepia"] .text-emerald-400,
+html[data-theme="sepia"] .text-emerald-500 {
+  color: #a7c080 !important;
+}
+
+html[data-theme="sepia"] .border-rose-500\/30,
+html[data-theme="sepia"] .bg-rose-500\/10,
+html[data-theme="sepia"] .bg-red-500\/10 {
+  background-color: rgba(230, 126, 128, 0.15) !important;
+  border-color: rgba(230, 126, 128, 0.4) !important;
+  color: #e67e80 !important;
+}
+
+html[data-theme="sepia"] .text-rose-400,
+html[data-theme="sepia"] .text-rose-500,
+html[data-theme="sepia"] .text-red-400,
+html[data-theme="sepia"] .text-red-500 {
+  color: #e67e80 !important;
+}
+
+html[data-theme="sepia"] .border-amber-500\/30,
+html[data-theme="sepia"] .bg-amber-500\/10 {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+  border-color: rgba(251, 191, 36, 0.4) !important;
+  color: #fbbf24 !important;
+}
+
+html[data-theme="sepia"] .text-amber-400 {
+  color: #fbbf24 !important;
+}
+
+/* Forced Colors Mode Fallback (Windows High Contrast) */
+@media (forced-colors: active) {
+  * {
+    forced-color-adjust: auto;
+  }
+}
+
 /* Custom scrollbar for dark mode */
 ::-webkit-scrollbar {
   width: 8px;

@@ -47,3 +47,44 @@ _Avoid_: Box, virtual process
 **Workload**:
 An orchestrated application unit, encompassing Docker containers, Compose stacks, and Kubernetes deployments/pods.
 _Avoid_: Task, job
+
+### Source Discovery & Image Lifecycle
+
+**Search Directory**:
+An administrator-configured directory path on a target host scanned recursively for author-created Dockerfiles and Compose files.
+_Avoid_: Scan path, watch folder
+
+**Source Link**:
+A reverse-engineered relationship between a Docker image or Compose stack and a host filesystem source file, established through layer alignment and token scoring.
+_Avoid_: File match, source bind
+
+**Retain Upgrade**:
+An image update that stays within the current major and minor release branch (or base OS security rebuild), remediating CVEs with zero breaking API changes.
+_Avoid_: Safe update, patch bump
+
+**Full Upgrade**:
+An image update to the latest stable upstream release on Docker Hub matching the distribution variant.
+_Avoid_: Major jump, latest pull
+
+### Extensibility & Plugin Architecture
+
+**Plugin**:
+A self-contained extension bundle (`.zip` or `.tar.gz`) containing a `plugin.json` manifest, optional frontend Web Worker logic, and optional backend WASM/container runtime executable.
+_Avoid_: Addon, extension pack
+
+**Web Worker Sandbox**:
+The isolated browser thread in which plugin frontend logic executes without access to the host DOM, cookies, or localStorage authentication tokens.
+_Avoid_: IFrame wrapper, script sandbox
+
+**Remote UI Protocol**:
+The declarative message protocol where sandboxed Web Workers transmit JSON UI trees rendered natively by the host React application with active theme inheritance.
+_Avoid_: Virtual DOM sync, iframe bridge
+
+**WASM Sandbox**:
+An in-process WebAssembly runtime powered by pure-Go `wazero` that executes plugin binaries with memory ceilings, execution timeouts, and strictly mediated host functions (`kraken_log`, `kraken_kv_get`, `kraken_kv_set`).
+_Avoid_: CGO runner, wasm subprocess
+
+**Plugin Catalog**:
+A remote or private HTTP repository exposing an `index.json` registry of discoverable, verifiable plugins for the online store.
+_Avoid_: App marketplace, repo mirror
+

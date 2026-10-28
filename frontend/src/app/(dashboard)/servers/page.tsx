@@ -30,7 +30,10 @@ import {
   ShieldAlert,
   KeyRound,
   Download,
+  Minimize2,
+  FolderSearch,
 } from "lucide-react";
+import { SourceDirsModal } from "@/components/modals/SourceDirsModal";
 import { useServer } from "@/context/ServerContext";
 import {
   api,
@@ -39,6 +42,8 @@ import {
   checkHostPackages,
   upgradeHostPackages,
   upgradeHostPackagesStream,
+  getActiveHostUpgradeJob,
+  listActiveHostUpgradeJobs,
   updateHostPackageManager,
   updateHostSudoPolicy,
   clearHostSudoPassword,
@@ -52,10 +57,12 @@ import {
   PackageUpdate,
   PackageUpgradeLog,
   PackageUpgradeResult,
+  ActiveUpgradeJob,
 } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
+import { ProvisionKeyPanel } from "@/components/modals/ProvisionKeyPanel";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import {
   HostSetupGuideModal,
@@ -66,10 +73,13 @@ import {
   TableHeader,
   TableRow,
   TableHead,
+  SortableTableHead,
   TableBody,
   TableCell,
   TableEmpty,
 } from "@/components/ui/Table";
+import { SortControl } from "@/components/ui/SortControl";
+import { sortItems, SortDirection } from "@/lib/sort";
 
 type ConnectionType = "ssh" | "tcp" | "tls" | "local";
 
@@ -83,23 +93,16 @@ const CONNECTION_PRESETS: {
   {
     id: "ssh-password",
     type: "ssh",
-    label: "SSH (Usuário e Senha)",
-    sublabel: "Porta 22 padrão",
+    label: "SSH (Usuário/Senha)",
+    sublabel: "Porta 22 com senha",
     icon: UserCheck,
   },
   {
     id: "ssh-key",
     type: "ssh",
-    label: "SSH (Chave / Cert)",
-    sublabel: "Chave privada PEM / OpenSSH",
+    label: "SSH (Chave Privada)",
+    sublabel: "Recomendado para Nuvem",
     icon: Key,
-  },
-  {
-    id: "remote-tcp",
-    type: "tcp",
-    label: "Remote TCP (2375)",
-    sublabel: "Rede local ou VPN",
-    icon: Server,
   },
   {
     id: "secure-tls",
@@ -107,6 +110,13 @@ const CONNECTION_PRESETS: {
     label: "Secure TLS (2376)",
     sublabel: "mTLS com certificados",
     icon: Shield,
+  },
+  {
+    id: "remote-tcp",
+    type: "tcp",
+    label: "Remote TCP (2375)",
+    sublabel: "Rede local ou VPN",
+    icon: Server,
   },
   {
     id: "local-socket",
@@ -120,6 +130,17 @@ const CONNECTION_PRESETS: {
 export default function ServersPage() {
   const { servers, activeServer, setActiveServer, refreshServers, isLoading } = useServer();
   const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<string>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection("asc");
+    }
+  };
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Modal State
@@ -189,14 +210,112 @@ export default function ServersPage() {
   const [promptSudoPassword, setPromptSudoPassword] = useState("");
   const [promptSaveSudo, setPromptSaveSudo] = useState(false);
 
-  // Live Package Upgrade Console State
-  const [upgradeLogs, setUpgradeLogs] = useState<PackageUpgradeLog[]>([]);
-  const [isUpgrading, setIsUpgrading] = useState(false);
-  const [upgradeResult, setUpgradeResult] = useState<PackageUpgradeResult | null>(null);
-  const [isUpgradeConsoleOpen, setIsUpgradeConsoleOpen] = useState(false);
-  const [upgradeDuration, setUpgradeDuration] = useState<number>(0);
+  // Active Background Upgrade Jobs Map
+  const [activeJobsMap, setActiveJobsMap] = useState<Record<number, ActiveUpgradeJob>>({});
+  const [backgroundNotice, setBackgroundNotice] = useState<string | null>(null);
+
+  // Live Package Upgrade Console State (Scoped per Server ID for concurrent upgrades)
+  const [upgradingServers, setUpgradingServers] = useState<Record<number, boolean>>({});
+  const [upgradeLogsByServer, setUpgradeLogsByServer] = useState<Record<number, PackageUpgradeLog[]>>({});
+  const [upgradeResultsByServer, setUpgradeResultsByServer] = useState<Record<number, PackageUpgradeResult | null>>({});
+  const [upgradeDurationsByServer, setUpgradeDurationsByServer] = useState<Record<number, number>>({});
+  const [consoleOpenServers, setConsoleOpenServers] = useState<Record<number, boolean>>({});
   const [isLogsCopied, setIsLogsCopied] = useState(false);
+  const streamControllersRef = useRef<Record<number, AbortController>>({});
+  const packageModalServerRef = useRef<DockerServer | null>(null);
+  packageModalServerRef.current = packageModalServer;
+  const refreshServersRef = useRef(refreshServers);
+  refreshServersRef.current = refreshServers;
+
+  // Derived state for the currently active modal's server
+  const currentModalServerId = packageModalServer?.id;
+  const isUpgrading = currentModalServerId
+    ? Boolean(upgradingServers[currentModalServerId] || activeJobsMap[currentModalServerId]?.status === "running")
+    : false;
+  const upgradeLogs = useMemo(
+    () => (currentModalServerId ? upgradeLogsByServer[currentModalServerId] || [] : []),
+    [currentModalServerId, upgradeLogsByServer]
+  );
+  const upgradeResult = currentModalServerId ? (upgradeResultsByServer[currentModalServerId] || null) : null;
+  const upgradeDuration = currentModalServerId ? (upgradeDurationsByServer[currentModalServerId] || 0) : 0;
+  const isUpgradeConsoleOpen = currentModalServerId ? Boolean(consoleOpenServers[currentModalServerId]) : false;
+
+  const setIsUpgradeConsoleOpen = (open: boolean) => {
+    if (!packageModalServer) return;
+    setConsoleOpenServers((prev) => ({ ...prev, [packageModalServer.id]: open }));
+  };
+
+  const setUpgradeLogs = (updater: PackageUpgradeLog[] | ((prev: PackageUpgradeLog[]) => PackageUpgradeLog[])) => {
+    if (!packageModalServerRef.current) return;
+    const sId = packageModalServerRef.current.id;
+    setUpgradeLogsByServer((prev) => ({
+      ...prev,
+      [sId]: typeof updater === "function" ? updater(prev[sId] || []) : updater,
+    }));
+  };
+
+  const setUpgradeResult = (res: PackageUpgradeResult | null) => {
+    if (!packageModalServerRef.current) return;
+    const sId = packageModalServerRef.current.id;
+    setUpgradeResultsByServer((prev) => ({
+      ...prev,
+      [sId]: res,
+    }));
+  };
+
+  const setUpgradeDuration = (updater: number | ((prev: number) => number)) => {
+    if (!packageModalServerRef.current) return;
+    const sId = packageModalServerRef.current.id;
+    setUpgradeDurationsByServer((prev) => ({
+      ...prev,
+      [sId]: typeof updater === "function" ? updater(prev[sId] || 0) : updater,
+    }));
+  };
+
+  // Source Search Directories Modal State
+  const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  const [selectedSourceServer, setSelectedSourceServer] = useState<DockerServer | null>(null);
   const upgradeConsoleBottomRef = useRef<HTMLDivElement | null>(null);
+
+  // Poll for background upgrade jobs across servers
+  useEffect(() => {
+    let isMounted = true;
+    const fetchActiveJobs = async () => {
+      try {
+        const jobs = await listActiveHostUpgradeJobs();
+        if (!isMounted) return;
+        const mapping: Record<number, ActiveUpgradeJob> = {};
+        for (const j of jobs) {
+          mapping[j.server_id] = {
+            has_active_job: true,
+            server_id: j.server_id,
+            server_name: j.server_name,
+            status: j.status as any,
+            package_manager: j.package_manager,
+            started_at: j.started_at,
+            logs_count: j.logs_count,
+          };
+        }
+        setActiveJobsMap((prev) => {
+          const prevKeys = Object.keys(prev);
+          const hadFinished = prevKeys.some((k) => !mapping[Number(k)]);
+          if (hadFinished) {
+            refreshServersRef.current();
+          }
+          return mapping;
+        });
+      } catch {
+        // Polling failure ignored (offline or transient)
+      }
+    };
+
+    fetchActiveJobs();
+    const interval = setInterval(fetchActiveJobs, 4000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   // Auto-scroll console
   useEffect(() => {
@@ -369,6 +488,7 @@ export default function ServersPage() {
   };
 
   const handleSelectGuidePreset = (topic: HostGuideTopic) => {
+    setGuideTopic(topic);
     switch (topic) {
       case "local-socket":
         setConnectionType("local");
@@ -582,21 +702,58 @@ export default function ServersPage() {
   };
 
   const handleOpenPackagesModal = async (server: DockerServer) => {
+    // If switching between servers while a UI stream was actively running, abort previous UI stream cleanly
+    if (packageModalServer && packageModalServer.id !== server.id) {
+      const prevId = packageModalServer.id;
+      if (streamControllersRef.current[prevId]) {
+        streamControllersRef.current[prevId].abort();
+        delete streamControllersRef.current[prevId];
+      }
+    }
+
     setPackageModalServer(server);
     setPackageActionError(null);
     setPackageActionSuccess(null);
     setSelectedPackages([]);
     setSelectedPackageManager(server.package_manager || "");
     setIsPackagesLoading(true);
-    setIsUpgradeConsoleOpen(false);
-    setUpgradeLogs([]);
-    setUpgradeResult(null);
+
     try {
+      // 1. Check if an active or recent upgrade job exists on this host
+      const activeJob = await getActiveHostUpgradeJob(server.id);
+      if (activeJob && activeJob.has_active_job) {
+        setConsoleOpenServers((prev) => ({ ...prev, [server.id]: true }));
+        setUpgradingServers((prev) => ({ ...prev, [server.id]: true }));
+        if (activeJob.duration_seconds !== undefined) {
+          setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: activeJob.duration_seconds || 0 }));
+        } else if (activeJob.started_at) {
+          const elapsed = Math.round((Date.now() - new Date(activeJob.started_at).getTime()) / 1000);
+          setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: elapsed > 0 ? elapsed : 0 }));
+        }
+        // Immediately reattach to stream
+        setTimeout(() => {
+          handleTriggerUpgradePackages(undefined, undefined, true);
+        }, 50);
+      } else if (activeJob && (activeJob.status === "success" || activeJob.status === "failed")) {
+        if (activeJob.result) {
+          setUpgradeResultsByServer((prev) => ({ ...prev, [server.id]: activeJob.result || null }));
+          if (activeJob.duration_seconds !== undefined) {
+            setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: activeJob.duration_seconds || 0 }));
+          }
+        }
+      }
+
       const data = await getHostPackages(server.id);
       setPackageStatus(data);
       if (data.package_manager && data.package_manager !== "unknown") {
         setSelectedPackageManager(data.package_manager);
       }
+      setPackageModalServer((prev) => prev && prev.id === server.id ? {
+        ...prev,
+        has_saved_sudo_password: data.has_saved_sudo_password,
+        sudo_policy: data.sudo_policy,
+        package_manager: data.package_manager || prev.package_manager,
+      } : prev);
     } catch (err: any) {
       setPackageActionError(err?.message || "Falha ao carregar pacotes do servidor");
     } finally {
@@ -619,21 +776,33 @@ export default function ServersPage() {
     }
   };
 
-  const handleTriggerCheckPackages = async (overridePassword?: string) => {
+  const handleTriggerCheckPackages = async (overridePassword?: string, saveSudoPolicy?: string) => {
     if (!packageModalServer) return;
-    const pwd = overridePassword || (packageModalServer.has_saved_sudo_password ? undefined : "");
+    const hasSaved = packageStatus?.has_saved_sudo_password ?? packageModalServer.has_saved_sudo_password;
+    const pwd = overridePassword !== undefined ? overridePassword : (hasSaved ? undefined : "");
     setIsPackagesLoading(true);
     setPackageActionError(null);
     setPackageActionSuccess(null);
     try {
       const pm = selectedPackageManager && selectedPackageManager !== "auto" ? selectedPackageManager : undefined;
-      const updated = await checkHostPackages(packageModalServer.id, pwd, pm);
+      const updated = await checkHostPackages(packageModalServer.id, pwd, pm, saveSudoPolicy);
       setPackageStatus(updated);
       if (updated.package_manager && updated.package_manager !== "unknown") {
         setSelectedPackageManager(updated.package_manager);
         packageModalServer.package_manager = updated.package_manager;
       }
-      setPackageActionSuccess(`Verificação concluída! ${updated.available_updates_count} atualização(ões) encontrada(s).`);
+      if (updated.has_saved_sudo_password !== undefined) {
+        packageModalServer.has_saved_sudo_password = updated.has_saved_sudo_password;
+        packageModalServer.sudo_policy = updated.sudo_policy;
+      }
+      const count = updated.available_updates_count ?? updated.updates_count ?? (updated.updates ? updated.updates.length : 0);
+      if (count === 0) {
+        setPackageActionSuccess("Verificação concluída! Nenhuma atualização encontrada.");
+      } else if (count === 1) {
+        setPackageActionSuccess("Verificação concluída! 1 atualização encontrada.");
+      } else {
+        setPackageActionSuccess(`Verificação concluída! ${count} atualizações encontradas.`);
+      }
       await refreshServers();
     } catch (err: any) {
       const errMsg = err?.message || "";
@@ -641,14 +810,16 @@ export default function ServersPage() {
       if (errCode === "PACKAGE_MANAGER_UNKNOWN" || errMsg.includes("identify package manager")) {
         setPackageActionError("Não foi possível detectar o gerenciador de pacotes. Selecione-o no menu suspenso.");
       } else if (
-        errMsg.toLowerCase().includes("sudo password required") ||
         errCode === "SUDO_PASSWORD_REQUIRED" ||
         errCode === "INVALID_SUDO_PASSWORD" ||
-        err?.status === 400 ||
-        err?.status === 403
+        errMsg.toLowerCase().includes("sudo password required") ||
+        errMsg.toLowerCase().includes("invalid sudo password")
       ) {
         setSudoPromptPendingAction("check");
         setIsSudoPromptOpen(true);
+        if (errCode === "INVALID_SUDO_PASSWORD") {
+          setPackageActionError("A senha de sudo fornecida foi rejeitada pelo servidor remoto. Por favor, verifique.");
+        }
       } else {
         setPackageActionError(errMsg || "Falha ao verificar atualizações de pacotes");
       }
@@ -659,78 +830,161 @@ export default function ServersPage() {
 
   const handleTriggerUpgradePackages = async (
     overridePackages?: string[],
-    overridePassword?: string
+    overridePassword?: string,
+    isReattach: boolean = false,
+    saveSudoPolicy?: string
   ) => {
     if (!packageModalServer) return;
-    const pwd = overridePassword || (packageModalServer.has_saved_sudo_password ? undefined : "");
-    const pkgsToUpgrade = overridePackages !== undefined ? overridePackages : (selectedPackages.length > 0 ? selectedPackages : undefined);
-    const pm = selectedPackageManager && selectedPackageManager !== "auto" ? selectedPackageManager : undefined;
+    const targetServerId = packageModalServer.id;
+    const targetServerName = packageModalServer.name;
+    const hasSaved = packageStatus?.has_saved_sudo_password ?? packageModalServer.has_saved_sudo_password;
+    const pwd = isReattach ? undefined : (overridePassword !== undefined ? overridePassword : (hasSaved ? undefined : ""));
+    const pkgsToUpgrade = isReattach ? undefined : (overridePackages !== undefined ? overridePackages : (selectedPackages.length > 0 ? selectedPackages : undefined));
+    const pm = isReattach ? undefined : (selectedPackageManager && selectedPackageManager !== "auto" ? selectedPackageManager : undefined);
 
     setPackageActionError(null);
     setPackageActionSuccess(null);
     setIsPackagesLoading(true);
 
-    // Open console view and start streaming
-    setUpgradeLogs([]);
-    setUpgradeResult(null);
-    setIsUpgrading(true);
-    setIsUpgradeConsoleOpen(true);
+    // Open console view and start streaming for this specific server
+    if (!isReattach) {
+      setUpgradeLogsByServer((prev) => ({ ...prev, [targetServerId]: [] }));
+      setUpgradeResultsByServer((prev) => ({ ...prev, [targetServerId]: null }));
+      setUpgradeDurationsByServer((prev) => ({ ...prev, [targetServerId]: 0 }));
+    }
+    setUpgradingServers((prev) => ({ ...prev, [targetServerId]: true }));
+    setConsoleOpenServers((prev) => ({ ...prev, [targetServerId]: true }));
     const start = Date.now();
-    setUpgradeDuration(0);
+
+    // Isolated AbortController for this server's UI stream
+    const controller = new AbortController();
+    streamControllersRef.current[targetServerId] = controller;
 
     try {
       const res = await upgradeHostPackagesStream(
-        packageModalServer.id,
+        targetServerId,
         pkgsToUpgrade,
         pwd,
         pm,
         (log) => {
-          setUpgradeLogs((prev) => [...prev, log]);
-        }
+          setUpgradeLogsByServer((prev) => ({
+            ...prev,
+            [targetServerId]: [...(prev[targetServerId] || []), log],
+          }));
+        },
+        controller.signal,
+        saveSudoPolicy,
+        isReattach ? "GET" : "POST"
       );
 
       const elapsed = Math.round((Date.now() - start) / 1000);
-      setUpgradeDuration(elapsed);
-      setUpgradeResult(res);
+      setUpgradeDurationsByServer((prev) => ({
+        ...prev,
+        [targetServerId]: (prev[targetServerId] || 0) + elapsed,
+      }));
+      setUpgradeResultsByServer((prev) => ({
+        ...prev,
+        [targetServerId]: res,
+      }));
 
       if (res.success) {
-        setPackageActionSuccess(res.message || "Pacotes atualizados com sucesso!");
-        setSelectedPackages([]);
-        const updated = await getHostPackages(packageModalServer.id);
-        setPackageStatus(updated);
+        if (packageModalServerRef.current?.id === targetServerId) {
+          setPackageActionSuccess(res.message || "Pacotes atualizados com sucesso!");
+          setSelectedPackages([]);
+          const updated = await getHostPackages(targetServerId);
+          setPackageStatus(updated);
+        }
         await refreshServers();
       } else {
-        setPackageActionError(res.message || "Falha na atualização dos pacotes");
+        if (packageModalServerRef.current?.id === targetServerId) {
+          setPackageActionError(res.message || "Falha na atualização dos pacotes");
+        }
       }
     } catch (err: any) {
+      if (err?.name === "AbortError" || err?.message?.includes("aborted")) {
+        // UI stream disconnected/backgrounded intentionally.
+        // Remote job continues unaffected on the host.
+        return;
+      }
       const errMsg = err?.message || "";
       const errCode = (err as any)?.data?.code;
       if (errCode === "PACKAGE_MANAGER_UNKNOWN" || errMsg.includes("identify package manager")) {
-        setPackageActionError("Não foi possível detectar o gerenciador de pacotes. Selecione-o no menu suspenso.");
-        setIsUpgradeConsoleOpen(false);
+        if (packageModalServerRef.current?.id === targetServerId) {
+          setPackageActionError("Não foi possível detectar o gerenciador de pacotes. Selecione-o no menu suspenso.");
+          setConsoleOpenServers((prev) => ({ ...prev, [targetServerId]: false }));
+        }
       } else if (
-        errMsg.toLowerCase().includes("sudo password required") ||
         errCode === "SUDO_PASSWORD_REQUIRED" ||
         errCode === "INVALID_SUDO_PASSWORD" ||
-        err?.status === 400 ||
-        err?.status === 403
+        errMsg.toLowerCase().includes("sudo password required") ||
+        errMsg.toLowerCase().includes("invalid sudo password")
       ) {
-        setIsUpgradeConsoleOpen(false);
-        setSudoPromptPendingAction("upgrade");
-        setSudoPromptPendingPackages(pkgsToUpgrade);
-        setIsSudoPromptOpen(true);
+        if (packageModalServerRef.current?.id === targetServerId) {
+          setConsoleOpenServers((prev) => ({ ...prev, [targetServerId]: false }));
+          setSudoPromptPendingAction("upgrade");
+          setSudoPromptPendingPackages(pkgsToUpgrade);
+          setIsSudoPromptOpen(true);
+          if (errCode === "INVALID_SUDO_PASSWORD") {
+            setPackageActionError("A senha de sudo fornecida foi rejeitada pelo servidor remoto. Por favor, verifique.");
+          }
+        }
       } else {
-        setPackageActionError(errMsg || "Falha ao atualizar pacotes");
-        setUpgradeResult({
-          success: false,
-          message: errMsg || "Falha no processo de atualização",
-          error: errMsg,
-        });
+        if (packageModalServerRef.current?.id === targetServerId) {
+          setPackageActionError(errMsg || "Falha ao atualizar pacotes");
+        }
+        setUpgradeResultsByServer((prev) => ({
+          ...prev,
+          [targetServerId]: {
+            success: false,
+            message: errMsg || "Falha no processo de atualização",
+            error: errMsg,
+          },
+        }));
       }
     } finally {
-      setIsUpgrading(false);
-      setIsPackagesLoading(false);
+      setUpgradingServers((prev) => {
+        const next = { ...prev };
+        delete next[targetServerId];
+        return next;
+      });
+      delete streamControllersRef.current[targetServerId];
+      if (packageModalServerRef.current?.id === targetServerId) {
+        setIsPackagesLoading(false);
+      }
     }
+  };
+
+  const handleSendUpgradeToBackground = () => {
+    if (!packageModalServer) return;
+    const serverId = packageModalServer.id;
+    const serverName = packageModalServer.name;
+
+    // Cleanly abort UI stream reader without touching the remote detached upgrade
+    if (streamControllersRef.current[serverId]) {
+      streamControllersRef.current[serverId].abort();
+      delete streamControllersRef.current[serverId];
+    }
+
+    setUpgradingServers((prev) => {
+      const next = { ...prev };
+      delete next[serverId];
+      return next;
+    });
+
+    setActiveJobsMap((prev) => ({
+      ...prev,
+      [serverId]: {
+        has_active_job: true,
+        server_id: serverId,
+        server_name: serverName,
+        status: "running",
+        started_at: new Date().toISOString(),
+      },
+    }));
+
+    setPackageModalServer(null);
+    setBackgroundNotice(`A atualização do host "${serverName}" continua executando em segundo plano. Você pode abrir e atualizar outros hosts simultaneamente.`);
+    setTimeout(() => setBackgroundNotice(null), 8000);
   };
 
   const handleCopyUpgradeLogs = () => {
@@ -747,31 +1001,34 @@ export default function ServersPage() {
     if (!packageModalServer || !promptSudoPassword) return;
 
     const enteredPwd = promptSudoPassword;
+    const shouldSave = promptSaveSudo;
+    const savePolicy = shouldSave ? "save_securely" : undefined;
     setIsSudoPromptOpen(false);
     setPromptSudoPassword("");
 
-    if (promptSaveSudo) {
+    if (shouldSave) {
+      packageModalServer.has_saved_sudo_password = true;
+      packageModalServer.sudo_policy = "save_securely";
+      setPackageStatus((prev) => prev ? { ...prev, has_saved_sudo_password: true, sudo_policy: "save_securely" } : prev);
       try {
         await updateHostSudoPolicy(packageModalServer.id, "save_securely", enteredPwd);
-        packageModalServer.has_saved_sudo_password = true;
-        packageModalServer.sudo_policy = "save_securely";
-      } catch (err: any) {
-        setPackageActionError("Falha ao salvar política de sudo: " + err?.message);
+      } catch {
+        // Ignored or logged - the upgrade/check request will also persist it via save_sudo_policy
       }
     }
 
     if (sudoPromptPendingAction === "check") {
-      await handleTriggerCheckPackages(enteredPwd);
+      await handleTriggerCheckPackages(enteredPwd, savePolicy);
     } else if (sudoPromptPendingAction === "upgrade") {
-      await handleTriggerUpgradePackages(sudoPromptPendingPackages, enteredPwd);
+      await handleTriggerUpgradePackages(sudoPromptPendingPackages, enteredPwd, false, savePolicy);
     }
     setSudoPromptPendingAction(null);
     setSudoPromptPendingPackages(undefined);
   };
 
-  // Filter servers
+  // Filter & sort servers
   const filteredServers = useMemo(() => {
-    return servers.filter((s) => {
+    const list = servers.filter((s) => {
       const query = search.toLowerCase().trim();
       if (!query) return true;
       return (
@@ -780,7 +1037,17 @@ export default function ServersPage() {
         s.status.toLowerCase().includes(query)
       );
     });
-  }, [servers, search]);
+
+    const customGetters = {
+      name: (s: DockerServer) => s.name,
+      host_url: (s: DockerServer) => s.host_url,
+      status: (s: DockerServer) => s.status,
+      updates: (s: DockerServer) => s.available_updates_count ?? 0,
+      containers: (s: DockerServer) => s.containers_count ?? 0,
+    };
+
+    return sortItems(list, sortKey, sortDirection, customGetters);
+  }, [servers, search, sortKey, sortDirection]);
 
   const onlineCount = servers.filter((s) => s.status === "CONNECTED").length;
   const offlineCount = servers.filter((s) => s.status === "UNREACHABLE").length;
@@ -788,6 +1055,36 @@ export default function ServersPage() {
 
   return (
     <div className="space-y-6">
+      {/* Background Upgrade Notice Banner */}
+      {backgroundNotice && (
+        <div className="p-3.5 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-200 text-xs flex items-center justify-between shadow-lg animate-in fade-in">
+          <div className="flex items-center gap-2.5">
+            <RefreshCw className="h-4 w-4 text-sky-400 animate-spin shrink-0" />
+            <span>{backgroundNotice}</span>
+          </div>
+          <button
+            onClick={() => setBackgroundNotice(null)}
+            className="text-sky-400 hover:text-white text-xs px-2 py-0.5 rounded hover:bg-sky-500/20"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Global Indicator for Servers with Active Upgrades */}
+      {Object.keys(activeJobsMap).length > 0 && !backgroundNotice && (
+        <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <RefreshCw className="h-4 w-4 text-amber-400 animate-spin shrink-0" />
+            <span>
+              <strong>{Object.keys(activeJobsMap).length}</strong> servidor(es) com atualização de pacotes executando em segundo plano no host.
+            </span>
+          </div>
+          <span className="text-[11px] text-amber-300 font-mono hidden sm:inline">
+            Processos persistentes em conexões SSH simultâneas
+          </span>
+        </div>
+      )}
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -862,8 +1159,8 @@ export default function ServersPage() {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="flex items-center justify-between gap-4">
+      {/* Search and Sort */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
         <div className="relative max-w-sm flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
           <Input
@@ -873,19 +1170,71 @@ export default function ServersPage() {
             className="pl-9"
           />
         </div>
+
+        <SortControl
+          label="Ordenar Hosts:"
+          options={[
+            { value: "name", label: "Nome do Host" },
+            { value: "status", label: "Status" },
+            { value: "updates", label: "Atualizações SO" },
+            { value: "containers", label: "Containers" },
+            { value: "host_url", label: "URL de Conexão" },
+          ]}
+          currentKey={sortKey}
+          currentDirection={sortDirection}
+          onKeyChange={(k) => setSortKey(k)}
+          onDirectionToggle={() =>
+            setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
+          }
+        />
       </div>
 
       {/* Servers Table */}
       <div className="rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden shadow-sm">
-        <Table>
+        <Table aria-label="Tabela de servidores Docker e hosts">
           <TableHeader>
             <TableRow>
-              <TableHead>Nome do Host</TableHead>
-              <TableHead>URL de Conexão</TableHead>
+              <SortableTableHead
+                sortKey="name"
+                currentSortKey={sortKey}
+                currentDirection={sortDirection}
+                onSort={handleSort}
+              >
+                Nome do Host
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="host_url"
+                currentSortKey={sortKey}
+                currentDirection={sortDirection}
+                onSort={handleSort}
+              >
+                URL de Conexão
+              </SortableTableHead>
               <TableHead>Segurança / Credenciais</TableHead>
-              <TableHead>Status & Versão</TableHead>
-              <TableHead>Pacotes / SO</TableHead>
-              <TableHead>Cargas de Trabalho</TableHead>
+              <SortableTableHead
+                sortKey="status"
+                currentSortKey={sortKey}
+                currentDirection={sortDirection}
+                onSort={handleSort}
+              >
+                Status & Versão
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="updates"
+                currentSortKey={sortKey}
+                currentDirection={sortDirection}
+                onSort={handleSort}
+              >
+                Pacotes / SO
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="containers"
+                currentSortKey={sortKey}
+                currentDirection={sortDirection}
+                onSort={handleSort}
+              >
+                Cargas de Trabalho
+              </SortableTableHead>
               <TableHead className="text-right">Ações</TableHead>
             </TableRow>
           </TableHeader>
@@ -1002,7 +1351,12 @@ export default function ServersPage() {
                           <span className="uppercase text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-bold">
                             {server.package_manager || "desconhecido"}
                           </span>
-                          {(server.available_updates_count || 0) > 0 ? (
+                          {activeJobsMap[server.id] ? (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30 animate-pulse">
+                              <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                              Atualizando...
+                            </span>
+                          ) : (server.available_updates_count || 0) > 0 ? (
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">
                               {server.available_updates_count} atualizações
                             </span>
@@ -1035,14 +1389,45 @@ export default function ServersPage() {
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end space-x-1.5">
                         <Button
+                          variant={activeJobsMap[server.id] ? "default" : "outline"}
+                          size="sm"
+                          className={`text-xs h-7 px-2 ${
+                            activeJobsMap[server.id]
+                              ? "bg-sky-600 hover:bg-sky-500 text-white font-medium shadow-sm animate-pulse"
+                              : "border-slate-700 hover:border-slate-600 text-sky-300 bg-slate-900/40"
+                          }`}
+                          onClick={() => handleOpenPackagesModal(server)}
+                          title={
+                            activeJobsMap[server.id]
+                              ? "Clique para retomar a visualização da atualização em segundo plano"
+                              : "Gerenciar pacotes e atualizações do sistema operacional"
+                          }
+                        >
+                          {activeJobsMap[server.id] ? (
+                            <>
+                              <RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" />
+                              Retomar
+                            </>
+                          ) : (
+                            <>
+                              <Package className="h-3.5 w-3.5 mr-1 text-sky-400" />
+                              Pacotes
+                            </>
+                          )}
+                        </Button>
+
+                        <Button
                           variant="outline"
                           size="sm"
-                          className="text-xs h-7 px-2 border-slate-700 hover:border-slate-600 text-sky-300 bg-slate-900/40"
-                          onClick={() => handleOpenPackagesModal(server)}
-                          title="Gerenciar pacotes e atualizações do sistema operacional"
+                          className="text-xs h-7 px-2 border-slate-700 hover:border-slate-600 text-indigo-300 bg-slate-900/40"
+                          onClick={() => {
+                            setSelectedSourceServer(server);
+                            setSourceModalOpen(true);
+                          }}
+                          title="Configurar diretórios de busca e escanear arquivos Dockerfile/Compose"
                         >
-                          <Package className="h-3.5 w-3.5 mr-1 text-sky-400" />
-                          Pacotes
+                          <FolderSearch className="h-3.5 w-3.5 mr-1 text-indigo-400" />
+                          Fontes
                         </Button>
 
                         {!isSelected ? (
@@ -1115,24 +1500,24 @@ export default function ServersPage() {
         onClose={() => setIsModalOpen(false)}
         title={editingServer ? "Editar Host Docker" : "Adicionar Host Docker Remoto"}
         description="Configure o acesso ao daemon Docker via SSH, TCP ou Socket com verificação em tempo real."
-        maxWidth="xl"
+        maxWidth="2xl"
       >
         <form onSubmit={handleSaveServer} className="space-y-4">
           {/* Quick Presets with Help Links */}
           <div className="space-y-2">
             <div className="flex items-center justify-between pb-1 border-b border-slate-800/80">
-              <span className="text-xs font-medium text-slate-300">Modelos de Conexão Rápida</span>
+              <span className="text-xs font-semibold text-slate-300">Modelos de Conexão Rápida</span>
               <button
                 type="button"
                 onClick={() => openGuide(guideTopic)}
-                className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-400 hover:text-sky-300 hover:underline transition-colors"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 hover:underline transition-colors"
               >
                 <BookOpen className="h-3.5 w-3.5" />
-                Guia passo a passo de configuração
+                <span>Guia passo a passo de configuração</span>
               </button>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
               {CONNECTION_PRESETS.map((preset) => {
                 const Icon = preset.icon;
                 const isCurrent =
@@ -1145,39 +1530,47 @@ export default function ServersPage() {
                 return (
                   <div
                     key={preset.id}
-                    className={`flex flex-col justify-between rounded-lg border p-2 transition-all ${
+                    onClick={() => {
+                      handleSelectGuidePreset(preset.id);
+                      setGuideTopic(preset.id);
+                    }}
+                    className={`group relative flex flex-col justify-between rounded-xl border p-2.5 transition-all cursor-pointer min-w-0 ${
                       isCurrent
-                        ? "border-sky-500 bg-sky-500/10 shadow-sm"
-                        : "border-slate-800 bg-slate-900/60 hover:border-slate-700"
+                        ? "border-sky-500 bg-sky-500/10 shadow-sm ring-1 ring-sky-500/30"
+                        : "border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900"
                     }`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => handleSelectGuidePreset(preset.id)}
-                      className="flex flex-col items-start text-left w-full"
-                    >
-                      <div className="flex items-center gap-1.5 text-sky-400">
-                        <Icon className="h-3.5 w-3.5 shrink-0" />
-                        <span className="text-[11px] font-semibold text-slate-200 truncate">
-                          {preset.label}
-                        </span>
+                    <div className="flex items-start justify-between gap-1.5 min-w-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className={`p-1.5 rounded-lg shrink-0 ${
+                            isCurrent
+                              ? "bg-sky-500/20 text-sky-400"
+                              : "bg-slate-800 text-slate-400 group-hover:text-slate-300"
+                          }`}
+                        >
+                          <Icon className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-slate-200 truncate">
+                            {preset.label}
+                          </p>
+                          <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                            {preset.sublabel}
+                          </p>
+                        </div>
                       </div>
-                      <span className="text-[10px] text-slate-500 font-mono truncate mt-0.5">
-                        {preset.sublabel}
-                      </span>
-                    </button>
-                    <div className="mt-1.5 pt-1 border-t border-slate-800/80 flex items-center justify-end">
+
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           openGuide(preset.id);
                         }}
-                        className="inline-flex items-center gap-0.5 text-[10px] text-slate-400 hover:text-sky-400 transition-colors"
-                        title="Ver instruções de configuração"
+                        className="p-1 text-slate-500 hover:text-sky-400 rounded-md hover:bg-slate-800/80 transition-colors shrink-0 -mr-1 -mt-1"
+                        title="Ver instruções de configuração desta conexão"
                       >
-                        <HelpCircle className="h-3 w-3" />
-                        <span>Ajuda</span>
+                        <HelpCircle className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   </div>
@@ -1212,10 +1605,11 @@ export default function ServersPage() {
                 <button
                   type="button"
                   onClick={() => openGuide(sshAuthMethod === "password" ? "ssh-password" : "ssh-key")}
-                  className="inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300 hover:underline"
+                  className="inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300 hover:underline shrink-0"
                 >
                   <HelpCircle className="h-3 w-3" />
-                  Como configurar o SSH no host remoto?
+                  <span className="hidden sm:inline">Como configurar o SSH no host remoto?</span>
+                  <span className="sm:hidden">Guia SSH</span>
                 </button>
               </div>
 
@@ -1330,6 +1724,17 @@ export default function ServersPage() {
               {/* Key Fields */}
               {sshAuthMethod === "key" && (
                 <div className="space-y-2">
+                  <ProvisionKeyPanel
+                    serverHost={serverHost}
+                    serverPort={serverPort}
+                    defaultUser={sshUser}
+                    onProvisioned={(key, user) => {
+                      setSshPrivateKey(key);
+                      setSshUser(user);
+                      setSshKeyPassphrase("");
+                      setTestResult(null);
+                    }}
+                  />
                   <div>
                     <label className="text-[11px] font-medium text-slate-400">
                       Chave Privada SSH (PEM / OpenSSH)
@@ -1867,7 +2272,7 @@ export default function ServersPage() {
                       </select>
                     </div>
                     <span>•</span>
-                    <span>Sudo: {packageModalServer.has_saved_sudo_password ? "🔒 Senha Salva" : "⚡ Solicitar Sempre"}</span>
+                    <span>Sudo: {(packageStatus?.has_saved_sudo_password ?? packageModalServer.has_saved_sudo_password) ? "🔒 Senha Salva" : "⚡ Solicitar Sempre"}</span>
                     {packageStatus?.last_checked && (
                       <>
                         <span>•</span>
@@ -1890,9 +2295,9 @@ export default function ServersPage() {
                   Verificar Atualizações
                 </Button>
                 <button
-                  onClick={() => setPackageModalServer(null)}
-                  disabled={isUpgrading}
-                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  onClick={isUpgrading ? handleSendUpgradeToBackground : () => setPackageModalServer(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition"
+                  title={isUpgrading ? "Minimizar / Manter atualização em segundo plano" : "Fechar"}
                 >
                   ✕
                 </button>
@@ -2174,7 +2579,7 @@ export default function ServersPage() {
                       Atualizações Disponíveis
                     </span>
                     <span className="text-2xl font-bold text-white mt-1 block">
-                      {packageStatus?.available_updates_count ?? packageModalServer.available_updates_count ?? 0}
+                      {packageStatus?.available_updates_count ?? packageStatus?.updates_count ?? packageModalServer.available_updates_count ?? 0}
                     </span>
                   </div>
 
@@ -2183,11 +2588,11 @@ export default function ServersPage() {
                       Atualizações de Segurança
                     </span>
                     <span className={`text-2xl font-bold mt-1 block ${
-                      (packageStatus?.security_updates_count || packageModalServer.security_updates_count || 0) > 0
+                      (packageStatus?.security_updates_count || packageStatus?.security_count || packageModalServer.security_updates_count || 0) > 0
                         ? "text-rose-400"
                         : "text-emerald-400"
                     }`}>
-                      {packageStatus?.security_updates_count ?? packageModalServer.security_updates_count ?? 0}
+                      {packageStatus?.security_updates_count ?? packageStatus?.security_count ?? packageModalServer.security_updates_count ?? 0}
                     </span>
                   </div>
 
@@ -2198,7 +2603,7 @@ export default function ServersPage() {
                     <Button
                       size="sm"
                       onClick={() => handleTriggerUpgradePackages()}
-                      disabled={isPackagesLoading || isUpgrading || (packageStatus?.available_updates_count === 0)}
+                      disabled={isPackagesLoading || isUpgrading || ((packageStatus?.available_updates_count ?? packageStatus?.updates_count ?? packageModalServer.available_updates_count ?? 0) === 0)}
                       className="bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20 mt-1"
                     >
                       <Download className="h-3.5 w-3.5 mr-1.5" />
@@ -2328,35 +2733,48 @@ export default function ServersPage() {
             <div className="p-4 border-t border-slate-800 bg-slate-950/60 flex items-center justify-between shrink-0">
               <span className="text-[11px] text-slate-500">
                 {isUpgradeConsoleOpen && isUpgrading
-                  ? "Aguarde a conclusão da atualização de pacotes no servidor..."
+                  ? "Atualização em andamento. Você pode enviar para segundo plano e retomar a qualquer momento."
                   : "Executado com privilégios restritos e sanitização anti-injeção de comandos."}
               </span>
               <div className="flex items-center gap-2">
-                {isUpgradeConsoleOpen && (
+                {isUpgrading ? (
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => setIsUpgradeConsoleOpen(false)}
-                    disabled={isUpgrading}
-                    className="border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200"
+                    onClick={handleSendUpgradeToBackground}
+                    className="border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-sky-300"
+                    title="Manter a atualização executando no host em segundo plano e fechar esta janela"
                   >
-                    <Package className="h-3.5 w-3.5 mr-1.5" />
-                    Voltar para Lista
+                    <Minimize2 className="h-3.5 w-3.5 mr-1.5" />
+                    Segundo Plano
                   </Button>
+                ) : (
+                  <>
+                    {isUpgradeConsoleOpen && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setIsUpgradeConsoleOpen(false)}
+                        className="border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200"
+                      >
+                        <Package className="h-3.5 w-3.5 mr-1.5" />
+                        Voltar para Lista
+                      </Button>
+                    )}
+                    <Button
+                      variant={isUpgradeConsoleOpen && upgradeResult?.success ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setPackageModalServer(null)}
+                      className={
+                        isUpgradeConsoleOpen && upgradeResult?.success
+                          ? "bg-emerald-600 hover:bg-emerald-500 text-white"
+                          : "border-slate-700 text-slate-300"
+                      }
+                    >
+                      {isUpgradeConsoleOpen && upgradeResult?.success ? "Concluir" : "Fechar"}
+                    </Button>
+                  </>
                 )}
-                <Button
-                  variant={isUpgradeConsoleOpen && upgradeResult?.success ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setPackageModalServer(null)}
-                  disabled={isUpgrading}
-                  className={
-                    isUpgradeConsoleOpen && upgradeResult?.success
-                      ? "bg-emerald-600 hover:bg-emerald-500 text-white"
-                      : "border-slate-700 text-slate-300"
-                  }
-                >
-                  {isUpgradeConsoleOpen && upgradeResult?.success ? "Concluir" : "Fechar"}
-                </Button>
               </div>
             </div>
           </div>
@@ -2440,6 +2858,20 @@ export default function ServersPage() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Source Directories Modal */}
+      {selectedSourceServer && (
+        <SourceDirsModal
+          isOpen={sourceModalOpen}
+          onClose={() => {
+            setSourceModalOpen(false);
+            setSelectedSourceServer(null);
+          }}
+          serverId={selectedSourceServer.id}
+          serverName={selectedSourceServer.name}
+          onScanCompleted={refreshServers}
+        />
       )}
     </div>
   );

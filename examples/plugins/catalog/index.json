@@ -1,0 +1,27 @@
+{
+  "name": "Kraken Community & Core Plugins",
+  "description": "Repositório oficial e curado de extensões para o Kraken Admin Tool",
+  "url": "https://plugins.kraken.dev/index.json",
+  "updated_at": "2026-10-28T12:00:00Z",
+  "plugins": [
+    {
+      "id": "com.kraken.port-auditor",
+      "name": "Host Port Auditor",
+      "version": "1.0.0",
+      "description": "Audita portas TCP abertas e serviços expostos nos servidores e containers gerenciados",
+      "author": "Kraken Core Team",
+      "homepage": "https://kraken.dev",
+      "license": "Apache-2.0",
+      "download_url": "https://plugins.kraken.dev/downloads/host-port-auditor.zip",
+      "sha256": "7bfcb101ff639d65a9244cb901d10abf0e568b6042b50b295d845b4b04026fbb",
+      "runtime_type": "wasm",
+      "permissions": [
+        "ui:sidebar",
+        "ui:dashboard_widget",
+        "docker:read",
+        "storage:kv"
+      ],
+      "readme_markdown": "# Host Port Auditor\n\nAuditoria automática de conformidade de portas TCP em hosts e containers.\n\n- Detecção de bancos de dados expostos publicamente\n- Varreduras assíncronas via WebAssembly isolado\n- Alertas e métricas integrados ao Dashboard"
+    }
+  ]
+}

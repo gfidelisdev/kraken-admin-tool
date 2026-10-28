@@ -21,10 +21,13 @@ import {
   TableHeader,
   TableRow,
   TableHead,
+  SortableTableHead,
   TableBody,
   TableCell,
   TableEmpty,
 } from "@/components/ui/Table";
+import { SortControl } from "@/components/ui/SortControl";
+import { sortItems, SortDirection } from "@/lib/sort";
 import { Select } from "@/components/ui/Select";
 import { ScaleDeploymentModal } from "@/components/modals/ScaleDeploymentModal";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
@@ -37,6 +40,17 @@ export default function DeploymentsPage() {
   const [selectedNamespace, setSelectedNamespace] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<string>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDirection("asc");
+    }
+  };
 
   // Modals state
   const [scaleTarget, setScaleTarget] = useState<K8sDeployment | null>(null);
@@ -98,14 +112,25 @@ export default function DeploymentsPage() {
   }, [deployments]);
 
   const filteredDeployments = useMemo(() => {
-    if (!search.trim()) return deployments;
-    const q = search.toLowerCase();
-    return deployments.filter((d) => {
-      const nameMatch = d.name?.toLowerCase().includes(q);
-      const imgMatch = d.images?.some((i) => i.toLowerCase().includes(q));
-      return nameMatch || imgMatch;
-    });
-  }, [deployments, search]);
+    let list = deployments;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = deployments.filter((d) => {
+        const nameMatch = d.name?.toLowerCase().includes(q);
+        const imgMatch = d.images?.some((i) => i.toLowerCase().includes(q));
+        return nameMatch || imgMatch;
+      });
+    }
+
+    const customGetters = {
+      name: (d: K8sDeployment) => d.name,
+      namespace: (d: K8sDeployment) => d.namespace,
+      replicas: (d: K8sDeployment) => d.ready_replicas || 0,
+      age: (d: K8sDeployment) => d.age || "",
+    };
+
+    return sortItems(list, sortKey, sortDirection, customGetters);
+  }, [deployments, search, sortKey, sortDirection]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -147,8 +172,8 @@ export default function DeploymentsPage() {
         </div>
       )}
 
-      {/* Namespace Filter & Search Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      {/* Namespace Filter & Search & Sort Bar */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
         <div className="w-full sm:w-56">
           <Select
             value={selectedNamespace}
@@ -157,25 +182,70 @@ export default function DeploymentsPage() {
           />
         </div>
 
-        <div className="w-full sm:w-80">
-          <Input
-            placeholder="Search deployment by name or image..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            icon={<Search className="h-4 w-4 text-slate-500" />}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+          <SortControl
+            options={[
+              { value: "name", label: "Deployment Name" },
+              { value: "namespace", label: "Namespace" },
+              { value: "replicas", label: "Ready Replicas" },
+              { value: "age", label: "Age" },
+            ]}
+            currentKey={sortKey}
+            currentDirection={sortDirection}
+            onKeyChange={(k) => setSortKey(k)}
+            onDirectionToggle={() =>
+              setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
+            }
           />
+
+          <div className="w-full sm:w-80">
+            <Input
+              placeholder="Search deployment by name or image..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              icon={<Search className="h-4 w-4 text-slate-500" />}
+            />
+          </div>
         </div>
       </div>
 
       {/* Deployments Table */}
-      <Table>
+      <Table aria-label="Kubernetes deployments table">
         <TableHeader>
           <TableRow>
-            <TableHead>Deployment</TableHead>
-            <TableHead>Namespace</TableHead>
-            <TableHead>Replicas Status</TableHead>
+            <SortableTableHead
+              sortKey="name"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Deployment
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="namespace"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Namespace
+            </SortableTableHead>
+            <SortableTableHead
+              sortKey="replicas"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Replicas Status
+            </SortableTableHead>
             <TableHead>Workload Images</TableHead>
-            <TableHead>Age</TableHead>
+            <SortableTableHead
+              sortKey="age"
+              currentSortKey={sortKey}
+              currentDirection={sortDirection}
+              onSort={handleSort}
+            >
+              Age
+            </SortableTableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>

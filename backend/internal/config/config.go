@@ -22,6 +22,7 @@ type Config struct {
 	CorsOrigins       []string
 	Environment       string
 	AllowRegistration bool
+	PluginsDir        string
 }
 
 // Load loads the configuration from environment variables with sensible defaults
@@ -70,6 +71,7 @@ func Load() *Config {
 		CorsOrigins:       origins,
 		Environment:       env,
 		AllowRegistration: getEnv("ALLOW_REGISTRATION", "false") == "true",
+		PluginsDir:        getEnv("PLUGINS_DIR", "./data/plugins"),
 	}
 }
 

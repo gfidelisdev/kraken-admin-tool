@@ -1,0 +1,549 @@
+# Kraken Admin Tool — AI Plugin Developer Instruction Guide
+
+> **Target Audience**: AI Coding Assistants, LLMs (ChatGPT, Claude, Gemini, DeepSeek, Cursor, Copilot), and Autonomous Agents.  
+> **Mission**: Generate a production-grade, self-contained, and secure plugin for **Kraken Admin Tool** in an isolated workspace.
+
+---
+
+## 1. System Architecture & Security Model
+
+Plugins in Kraken Admin Tool run inside a strictly isolated, multi-tier sandbox:
+
+1. **Frontend Isolation (No IFrames)**:
+   - Plugin UI code (`frontend/worker.js`) executes inside a dedicated **Web Worker thread**.
+   - **Zero DOM / Storage Access**: The Web Worker has **no access** to `window`, `document`, `localStorage` (where user JWT tokens reside), cookies, or parent frames.
+   - **Declarative Remote UI**: The worker computes UI state and sends declarative JSON node trees via `kraken.render(uiTree)`.
+   - **Native Theme Inheritance**: The Kraken React host renders the nodes natively, automatically applying the user's active theme (Dark, Light, High Contrast, Colorblind Safe, Sepia).
+   - **Closed Shadow DOM**: Custom HTML/CSS uses a sanitized, closed ShadowRoot.
+
+2. **Backend Execution Options**:
+   - **No Backend (`"runtime": { "type": "none" }`)**: Recommended for UI-only plugins, dashboards, widgets, monitoring viewers, and direct API integrations. Requires **zero compilation** and **no Go code**.
+   - **WASM Sandbox (`"runtime": { "type": "wasm" }`)**: Embedded WebAssembly runtime powered by pure-Go `wazero`. Reads JSON request from `os.Stdin` and writes JSON response to `os.Stdout`. Quota: 64 MB memory, 15s execution timeout.
+   - **Container Sidecar (`"runtime": { "type": "container" }`)**: Runs as a managed Docker container sidecar for long-running services.
+
+3. **Built-in Kraken Auto-Builder (Source-Only Plugins)**:
+   > ⚡ **CRITICAL FOR AI ASSISTANTS**:
+   > Chat models and text generators (Microsoft Copilot, ChatGPT, Claude) typically **lack system compilers** (`go` / `tinygo`) in their generation sandboxes.
+   > **You do NOT need to synthesize or guess binary `.wasm` bytes!**
+   > Simply provide the clean Go source code in `backend/main.go` and specify `"runtime": { "type": "wasm", "entrypoint": "backend/plugin.wasm" }`.
+   > **Kraken Admin Tool will automatically detect the Go source code and compile `plugin.wasm` via its integrated builder during installation.**
+
+---
+
+## 2. Directory Layout Contract
+
+Every plugin must be created as a standalone repository or folder with this exact layout:
+
+```text
+my-plugin-root/
+├── plugin.json             # [REQUIRED] Identity, entrypoints, permissions and UI extensions
+├── README.md               # [REQUIRED] Markdown documentation shown in store/inspection
+├── icon.svg                # [OPTIONAL] Vector icon for UI navigation and cards
+├── frontend/
+│   └── worker.js           # [REQUIRED if UI is provided] Isolated Web Worker UI logic
+└── backend/
+    ├── main.go             # [REQUIRED if runtime.type is "wasm"] Go source code
+    ├── go.mod              # [OPTIONAL] Module definition (auto-created by Kraken if omitted)
+    └── plugin.wasm         # [OPTIONAL for AI] Pre-compiled WASI binary. If omitted, Kraken auto-compiles!
+```
+
+---
+
+## 3. Manifest Specification (`plugin.json`)
+
+The `plugin.json` file at the root defines the plugin's metadata, security permissions, and UI extension points.
+
+### Mode A: Pure Frontend Plugin (Zero Compilation, 100% JavaScript)
+Use this whenever your plugin only adds UI pages, dashboards, tables, or interacts with Kraken's existing APIs:
+```json
+{
+  "id": "com.mycompany.service-dashboard",
+  "name": "Service Health Dashboard",
+  "version": "1.0.0",
+  "description": "Visual overview of node health and container status",
+  "author": "Your Company / Author",
+  "license": "Apache-2.0",
+  "runtime": {
+    "type": "none"
+  },
+  "frontend": {
+    "entrypoint": "frontend/worker.js"
+  },
+  "permissions": [
+    "ui:sidebar",
+    "ui:dashboard_widget",
+    "docker:read"
+  ],
+  "ui_extensions": {
+    "sidebar": [
+      {
+        "id": "nav-dashboard",
+        "title": "Health Dashboard",
+        "icon": "activity"
+      }
+    ],
+    "dashboard_widgets": [
+      {
+        "id": "widget-summary",
+        "title": "Node Status"
+      }
+    ]
+  }
+}
+```
+
+### Mode B: Plugin with Go Backend (Auto-Compiled by Kraken)
+```json
+{
+  "id": "com.mycompany.port-auditor",
+  "name": "Port Security Auditor",
+  "version": "1.0.0",
+  "description": "Audits open ports and flags security anomalies",
+  "author": "Your Company / Author",
+  "license": "Apache-2.0",
+  "runtime": {
+    "type": "wasm",
+    "entrypoint": "backend/plugin.wasm"
+  },
+  "frontend": {
+    "entrypoint": "frontend/worker.js"
+  },
+  "permissions": [
+    "ui:sidebar",
+    "ui:dashboard_widget",
+    "hosts:read",
+    "storage:kv"
+  ],
+  "ui_extensions": {
+    "sidebar": [
+      {
+        "id": "nav-auditor",
+        "title": "Port Auditor",
+        "icon": "shield-check",
+        "badge": "Audit"
+      }
+    ],
+    "dashboard_widgets": [
+      {
+        "id": "widget-summary",
+        "title": "Audit Summary"
+      }
+    ]
+  }
+}
+```
+
+### Permitted Scopes (`permissions`)
+Only declare permissions strictly required by your plugin:
+- `ui:sidebar` — Adds an entry to the Kraken left navigation menu.
+- `ui:dashboard_widget` — Renders an overview widget on the main dashboard.
+- `ui:server_tab` — Adds a tab inside individual server/host detail pages.
+- `docker:read` — Queries Docker containers, images, volumes, and stacks.
+- `docker:write` — Starts, stops, or creates Docker containers and workloads.
+- `hosts:read` — Queries remote host system package inventory and OS updates.
+- `hosts:exec` — Dispatches administrative SSH commands on target hosts.
+- `k8s:read` — Queries Kubernetes Pods, Deployments, and Namespaces.
+- `k8s:write` — Restarts or scales Kubernetes workloads.
+- `storage:kv` — Reads and writes scoped key-value persistent storage.
+- `http:outbound` — Enables outbound HTTP calls to domains declared in `allowed_hosts`.
+
+---
+
+## 4. Frontend Development (`frontend/worker.js`)
+
+In the Web Worker environment, the Kraken host automatically injects the global `self.kraken` object before your script executes.
+
+### Global `kraken` SDK Methods
+
+```javascript
+// 1. Render UI tree (declarative Remote UI)
+kraken.render(uiNode);
+
+// 2. Listen to UI events (button clicks, form submits)
+kraken.on(actionId, async (payload, eventType) => { ... });
+
+// 3. Call backend action (invokes backend/plugin.wasm or container)
+const result = await kraken.backend.call(actionName, payloadObject);
+
+// 4. Scoped persistent Key-Value storage
+await kraken.kv.set("last_run", new Date().toISOString());
+const lastRun = await kraken.kv.get("last_run");
+
+// 5. Logging (forwarded safely to host terminal and audit log)
+kraken.log("Audit complete", { count: 42 });
+
+// 6. Context variables
+const currentSurface = self.kraken.surface; // "page" | "widget" | "tab"
+const pluginId = self.kraken.pluginId;
+```
+
+### Declarative UI Components
+
+The declarative tree emitted by `kraken.render(node)` supports the following node types:
+
+| Component Type | Supported Properties | Usage / Children |
+|---|---|---|
+| `Page` | `title`, `description`, `children` | Top-level container for full-page surface |
+| `Grid` | `cols` (1, 2, 3, 4), `gap`, `children` | Responsive column layout |
+| `Card` | `title`, `description`, `children` | Elevated card container |
+| `StatCard` | `title`, `value`, `description`, `variant` (`running`, `error`, `pending`, `outline`) | Key metric indicator |
+| `Table` | `columns` (`[{key, label}]`), `rows` (`[{...}]`) | Data table with automatic styling |
+| `Button` | `id`, `title`, `variant` (`default`, `secondary`, `destructive`, `outline`), `disabled` | Interactive button triggering `kraken.on(id)` |
+| `Badge` | `label`, `variant` (`running`, `error`, `pending`, `outline`) | Status tag |
+| `Alert` | `title`, `message`, `variant` (`info`, `warning`, `error`, `success`) | Contextual callout banner |
+| `Text` | `content`, `className` | Plain or highlighted text node |
+
+### Complete Frontend Example (`frontend/worker.js`)
+
+```javascript
+// Local worker reactive state
+const state = {
+  items: [],
+  warnings: 0,
+  lastScan: "Never",
+  loading: false
+};
+
+function renderUI() {
+  const surface = self.kraken.surface || "page";
+
+  // Compact Widget Surface (Overview Dashboard)
+  if (surface === "widget") {
+    kraken.render({
+      type: "Card",
+      title: "Auditor Status",
+      children: [
+        {
+          type: "StatCard",
+          title: "Issues Detected",
+          value: String(state.warnings),
+          variant: state.warnings > 0 ? "error" : "running",
+          description: `Last run: ${state.lastScan}`
+        },
+        {
+          type: "Button",
+          id: "btn-run-audit",
+          title: state.loading ? "Auditing..." : "Scan Now",
+          disabled: state.loading
+        }
+      ]
+    });
+    return;
+  }
+
+  // Full Page Surface
+  kraken.render({
+    type: "Page",
+    title: "Port Security Auditor",
+    description: "Real-time inspection of listening services and open network ports",
+    children: [
+      {
+        type: "Grid",
+        cols: 2,
+        children: [
+          {
+            type: "StatCard",
+            title: "Total Audited",
+            value: String(state.items.length || 6),
+            variant: "running"
+          },
+          {
+            type: "StatCard",
+            title: "High Risk Flags",
+            value: String(state.warnings),
+            variant: state.warnings > 0 ? "error" : "running"
+          }
+        ]
+      },
+      {
+        type: "Card",
+        title: "Actions",
+        children: [
+          {
+            type: "Button",
+            id: "btn-run-audit",
+            title: state.loading ? "Running Audit..." : "Run Security Audit",
+            disabled: state.loading
+          }
+        ]
+      },
+      {
+        type: "Card",
+        title: "Discovered Ports & Services",
+        children: [
+          {
+            type: "Table",
+            columns: [
+              { key: "host", label: "Host" },
+              { key: "port", label: "Port" },
+              { key: "proto", label: "Protocol" },
+              { key: "service", label: "Service" },
+              { key: "risk", label: "Risk" },
+              { key: "status", label: "Status" }
+            ],
+            rows: state.items
+          }
+        ]
+      }
+    ]
+  });
+}
+
+// Event handler for button clicks
+kraken.on("btn-run-audit", async () => {
+  state.loading = true;
+  renderUI();
+
+  try {
+    // If backend WASM is enabled:
+    const res = await kraken.backend.call("audit", { timestamp: Date.now() });
+    if (res && res.findings) {
+      state.items = res.findings;
+      state.warnings = res.risk_detected || 0;
+      state.lastScan = new Date().toLocaleTimeString();
+    }
+  } catch (err) {
+    kraken.log("Audit error: " + (err.message || err));
+  } finally {
+    state.loading = false;
+    renderUI();
+  }
+});
+
+// Initial render
+renderUI();
+```
+
+---
+
+## 5. Backend Go Development & Kraken Auto-Builder
+
+### Go WASI Contract
+When `kraken.backend.call(action, payload)` is executed from the frontend:
+1. The Kraken host pipes a JSON request into `os.Stdin`:
+   ```json
+   {
+     "action": "audit",
+     "payload": { ... },
+     "plugin_id": "com.mycompany.port-auditor"
+   }
+   ```
+2. The Go program reads `os.Stdin`, computes the result, and writes JSON to `os.Stdout`.
+3. Standard library packages (`encoding/json`, `fmt`, `io`, `os`, `strings`, `time`) work out of the box with zero external dependencies.
+
+### Complete Go Template (`backend/main.go`)
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"time"
+)
+
+type Request struct {
+	Action   string          `json:"action"`
+	Payload  json.RawMessage `json:"payload"`
+	PluginID string          `json:"plugin_id"`
+}
+
+type PortFinding struct {
+	Port    int    `json:"port"`
+	Proto   string `json:"proto"`
+	Service string `json:"service"`
+	Host    string `json:"host"`
+	Status  string `json:"status"`
+	Risk    string `json:"risk"`
+}
+
+type AuditResponse struct {
+	Status        string        `json:"status"`
+	Timestamp     string        `json:"timestamp"`
+	TotalAudited  int           `json:"total_audited"`
+	RiskDetected  int           `json:"risk_detected"`
+	Findings      []PortFinding `json:"findings"`
+}
+
+func main() {
+	var req Request
+	data, err := io.ReadAll(os.Stdin)
+	if err == nil && len(data) > 0 {
+		_ = json.Unmarshal(data, &req)
+	}
+
+	// Execution logic
+	resp := AuditResponse{
+		Status:       "completed",
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		TotalAudited: 4,
+		RiskDetected: 1,
+		Findings: []PortFinding{
+			{Port: 22, Proto: "TCP", Service: "OpenSSH 8.9", Host: "srv-01", Status: "OK", Risk: "Baixo"},
+			{Port: 80, Proto: "TCP", Service: "Nginx Ingress", Host: "srv-01", Status: "OK", Risk: "Baixo"},
+			{Port: 443, Proto: "TCP", Service: "Nginx TLS", Host: "srv-01", Status: "OK", Risk: "Baixo"},
+			{Port: 6379, Proto: "TCP", Service: "Redis Unprotected", Host: "srv-01", Status: "CRÍTICO", Risk: "Alto"},
+		},
+	}
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "json marshal error: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Stdout.Write(out)
+}
+```
+
+### How Compilation Works (For AI and Developers)
+
+#### Option 1: Let Kraken Compile Automatically (Recommended for AI Chat / Copilot)
+- **Do not worry about compiling `plugin.wasm`!**
+- Include your `backend/main.go` source code inside the archive.
+- Leave `plugin.wasm` out, or include a placeholder.
+- When the user uploads or installs the `.zip` / `.tar.gz`, Kraken detects the Go source files and compiles `plugin.wasm` automatically using its internal Go wasip1 / TinyGo engine in < 1 second.
+
+#### Option 2: Pre-compilation via Docker (Developer Local Terminal)
+If the developer wants to pre-compile the binary locally before distributing:
+```bash
+# Using TinyGo:
+docker run --rm -v "$PWD":/src -w /src tinygo/tinygo:latest tinygo build -target=wasi -no-debug -o backend/plugin.wasm backend/main.go
+
+# Or using standard Go (wasip1):
+cd backend
+GOOS=wasip1 GOARCH=wasm go build -ldflags="-s -w" -o plugin.wasm main.go
+```
+
+---
+
+## 6. Host Adapter & Real Operations on Monitored Nodes
+
+Kraken allows plugins to perform **real network audits and system administration** on registered remote servers (connected via SSH or local socket), without breaking sandbox isolation.
+
+### The `needs_host_adapter` Protocol
+Because WebAssembly sandboxes cannot open raw sockets to external subnets directly, the Go backend requests Kraken to execute host operations by returning a structured `needs_host_adapter` response:
+
+```json
+{
+  "status": "needs_host_adapter",
+  "data": {
+    "operation": "network.scan_external_listeners",
+    "scope": "all_monitored_hosts",
+    "external_only": true
+  }
+}
+```
+
+Kraken checks if the user granted the required permission, executes the command across the target hosts, and automatically replaces the response with the real operational data (`status: "success"`).
+
+### Supported Host Operations:
+
+| Operation | Required Permission | Input Parameters | Output Data |
+|---|---|---|---|
+| `network.scan_external_listeners` | `hosts:read` | `{"scope": "all_monitored_hosts"}` ou `{"host": "srv-01"}` | `{"scanned_hosts": N, "ports": [{host, port, protocol, service, process, address, exposure}]}` |
+| `network.block_external_port` | `hosts:exec` | `{"host": "srv-01", "port": 8080, "protocol": "tcp"}` | `{"message": "Port blocked successfully on host"}` |
+| `hosts.list` | `hosts:read` | None | `{"hosts": [{id, name, host_url, status}]}` |
+| `hosts.exec` | `hosts:exec` | `{"host": "srv-01", "cmd": "uptime"}` | `{"stdout": "...", "exit_code": 0}` |
+
+> 🔒 **Security Rules**:
+> - Automated blocking of SSH (Port 22) is permanently denied by safety policy.
+> - The administrator must explicitly review and grant `hosts:read` and `hosts:exec` upon installing the plugin.
+
+---
+
+## 7. Packaging & Distribution
+
+Kraken supports two package archive formats: `.zip` and `.tar.gz`.
+
+### Packaging Rules
+1. **Root Directory**: `plugin.json` and `README.md` must be at the root of the archive (or enclosed in a single root folder).
+2. **Files to Include**:
+   - For UI-only plugins (`runtime: "none"`): `plugin.json`, `README.md`, `frontend/worker.js`, optional `icon.svg`.
+   - For WASM plugins: `plugin.json`, `README.md`, `frontend/worker.js`, `backend/main.go` (and optionally `backend/plugin.wasm`).
+3. **No Traversal**: Never include `..` or absolute paths (`/etc/`, `C:\`).
+4. **Limits**: Max archive size 50 MB (max uncompressed size 150 MB).
+
+### Commands to Package
+
+```bash
+# For a Pure Frontend plugin:
+zip -r my-plugin.zip plugin.json README.md frontend/
+
+# For a Plugin with Go Backend (Kraken auto-compiles backend/main.go!):
+zip -r my-plugin.zip plugin.json README.md frontend/ backend/
+
+# Tar.gz format:
+tar -czf my-plugin.tar.gz plugin.json README.md frontend/ backend/
+```
+
+---
+
+## 8. Cryptographic Signing (Ed25519)
+
+Kraken verifies publisher authenticity using Ed25519 signatures.
+
+### 1. Generate Signing Keypair
+Using the Kraken `pluginsign` utility (or OpenSSL/Go):
+```bash
+pluginsign -generate-key
+```
+
+### 2. Sign the Archive
+```bash
+pluginsign -sign my-plugin.zip -private-key <PRIVATE_KEY_HEX>
+```
+This generates `my-plugin.zip.sig`. When distributing via catalog, place `my-plugin.zip.sig` in the same download location.
+
+---
+
+## 9. Online Catalog Schema (`index.json`)
+
+To host a private or public plugin store, serve an `index.json` file via any standard HTTP server (GitHub Pages, AWS S3, Nginx):
+
+```json
+{
+  "name": "Corporate Plugin Repository",
+  "description": "Approved internal plugins for Kraken Admin Tool",
+  "url": "https://plugins.example.com/index.json",
+  "updated_at": "2026-10-28T12:00:00Z",
+  "plugins": [
+    {
+      "id": "com.mycompany.port-auditor",
+      "name": "Port Security Auditor",
+      "version": "1.0.0",
+      "description": "Audits open ports and flags security anomalies",
+      "author": "Your Company",
+      "homepage": "https://example.com/plugin",
+      "license": "Apache-2.0",
+      "download_url": "https://plugins.example.com/downloads/my-plugin.zip",
+      "sha256": "<CALCULATED_SHA256_HEX>",
+      "runtime_type": "wasm",
+      "permissions": [
+        "ui:sidebar",
+        "ui:dashboard_widget",
+        "hosts:read",
+        "storage:kv"
+      ],
+      "readme_markdown": "# Port Security Auditor\n\nFull documentation..."
+    }
+  ]
+}
+```
+
+---
+
+## 10. AI Assistant Self-Verification Checklist
+
+Before presenting the generated plugin code to the user, the AI must verify:
+
+- [ ] `plugin.json` contains valid `id` (alphanumeric with dots/dashes), `name`, `version`, `author`, and `description`.
+- [ ] If the plugin only requires UI/dashboards, `runtime.type` is set to `"none"` (no Go backend needed).
+- [ ] If `runtime.type` is `"wasm"`, `backend/main.go` is provided and reads `os.Stdin` / writes JSON to `os.Stdout`.
+- [ ] (AI Environment): If the AI cannot compile WASM, the AI simply supplies the Go source code in `backend/main.go` and notes that Kraken will auto-build it.
+- [ ] All declared permissions match the official list of 11 allowed scopes.
+- [ ] `frontend/worker.js` does NOT reference `window`, `document`, `localStorage`, or `sessionStorage`.
+- [ ] `frontend/worker.js` uses `kraken.render(uiTree)` with supported declarative nodes (`Page`, `Grid`, `Card`, `StatCard`, `Table`, `Button`, `Badge`, `Alert`).
+- [ ] `frontend/worker.js` handles both `self.kraken.surface === "widget"` and full page rendering.

@@ -20,5 +20,11 @@ fi
 mkdir -p /home/kraken/.kube 2>/dev/null || true
 chown -R kraken:kraken /home/kraken 2>/dev/null || true
 
+# If host filesystem is mounted at /host (read-only) or KRAKEN_RUN_AS_ROOT is set,
+# run directly so host directories owned by various host UIDs can be inspected
+if [ "${KRAKEN_RUN_AS_ROOT:-false}" = "true" ] || [ -d /host ]; then
+  exec "$@"
+fi
+
 # Execute process as non-root user kraken
 exec su-exec kraken "$@"

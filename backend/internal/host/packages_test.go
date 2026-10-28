@@ -26,6 +26,14 @@ func (m *mockExecutor) Execute(ctx context.Context, cmd string) (string, string,
 	return "", "", 0, nil
 }
 
+func (m *mockExecutor) ExecuteStream(ctx context.Context, cmd string, onChunk func(string)) (string, string, int, error) {
+	stdout, stderr, exitCode, err := m.Execute(ctx, cmd)
+	if onChunk != nil && stdout != "" {
+		onChunk(stdout)
+	}
+	return stdout, stderr, exitCode, err
+}
+
 func (m *mockExecutor) ExecuteSudo(ctx context.Context, cmd string, sudoPassword string) (string, string, int, error) {
 	m.sudoCalls = append(m.sudoCalls, cmd)
 	m.stdinData = append(m.stdinData, sudoPassword)

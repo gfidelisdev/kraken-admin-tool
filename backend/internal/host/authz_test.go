@@ -21,12 +21,17 @@ func setupTestRouter(t *testing.T, db *gorm.DB, jwtSecret string) (*chi.Mux, *Ha
 	r.Group(func(protected chi.Router) {
 		protected.Use(auth.AuthMiddleware(jwtSecret))
 
+		// Read-only active jobs
+		protected.Get("/api/hosts/packages/upgrade/active", handler.ListActiveUpgradeJobsHandler)
+		protected.Get("/api/hosts/{id}/packages/upgrade/active", handler.GetActiveUpgradeJobHandler)
+
 		// Package operations: admin and operator
 		protected.Group(func(opRouter chi.Router) {
 			opRouter.Use(auth.RequireRoles("admin", "operator"))
 			opRouter.Post("/api/hosts/{id}/packages/check", handler.CheckPackagesHandler)
 			opRouter.Post("/api/hosts/{id}/packages/upgrade", handler.UpgradePackagesHandler)
 			opRouter.Post("/api/hosts/{id}/packages/upgrade/stream", handler.UpgradePackagesStreamHandler)
+			opRouter.Get("/api/hosts/{id}/packages/upgrade/stream", handler.UpgradePackagesStreamHandler)
 			opRouter.Put("/api/hosts/{id}/package-manager", handler.UpdatePackageManagerHandler)
 		})
 
