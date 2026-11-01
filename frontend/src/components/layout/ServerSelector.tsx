@@ -99,7 +99,11 @@ export function ServerSelector() {
                     <div className="flex items-center space-x-1.5">
                       <span
                         className={`h-2 w-2 rounded-full shrink-0 ${
-                          serverOnline ? "bg-emerald-400" : "bg-rose-400"
+                          server.status === "CONNECTING"
+                            ? "bg-amber-400 animate-pulse"
+                            : serverOnline
+                            ? "bg-emerald-400"
+                            : "bg-rose-400"
                         }`}
                       />
                       <span className="font-semibold text-xs text-white truncate">

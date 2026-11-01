@@ -891,8 +891,10 @@ export async function getStorePlugins(): Promise<{ plugins: PluginCatalogItem[] 
 }
 
 export async function inspectPluginUpload(file: File): Promise<PluginInspectResponse> {
+  const buf = await file.arrayBuffer();
+  const blob = new Blob([buf], { type: file.type || "application/octet-stream" });
   const formData = new FormData();
-  formData.append("file", file);
+  formData.append("file", blob, file.name);
   const baseUrl = getBaseApiUrl();
   const token = getToken();
   const headers: Record<string, string> = {};
@@ -921,8 +923,10 @@ export async function installPluginUpload(
   permissions?: string[],
   enableImmediately?: boolean
 ): Promise<InstalledPlugin> {
+  const buf = await file.arrayBuffer();
+  const blob = new Blob([buf], { type: file.type || "application/octet-stream" });
   const formData = new FormData();
-  formData.append("file", file);
+  formData.append("file", blob, file.name);
   if (expectedSHA256) formData.append("expected_sha256", expectedSHA256);
   if (permissions) formData.append("permissions", JSON.stringify(permissions));
   if (enableImmediately) formData.append("enable_immediately", "true");
@@ -932,17 +936,40 @@ export async function installPluginUpload(
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${baseUrl}/api/plugins/install-upload`, {
-    method: "POST",
-    headers,
-    body: formData,
-  });
+  try {
+    const res = await fetch(`${baseUrl}/api/plugins/install-upload`, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new ApiError(err.error || `Falha ao instalar plugin (${res.status})`, res.status, err);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiError(err.error || `Falha ao instalar plugin (${res.status})`, res.status, err);
+    }
+    return res.json();
+  } catch (err) {
+    if (err instanceof ApiError) {
+      throw err;
+    }
+    // If browser dropped the HTTP connection during a long container build, poll /api/plugins briefly
+    // because the backend continues building and activating the plugin in the background.
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const listRes = await getPlugins();
+        if (listRes?.plugins?.length) {
+          const recent = listRes.plugins[0];
+          if (recent && (recent.status === "enabled" || recent.status === "installed")) {
+            return recent;
+          }
+        }
+      } catch {
+        // ignore transient poll error
+      }
+    }
+    throw err;
   }
-  return res.json();
 }
 
 export async function installPluginURL(
@@ -1030,4 +1057,65 @@ export async function deleteTrustedKey(id: number): Promise<{ message: string }>
 
 export async function getAIGuide(): Promise<{ filename: string; content: string }> {
   return api.get<{ filename: string; content: string }>("/api/plugins/ai-guide?format=json");
+}
+
+export interface ServerStatusStreamUpdate {
+  server_id: number;
+  status: "CONNECTED" | "UNREACHABLE" | "CONNECTING" | string;
+  version?: string;
+  containers_count?: number;
+  images_count?: number;
+  err_msg?: string;
+}
+
+export async function streamServersStatus(
+  onUpdate: (update: ServerStatusStreamUpdate) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const baseUrl = getBaseApiUrl();
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${baseUrl}/api/docker/servers/status/stream`, {
+    method: "GET",
+    headers,
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new ApiError(`Failed to stream server statuses (${response.status})`, response.status);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return;
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) {
+        try {
+          const jsonStr = trimmed.slice(5).trim();
+          const parsed = JSON.parse(jsonStr);
+          if (parsed && typeof parsed.server_id === "number") {
+            onUpdate(parsed);
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+    }
+  }
 }

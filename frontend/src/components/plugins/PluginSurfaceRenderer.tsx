@@ -30,16 +30,24 @@ interface UINode {
   title?: string;
   description?: string;
   value?: any;
+  defaultValue?: any;
   label?: string;
+  placeholder?: string;
+  inputType?: "text" | "url" | "number" | "password" | "email";
+  disabled?: boolean;
+  required?: boolean;
+  checked?: boolean;
+  rows?: number | Array<Record<string, any>>;
+  options?: Array<{ value: string | number; label: string } | string>;
   variant?: string;
   children?: UINode[];
   columns?: Array<{ key: string; label: string }>;
-  rows?: Array<Record<string, any>>;
   actionId?: string;
   html?: string;
   code?: string;
   language?: string;
   props?: Record<string, any>;
+  helperText?: string;
 }
 
 export function PluginSurfaceRenderer({
@@ -51,10 +59,47 @@ export function PluginSurfaceRenderer({
   const [uiTree, setUiTree] = useState<UINode | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [formValues, setFormValues] = useState<Record<string, any>>({});
+  const formValuesRef = useRef<Record<string, any>>({});
+  const prevNodeValuesRef = useRef<Record<string, any>>({});
   const workerRef = useRef<Worker | null>(null);
   const blobUrlRef = useRef<string | null>(null);
   const pendingRequestsRef = useRef<Map<string, { resolve: (val: any) => void; reject: (err: any) => void }>>(new Map());
   const contextParamsStr = JSON.stringify(contextParams || {});
+
+  const updateFormField = useCallback((fieldId: string, value: any) => {
+    formValuesRef.current = {
+      ...formValuesRef.current,
+      [fieldId]: value,
+    };
+    setFormValues((prev) => ({ ...prev, [fieldId]: value }));
+  }, []);
+
+  // Sync incoming tree values when specified or modified by the plugin
+  useEffect(() => {
+    if (!uiTree) return;
+    const updates: Record<string, any> = {};
+    function scanTree(node: UINode) {
+      if (node.id && (node.value !== undefined || node.defaultValue !== undefined)) {
+        const incoming = node.value !== undefined ? node.value : node.defaultValue;
+        if (prevNodeValuesRef.current[node.id] !== incoming) {
+          prevNodeValuesRef.current[node.id] = incoming;
+          updates[node.id] = incoming;
+        }
+      }
+      if (node.children) {
+        node.children.forEach(scanTree);
+      }
+    }
+    scanTree(uiTree);
+    if (Object.keys(updates).length > 0) {
+      setFormValues((prev) => {
+        const next = { ...prev, ...updates };
+        formValuesRef.current = next;
+        return next;
+      });
+    }
+  }, [uiTree]);
 
   // Dispatch event back to Web Worker
   const sendWorkerEvent = useCallback((targetId: string, eventType: string, payload?: any) => {
@@ -85,11 +130,13 @@ export function PluginSurfaceRenderer({
 // Kraken Worker Isolation SDK
 const _pendingRPC = new Map();
 let _eventHandlers = new Map();
+let _formData = {};
 
 self.kraken = {
   pluginId: "${pluginId}",
   surface: "${surface}",
   params: ${contextParamsStr},
+  formData: _formData,
 
   render: function(tree) {
     self.postMessage({ type: 'KRAKEN_RENDER_UI', tree: tree });
@@ -150,6 +197,15 @@ self.onmessage = function(e) {
       else p.resolve(msg.result);
     }
   } else if (msg.type === 'KRAKEN_EVENT') {
+    if (msg.payload && typeof msg.payload === 'object') {
+      if (msg.payload.formData) {
+        Object.assign(_formData, msg.payload.formData);
+      }
+      if (msg.payload.id && msg.payload.value !== undefined) {
+        _formData[msg.payload.id] = msg.payload.value;
+      }
+      self.kraken.formData = _formData;
+    }
     const handler = _eventHandlers.get(msg.targetId);
     if (handler) {
       try {
@@ -249,7 +305,7 @@ self.onmessage = function(e) {
 
   let renderedContent: React.ReactNode = null;
   try {
-    renderedContent = renderNode(uiTree, sendWorkerEvent);
+    renderedContent = renderNode(uiTree, sendWorkerEvent, formValues, updateFormField, formValuesRef, "root");
   } catch (err: any) {
     renderedContent = (
       <div className="p-3 text-xs text-rose-400 bg-rose-500/10 rounded-lg border border-rose-500/30">
@@ -265,35 +321,188 @@ self.onmessage = function(e) {
   );
 }
 
-// Recursive Native Declarative Renderer
-function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: any) => void): React.ReactNode {
+// Dedicated controlled input field to maintain stable DOM identity, focus, and caret position
+function PluginTextInputField({
+  node,
+  fieldVal,
+  updateFormField,
+  onEvent,
+  formValuesRef,
+}: {
+  node: UINode;
+  fieldVal: any;
+  updateFormField: (id: string, val: any) => void;
+  onEvent: (id: string, type: string, payload?: any) => void;
+  formValuesRef: React.MutableRefObject<Record<string, any>>;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [localVal, setLocalVal] = useState<string>(String(fieldVal ?? ""));
+
+  useEffect(() => {
+    // Only sync from external fieldVal if user is not actively typing in this element
+    if (document.activeElement !== inputRef.current) {
+      setLocalVal(String(fieldVal ?? ""));
+    }
+  }, [fieldVal]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setLocalVal(val);
+    if (node.id) {
+      updateFormField(node.id, val);
+      onEvent(node.actionId || node.id, "change", {
+        id: node.id,
+        value: val,
+        formData: { ...formValuesRef.current, [node.id]: val },
+        [node.id]: val,
+      });
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      inputRef.current?.blur();
+    } else if (e.key === "Enter" && node.id) {
+      onEvent(node.actionId || node.id, "enter", {
+        id: node.id,
+        value: localVal,
+        formData: { ...formValuesRef.current },
+        ...formValuesRef.current,
+      });
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 w-full">
+      {node.label && (
+        <label className="text-xs font-medium text-slate-300 block">
+          {node.label}
+          {node.required && <span className="text-rose-400 ml-1">*</span>}
+        </label>
+      )}
+      <input
+        ref={inputRef}
+        type={node.inputType || "text"}
+        placeholder={node.placeholder}
+        disabled={node.disabled}
+        value={localVal}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        className="flex h-9 w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
+      />
+      {(node.description || node.helperText) && (
+        <p className="text-[11px] text-slate-400">{node.description || node.helperText}</p>
+      )}
+    </div>
+  );
+}
+
+// Dedicated controlled textarea field to maintain stable focus and caret position
+function PluginTextareaField({
+  node,
+  fieldVal,
+  updateFormField,
+  onEvent,
+  formValuesRef,
+}: {
+  node: UINode;
+  fieldVal: any;
+  updateFormField: (id: string, val: any) => void;
+  onEvent: (id: string, type: string, payload?: any) => void;
+  formValuesRef: React.MutableRefObject<Record<string, any>>;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [localVal, setLocalVal] = useState<string>(String(fieldVal ?? ""));
+
+  useEffect(() => {
+    if (document.activeElement !== textareaRef.current) {
+      setLocalVal(String(fieldVal ?? ""));
+    }
+  }, [fieldVal]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setLocalVal(val);
+    if (node.id) {
+      updateFormField(node.id, val);
+      onEvent(node.actionId || node.id, "change", {
+        id: node.id,
+        value: val,
+        formData: { ...formValuesRef.current, [node.id]: val },
+        [node.id]: val,
+      });
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape") {
+      textareaRef.current?.blur();
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 w-full">
+      {node.label && (
+        <label className="text-xs font-medium text-slate-300 block">
+          {node.label}
+          {node.required && <span className="text-rose-400 ml-1">*</span>}
+        </label>
+      )}
+      <textarea
+        ref={textareaRef}
+        placeholder={node.placeholder}
+        disabled={node.disabled}
+        rows={typeof node.rows === "number" ? node.rows : 3}
+        value={localVal}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        className="flex w-full rounded-lg border border-slate-700 bg-slate-900/90 p-3 text-xs text-slate-100 placeholder:text-slate-500 shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500 disabled:cursor-not-allowed disabled:opacity-50 font-mono resize-y"
+      />
+      {(node.description || node.helperText) && (
+        <p className="text-[11px] text-slate-400">{node.description || node.helperText}</p>
+      )}
+    </div>
+  );
+}
+
+// Recursive Native Declarative Renderer with deterministic React keys
+function renderNode(
+  node: UINode,
+  onEvent: (id: string, type: string, payload?: any) => void,
+  formValues: Record<string, any>,
+  updateFormField: (id: string, val: any) => void,
+  formValuesRef: React.MutableRefObject<Record<string, any>>,
+  path: string = "root"
+): React.ReactNode {
   if (!node) return null;
+
+  const nodeKey = node.id ? `id-${node.id}` : `node-${path}`;
 
   switch (node.type) {
     case "Page":
       return (
-        <div key={node.id || Math.random()} className="space-y-6">
+        <div key={nodeKey} className="space-y-6">
           {(node.title || node.description) && (
             <div className="flex flex-col gap-1">
               {node.title && <h2 className="text-xl font-bold text-white tracking-tight">{node.title}</h2>}
               {node.description && <p className="text-xs text-slate-400">{node.description}</p>}
             </div>
           )}
-          {node.children && node.children.map((child) => renderNode(child, onEvent))}
+          {node.children && node.children.map((child, idx) => renderNode(child, onEvent, formValues, updateFormField, formValuesRef, `${path}.page.${child.id || child.type || 'n'}.${idx}`))}
         </div>
       );
 
     case "Grid":
       return (
-        <div key={node.id || Math.random()} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {node.children && node.children.map((child) => renderNode(child, onEvent))}
+        <div key={nodeKey} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {node.children && node.children.map((child, idx) => renderNode(child, onEvent, formValues, updateFormField, formValuesRef, `${path}.grid.${child.id || child.type || 'n'}.${idx}`))}
         </div>
       );
 
     case "Section":
     case "Card":
       return (
-        <Card key={node.id || Math.random()} className="border-slate-800 bg-slate-900/60 shadow-lg">
+        <Card key={nodeKey} className="border-slate-800 bg-slate-900/60 shadow-lg">
           {(node.title || node.description) && (
             <CardHeader className="pb-3 border-b border-slate-800/60">
               {node.title && <CardTitle className="text-sm font-semibold text-white">{node.title}</CardTitle>}
@@ -301,7 +510,7 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
             </CardHeader>
           )}
           <CardContent className="pt-4 space-y-4">
-            {node.children && node.children.map((child) => renderNode(child, onEvent))}
+            {node.children && node.children.map((child, idx) => renderNode(child, onEvent, formValues, updateFormField, formValuesRef, `${path}.card.${child.id || child.type || 'n'}.${idx}`))}
           </CardContent>
         </Card>
       );
@@ -309,7 +518,7 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
     case "StatCard":
       return (
         <div
-          key={node.id || Math.random()}
+          key={nodeKey}
           className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between"
         >
           <div>
@@ -327,7 +536,7 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
 
     case "Table":
       return (
-        <div key={node.id || Math.random()} className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
+        <div key={nodeKey} className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="bg-slate-900 border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
               <tr>
@@ -339,7 +548,7 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
-              {node.rows && node.rows.length > 0 ? (
+              {Array.isArray(node.rows) && node.rows.length > 0 ? (
                 node.rows.map((row, idx) => (
                   <tr key={idx} className="hover:bg-slate-900/40 transition">
                     {node.columns?.map((col) => (
@@ -361,14 +570,172 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
         </div>
       );
 
+    case "Form":
+      return (
+        <form
+          key={nodeKey}
+          onSubmit={(e) => {
+            e.preventDefault();
+            const payload = {
+              formData: { ...formValuesRef.current },
+              ...formValuesRef.current,
+            };
+            onEvent(node.actionId || node.id || "submit", "submit", payload);
+          }}
+          className="space-y-4 w-full"
+        >
+          {node.children && node.children.map((child, idx) => renderNode(child, onEvent, formValues, updateFormField, formValuesRef, `${path}.form.${child.id || child.type || 'n'}.${idx}`))}
+        </form>
+      );
+
+    case "FieldGroup":
+    case "FormRow":
+      return (
+        <div
+          key={nodeKey}
+          className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3 w-full"
+        >
+          {node.children && node.children.map((child, idx) => renderNode(child, onEvent, formValues, updateFormField, formValuesRef, `${path}.row.${child.id || child.type || 'n'}.${idx}`))}
+        </div>
+      );
+
+    case "Input":
+    case "TextInput": {
+      const fieldVal = node.id && formValues[node.id] !== undefined
+        ? formValues[node.id]
+        : (node.value ?? node.defaultValue ?? "");
+
+      return (
+        <PluginTextInputField
+          key={nodeKey}
+          node={node}
+          fieldVal={fieldVal}
+          updateFormField={updateFormField}
+          onEvent={onEvent}
+          formValuesRef={formValuesRef}
+        />
+      );
+    }
+
+    case "Textarea": {
+      const fieldVal = node.id && formValues[node.id] !== undefined
+        ? formValues[node.id]
+        : (node.value ?? node.defaultValue ?? "");
+
+      return (
+        <PluginTextareaField
+          key={nodeKey}
+          node={node}
+          fieldVal={fieldVal}
+          updateFormField={updateFormField}
+          onEvent={onEvent}
+          formValuesRef={formValuesRef}
+        />
+      );
+    }
+
+    case "Select": {
+      const options = Array.isArray(node.options)
+        ? node.options.map((opt) =>
+            typeof opt === "object" && opt !== null ? opt : { value: String(opt), label: String(opt) }
+          )
+        : [];
+      const fieldVal = node.id && formValues[node.id] !== undefined
+        ? formValues[node.id]
+        : (node.value ?? node.defaultValue ?? (options[0]?.value || ""));
+
+      return (
+        <div key={nodeKey} className="space-y-1.5 w-full">
+          {node.label && (
+            <label className="text-xs font-medium text-slate-300 block">
+              {node.label}
+              {node.required && <span className="text-rose-400 ml-1">*</span>}
+            </label>
+          )}
+          <select
+            disabled={node.disabled}
+            value={fieldVal}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (node.id) {
+                updateFormField(node.id, val);
+                onEvent(node.actionId || node.id, "change", {
+                  id: node.id,
+                  value: val,
+                  formData: { ...formValuesRef.current, [node.id]: val },
+                  [node.id]: val,
+                });
+              }
+            }}
+            className="flex h-9 w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-100 shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {options.map((opt) => (
+              <option key={opt.value} value={opt.value} className="bg-slate-900 text-slate-100">
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          {(node.description || node.helperText) && (
+            <p className="text-[11px] text-slate-400">{node.description || node.helperText}</p>
+          )}
+        </div>
+      );
+    }
+
+    case "Checkbox": {
+      const checked = Boolean(
+        node.id && formValues[node.id] !== undefined
+          ? formValues[node.id]
+          : (node.checked ?? node.value ?? false)
+      );
+
+      return (
+        <div key={nodeKey} className="space-y-1">
+          <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-200">
+            <input
+              type="checkbox"
+              disabled={node.disabled}
+              checked={checked}
+              onChange={(e) => {
+                const val = e.target.checked;
+                if (node.id) {
+                  updateFormField(node.id, val);
+                  onEvent(node.actionId || node.id, "change", {
+                    id: node.id,
+                    value: val,
+                    checked: val,
+                    formData: { ...formValuesRef.current, [node.id]: val },
+                    [node.id]: val,
+                  });
+                }
+              }}
+              className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500 focus:ring-offset-slate-900 cursor-pointer"
+            />
+            <span>{node.label || node.title}</span>
+          </label>
+          {(node.description || node.helperText) && (
+            <p className="text-[11px] text-slate-400 pl-6">{node.description || node.helperText}</p>
+          )}
+        </div>
+      );
+    }
+
     case "Button":
       return (
         <Button
-          key={node.id || Math.random()}
+          key={nodeKey}
           variant={(node.variant as any) || "default"}
           size="sm"
-          onClick={() => onEvent(node.actionId || node.id || "click", "click", node.value)}
-          className="text-xs"
+          disabled={node.disabled}
+          onClick={() => {
+            const payload = {
+              value: node.value,
+              formData: { ...formValuesRef.current },
+              ...formValuesRef.current,
+            };
+            onEvent(node.actionId || node.id || "click", "click", payload);
+          }}
+          className="text-xs shrink-0"
         >
           {node.title || node.label || "Ação"}
         </Button>
@@ -376,7 +743,7 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
 
     case "Badge":
       return (
-        <Badge key={node.id || Math.random()} variant={(node.variant as any) || "outline"}>
+        <Badge key={nodeKey} variant={(node.variant as any) || "outline"}>
           {node.value || node.label || "Info"}
         </Badge>
       );
@@ -384,7 +751,7 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
     case "Alert":
       return (
         <div
-          key={node.id || Math.random()}
+          key={nodeKey}
           className={`p-3.5 rounded-xl border text-xs flex items-start gap-2.5 ${
             node.variant === "destructive"
               ? "bg-rose-500/10 border-rose-500/30 text-rose-300"
@@ -404,17 +771,17 @@ function renderNode(node: UINode, onEvent: (id: string, type: string, payload?: 
     case "Terminal":
     case "CodeBlock":
       return (
-        <div key={node.id || Math.random()} className="rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs text-slate-200 overflow-x-auto relative group">
+        <div key={nodeKey} className="rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs text-slate-200 overflow-x-auto relative group">
           <pre>{node.code || node.value || ""}</pre>
         </div>
       );
 
     case "CustomShadowHtml":
-      return <ShadowHost key={node.id || Math.random()} html={node.html || ""} />;
+      return <ShadowHost key={nodeKey} html={node.html || ""} />;
 
     default:
       return (
-        <div key={node.id || Math.random()} className="text-xs text-slate-400">
+        <div key={nodeKey} className="text-xs text-slate-400">
           {node.value ? String(node.value) : null}
         </div>
       );

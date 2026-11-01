@@ -132,11 +132,26 @@ func (m *Manager) InstallFromArchive(
 	manifest := insp.Manifest
 	targetDir := filepath.Join(m.pluginsDir, manifest.ID)
 
+	var existing models.InstalledPlugin
+	hasExisting := m.db.Where("plugin_id = ?", manifest.ID).First(&existing).Error == nil
+
+	// If updating an existing container plugin that is currently running, stop it first so it recreates
+	if hasExisting && existing.RuntimeType == "container" {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = m.container.StopContainer(stopCtx, &existing)
+		stopCancel()
+	}
+
 	// Clean existing installation if updating
 	_ = os.RemoveAll(targetDir)
 
 	if err := ExtractArchive(data, insp.ArchiveType, targetDir); err != nil {
 		return nil, fmt.Errorf("failed to extract plugin archive: %w", err)
+	}
+
+	// Invalidate WASM cache for updated files
+	if m.wasm != nil {
+		m.wasm.InvalidateCache("")
 	}
 
 	// Auto-build WASM if runtime is wasm and binary is missing/stub (<1KB), but Go sources exist
@@ -155,6 +170,25 @@ func (m *Manager) InstallFromArchive(
 				manifest.ID, buildRes.Compiler, buildRes.DurationMs, buildRes.SizeBytes)
 			audit.Log(m.db, userID, installedBy, "PLUGIN_BUILD", "plugin", manifest.ID,
 				fmt.Sprintf("Auto-compiled WASM binary via %s in %dms (%d bytes)", buildRes.Compiler, buildRes.DurationMs, buildRes.SizeBytes), "SUCCESS")
+		}
+	}
+
+	// Auto-build container image if runtime is container and Dockerfile exists
+	if manifest.Runtime.Type == "container" {
+		hasDF := manifest.Runtime.Dockerfile != "" ||
+			hasDockerfile(targetDir) ||
+			hasDockerfile(filepath.Join(targetDir, "backend"))
+
+		if hasDF {
+			log.Printf("[MANAGER] Auto-building container image for plugin '%s'...", manifest.ID)
+			buildRes, buildErr := BuildContainerPluginImage(ctx, m.dockerService, targetDir, manifest)
+			if buildErr != nil {
+				return nil, fmt.Errorf("plugin requires container build but image build failed: %w", buildErr)
+			}
+			log.Printf("[MANAGER] Plugin '%s' container image '%s' built successfully in %dms (size: %d bytes)",
+				manifest.ID, buildRes.Entrypoint, buildRes.DurationMs, buildRes.SizeBytes)
+			audit.Log(m.db, userID, installedBy, "PLUGIN_BUILD", "plugin", manifest.ID,
+				fmt.Sprintf("Auto-built container image '%s' via %s in %dms (%d bytes)", buildRes.Entrypoint, buildRes.Compiler, buildRes.DurationMs, buildRes.SizeBytes), "SUCCESS")
 		}
 	}
 
@@ -178,17 +212,14 @@ func (m *Manager) InstallFromArchive(
 	manifestJSON, _ := json.Marshal(manifest)
 
 	status := "installed"
-	if enableImmediately {
+	if enableImmediately || (hasExisting && existing.Status == "enabled") {
 		status = "enabled"
 	}
-
-	var existing models.InstalledPlugin
-	res := m.db.Where("plugin_id = ?", manifest.ID).First(&existing)
 
 	now := time.Now()
 	var plugin models.InstalledPlugin
 
-	if res.Error == nil {
+	if hasExisting {
 		// Update existing record
 		existing.Name = manifest.Name
 		existing.Version = manifest.Version
@@ -212,6 +243,9 @@ func (m *Manager) InstallFromArchive(
 		existing.UpdatedAt = now
 		m.db.Save(&existing)
 		plugin = existing
+
+		audit.Log(m.db, userID, installedBy, "PLUGIN_UPDATE", "plugin", manifest.ID,
+			fmt.Sprintf("Updated plugin '%s' v%s (Runtime: %s)", manifest.Name, manifest.Version, manifest.Runtime.Type), "SUCCESS")
 	} else {
 		// Create new record
 		plugin = models.InstalledPlugin{
@@ -238,14 +272,16 @@ func (m *Manager) InstallFromArchive(
 		if err := m.db.Create(&plugin).Error; err != nil {
 			return nil, fmt.Errorf("failed to save plugin to database: %w", err)
 		}
-	}
 
-	audit.Log(m.db, userID, installedBy, "PLUGIN_INSTALL", "plugin", manifest.ID,
-		fmt.Sprintf("Installed plugin '%s' v%s (Runtime: %s)", manifest.Name, manifest.Version, manifest.Runtime.Type), "SUCCESS")
+		audit.Log(m.db, userID, installedBy, "PLUGIN_INSTALL", "plugin", manifest.ID,
+			fmt.Sprintf("Installed plugin '%s' v%s (Runtime: %s)", manifest.Name, manifest.Version, manifest.Runtime.Type), "SUCCESS")
+	}
 
 	// If enabled immediately and runtime is container, start container
 	if status == "enabled" && manifest.Runtime.Type == "container" {
-		cID, cErr := m.container.StartContainer(ctx, &plugin, manifest)
+		startCtx, startCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer startCancel()
+		cID, cErr := m.container.StartContainer(startCtx, &plugin, manifest)
 		if cErr != nil {
 			plugin.Status = "error"
 			plugin.LastError = cErr.Error()
@@ -278,7 +314,9 @@ func (m *Manager) EnablePlugin(ctx context.Context, pluginID string, username st
 	}
 
 	if manifest.Runtime.Type == "container" {
-		cID, cErr := m.container.StartContainer(ctx, &p, &manifest)
+		startCtx, startCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer startCancel()
+		cID, cErr := m.container.StartContainer(startCtx, &p, &manifest)
 		if cErr != nil {
 			m.db.Model(&p).Updates(map[string]interface{}{
 				"status":     "error",
@@ -551,16 +589,61 @@ func (m *Manager) RebuildPlugin(ctx context.Context, pluginID string, username s
 		return nil, fmt.Errorf("failed to parse manifest: %w", err)
 	}
 
-	if manifest.Runtime.Type != "wasm" {
-		return nil, fmt.Errorf("plugin '%s' does not use wasm runtime (type is '%s')", pluginID, manifest.Runtime.Type)
+	if manifest.Runtime.Type != "wasm" && manifest.Runtime.Type != "container" {
+		return nil, fmt.Errorf("plugin '%s' does not use wasm or container runtime (type is '%s')", pluginID, manifest.Runtime.Type)
 	}
 
 	targetDir := filepath.Join(m.pluginsDir, manifest.ID)
-	buildRes, err := BuildWasmPlugin(ctx, targetDir, &manifest)
-	if err != nil {
+	var buildRes *BuildResult
+	var buildErr error
+
+	switch manifest.Runtime.Type {
+	case "wasm":
+		buildRes, buildErr = BuildWasmPlugin(ctx, targetDir, &manifest)
+		if buildErr == nil {
+			if m.wasm != nil {
+				m.wasm.InvalidateCache("")
+			}
+			if plugin.Status == "error" {
+				m.db.Model(&plugin).Updates(map[string]interface{}{
+					"status":     "enabled",
+					"last_error": "",
+					"updated_at": time.Now(),
+				})
+			}
+		}
+	case "container":
+		buildRes, buildErr = BuildContainerPluginImage(ctx, m.dockerService, targetDir, &manifest)
+		if buildErr == nil {
+			manifestBytes, _ := json.Marshal(&manifest)
+			updates := map[string]interface{}{
+				"manifest_json": string(manifestBytes),
+				"last_error":    "",
+				"updated_at":    time.Now(),
+			}
+			if plugin.Status == "enabled" || plugin.Status == "error" {
+				startCtx, startCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer startCancel()
+				// Restart sidecar container with newly built image
+				_ = m.container.StopContainer(startCtx, &plugin)
+				cID, cErr := m.container.StartContainer(startCtx, &plugin, &manifest)
+				if cErr == nil {
+					updates["container_id"] = cID
+					updates["status"] = "enabled"
+					plugin.ContainerID = cID
+				} else {
+					updates["status"] = "error"
+					updates["last_error"] = cErr.Error()
+				}
+			}
+			m.db.Model(&plugin).Updates(updates)
+		}
+	}
+
+	if buildErr != nil {
 		audit.Log(m.db, userID, username, "PLUGIN_BUILD", "plugin", pluginID,
-			fmt.Sprintf("Failed manual rebuild: %v", err), "FAILED")
-		return nil, err
+			fmt.Sprintf("Failed manual rebuild: %v", buildErr), "FAILED")
+		return nil, buildErr
 	}
 
 	audit.Log(m.db, userID, username, "PLUGIN_BUILD", "plugin", pluginID,

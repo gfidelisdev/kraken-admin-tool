@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { DockerServer } from "@/types";
-import { api, getActiveServerId, setActiveServerId } from "@/lib/api";
+import { api, getActiveServerId, setActiveServerId, ServerStatusStreamUpdate } from "@/lib/api";
 
 interface ServerContextType {
   servers: DockerServer[];
@@ -10,6 +10,8 @@ interface ServerContextType {
   isLoading: boolean;
   setActiveServer: (server: DockerServer) => void;
   refreshServers: () => Promise<void>;
+  updateServerState: (update: ServerStatusStreamUpdate) => void;
+  setAllServersStatus: (status: string) => void;
 }
 
 const ServerContext = createContext<ServerContextType | undefined>(undefined);
@@ -52,6 +54,37 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
     refreshServers();
   }, [refreshServers]);
 
+  const updateServerState = useCallback((update: ServerStatusStreamUpdate) => {
+    setServers((prev) =>
+      prev.map((s) => {
+        if (s.id !== update.server_id) return s;
+        return {
+          ...s,
+          status: update.status,
+          version: update.version !== undefined ? update.version : s.version,
+          containers_count: update.containers_count !== undefined ? update.containers_count : s.containers_count,
+          images_count: update.images_count !== undefined ? update.images_count : s.images_count,
+          err_msg: update.err_msg !== undefined ? update.err_msg : s.err_msg,
+        };
+      })
+    );
+    setActiveServerState((prev) => {
+      if (!prev || prev.id !== update.server_id) return prev;
+      return {
+        ...prev,
+        status: update.status,
+        version: update.version !== undefined ? update.version : prev.version,
+        containers_count: update.containers_count !== undefined ? update.containers_count : prev.containers_count,
+        images_count: update.images_count !== undefined ? update.images_count : prev.images_count,
+        err_msg: update.err_msg !== undefined ? update.err_msg : prev.err_msg,
+      };
+    });
+  }, []);
+
+  const setAllServersStatus = useCallback((status: string) => {
+    setServers((prev) => prev.map((s) => ({ ...s, status })));
+  }, []);
+
   const setActiveServer = (server: DockerServer) => {
     setActiveServerState(server);
     setActiveServerId(server.id);
@@ -65,6 +98,8 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         isLoading,
         setActiveServer,
         refreshServers,
+        updateServerState,
+        setAllServersStatus,
       }}
     >
       {children}

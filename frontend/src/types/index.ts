@@ -102,7 +102,7 @@ export interface DockerServer {
   available_updates_count?: number;
   security_updates_count?: number;
   is_default: boolean;
-  status: "CONNECTED" | "UNREACHABLE" | "UNKNOWN" | string;
+  status: "CONNECTED" | "UNREACHABLE" | "CONNECTING" | "UNKNOWN" | string;
   err_msg?: string;
   containers_count: number;
   images_count: number;
@@ -512,6 +512,7 @@ export interface ProvisionKeyResult {
 export interface PluginRuntimeConfig {
   type: "none" | "wasm" | "container";
   entrypoint?: string;
+  dockerfile?: string;
   port?: number;
 }
 

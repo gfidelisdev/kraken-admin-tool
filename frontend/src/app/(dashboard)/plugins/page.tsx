@@ -111,6 +111,17 @@ export default function PluginsPage() {
   // Details Modal
   const [detailsModalPlugin, setDetailsModalPlugin] = useState<InstalledPlugin | PluginCatalogItem | null>(null);
 
+  // Update Plugin Modal state
+  const [updateTargetPlugin, setUpdateTargetPlugin] = useState<InstalledPlugin | null>(null);
+  const [updateFile, setUpdateFile] = useState<File | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateSuccess, setUpdateSuccess] = useState<string | null>(null);
+  const [updateInspect, setUpdateInspect] = useState<PluginInspectResponse | null>(null);
+  const [isInspectingUpdate, setIsInspectingUpdate] = useState(false);
+  const [enableAfterUpdate, setEnableAfterUpdate] = useState(true);
+  const updateFileInputRef = useRef<HTMLInputElement | null>(null);
+
   // Trusted Keys state
   const [trustedKeys, setTrustedKeys] = useState<PluginTrustedKey[]>([]);
   const [isLoadingKeys, setIsLoadingKeys] = useState(false);
@@ -242,13 +253,57 @@ export default function PluginsPage() {
     setActionLoadingId(p.plugin_id);
     try {
       const res = await rebuildPlugin(p.plugin_id);
-      alert(`Plugin "${p.name}" recompilado com sucesso via ${res.result?.compiler || "compilador integrado"}! (${((res.result?.size_bytes || 0) / 1024).toFixed(1)} KB)`);
+      const isContainer = p.runtime_type === "container";
+      const kindLabel = isContainer ? "Imagem do container" : "Módulo WASM";
+      alert(`Plugin "${p.name}": ${kindLabel} reconstruído com sucesso via ${res.result?.compiler || "compilador integrado"}! (${((res.result?.size_bytes || 0) / 1024).toFixed(1)} KB)`);
       await fetchInstalledPlugins();
       await notifyContextRefresh();
     } catch (err: any) {
       alert(err?.message || "Falha ao recompilar plugin");
     } finally {
       setActionLoadingId(null);
+    }
+  };
+
+  const handleSelectUpdateFile = async (file: File) => {
+    setUpdateFile(file);
+    setUpdateError(null);
+    setUpdateSuccess(null);
+    setUpdateInspect(null);
+    try {
+      setIsInspectingUpdate(true);
+      const insp = await inspectPluginUpload(file);
+      setUpdateInspect(insp);
+    } catch (err: any) {
+      setUpdateError(err?.message || "Falha ao inspecionar o arquivo do plugin.");
+    } finally {
+      setIsInspectingUpdate(false);
+    }
+  };
+
+  const handleConfirmUpdate = async () => {
+    if (!updateTargetPlugin || !updateFile) return;
+    try {
+      setIsUpdating(true);
+      setUpdateError(null);
+      setUpdateSuccess(null);
+
+      const permissions = updateInspect?.manifest?.permissions || [];
+      await installPluginUpload(updateFile, undefined, permissions, enableAfterUpdate);
+
+      setUpdateSuccess(`Plugin "${updateTargetPlugin.name}" atualizado com sucesso!`);
+      await fetchInstalledPlugins();
+      await notifyContextRefresh();
+      setTimeout(() => {
+        setUpdateTargetPlugin(null);
+        setUpdateFile(null);
+        setUpdateInspect(null);
+        setUpdateSuccess(null);
+      }, 1500);
+    } catch (err: any) {
+      setUpdateError(err?.message || "Falha ao atualizar plugin.");
+    } finally {
+      setIsUpdating(false);
     }
   };
 
@@ -446,7 +501,7 @@ export default function PluginsPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -454,7 +509,7 @@ export default function PluginsPage() {
               setActiveTab("ai-guide");
               if (!aiGuideMarkdown) fetchAIGuide();
             }}
-            className="border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300"
+            className="border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 shrink-0"
           >
             <Bot className="h-3.5 w-3.5 mr-1.5" />
             Guia para IAs (.md)
@@ -463,7 +518,7 @@ export default function PluginsPage() {
             <Button
               size="sm"
               onClick={() => setActiveTab("install")}
-              className="bg-sky-500 hover:bg-sky-600 text-white shadow-lg shadow-sky-500/20"
+              className="bg-sky-500 hover:bg-sky-600 text-white shadow-lg shadow-sky-500/20 shrink-0"
             >
               <Upload className="h-3.5 w-3.5 mr-1.5" />
               Instalar Plugin
@@ -476,7 +531,7 @@ export default function PluginsPage() {
               fetchInstalledPlugins();
               if (activeTab === "store") fetchStorePlugins();
             }}
-            className="border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-slate-200"
+            className="border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-slate-200 shrink-0"
           >
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
             Atualizar
@@ -485,7 +540,7 @@ export default function PluginsPage() {
       </div>
 
       {/* Tabs Navigation */}
-      <div className="flex border-b border-slate-800 gap-6 text-xs font-medium">
+      <div className="flex flex-wrap border-b border-slate-800 gap-x-6 gap-y-2 text-xs font-medium">
         <button
           onClick={() => setActiveTab("installed")}
           className={`pb-3 flex items-center gap-2 border-b-2 transition ${
@@ -682,11 +737,11 @@ export default function PluginsPage() {
                       )}
                     </div>
 
-                    <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
+                    <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         {p.status === "enabled" && (
                           <Link href={`/plugins/${encodeURIComponent(p.plugin_id)}`}>
-                            <Button size="sm" variant="default" className="text-xs h-7 px-2.5">
+                            <Button size="sm" variant="default" className="text-xs h-7 px-2.5 shrink-0">
                               <ExternalLink className="h-3 w-3 mr-1" />
                               Abrir
                             </Button>
@@ -696,20 +751,20 @@ export default function PluginsPage() {
                           size="sm"
                           variant="ghost"
                           onClick={() => setDetailsModalPlugin(p)}
-                          className="text-xs h-7 px-2 text-slate-400 hover:text-white"
+                          className="text-xs h-7 px-2 text-slate-400 hover:text-white shrink-0"
                         >
                           Detalhes
                         </Button>
                       </div>
 
                       {isAdmin && (
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <Button
                             size="sm"
                             variant={p.status === "enabled" ? "outline" : "default"}
                             onClick={() => handleTogglePlugin(p)}
                             disabled={actionLoadingId === p.plugin_id}
-                            className="text-xs h-7 px-2"
+                            className="text-xs h-7 px-2 shrink-0"
                           >
                             {actionLoadingId === p.plugin_id ? (
                               <RefreshCw className="h-3 w-3 animate-spin" />
@@ -726,17 +781,36 @@ export default function PluginsPage() {
                             )}
                           </Button>
 
-                          {p.runtime_type === "wasm" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setUpdateTargetPlugin(p);
+                              setEnableAfterUpdate(p.status === "enabled");
+                              setUpdateFile(null);
+                              setUpdateError(null);
+                              setUpdateSuccess(null);
+                              setUpdateInspect(null);
+                            }}
+                            disabled={actionLoadingId === p.plugin_id}
+                            className="text-xs h-7 px-2 text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/10 border-slate-800 shrink-0"
+                            title="Atualizar plugin enviando um novo arquivo .zip / .tar.gz (mesmo com a mesma versão)"
+                          >
+                            <Upload className="h-3 w-3 mr-1" />
+                            Atualizar
+                          </Button>
+
+                          {(p.runtime_type === "wasm" || p.runtime_type === "container") && (
                             <Button
                               size="sm"
                               variant="outline"
                               onClick={() => handleRebuildPlugin(p)}
                               disabled={actionLoadingId === p.plugin_id}
-                              className="text-xs h-7 px-2 text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 border-slate-800"
-                              title="Recompilar WASM a partir dos códigos-fonte Go"
+                              className="text-xs h-7 px-2 text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 border-slate-800 shrink-0"
+                              title={p.runtime_type === "container" ? "Reconstruir imagem Docker a partir do Dockerfile do plugin" : "Recompilar WASM a partir dos códigos-fonte Go"}
                             >
                               <Hammer className="h-3 w-3 mr-1" />
-                              Recompilar
+                              {p.runtime_type === "container" ? "Reconstruir Imagem" : "Recompilar"}
                             </Button>
                           )}
 
@@ -745,7 +819,7 @@ export default function PluginsPage() {
                             variant="ghost"
                             onClick={() => handleDeletePlugin(p)}
                             disabled={actionLoadingId === p.plugin_id}
-                            className="text-xs h-7 px-2 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10"
+                            className="text-xs h-7 px-2 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 shrink-0"
                             title="Desinstalar plugin"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -907,12 +981,12 @@ export default function PluginsPage() {
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+                  <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
                     <Button
                       size="sm"
                       variant="ghost"
                       onClick={() => setDetailsModalPlugin(item)}
-                      className="text-xs h-7 px-2 text-slate-400 hover:text-white"
+                      className="text-xs h-7 px-2 text-slate-400 hover:text-white shrink-0"
                     >
                       Ver Detalhes
                     </Button>
@@ -922,7 +996,7 @@ export default function PluginsPage() {
                         size="sm"
                         disabled={actionLoadingId === item.id || (item.is_installed && !item.has_update)}
                         onClick={() => handleInstallFromStore(item)}
-                        className="text-xs h-7 px-3 bg-indigo-600 hover:bg-indigo-500 text-white"
+                        className="text-xs h-7 px-3 bg-indigo-600 hover:bg-indigo-500 text-white shrink-0"
                       >
                         {actionLoadingId === item.id ? (
                           <RefreshCw className="h-3 w-3 animate-spin mr-1" />
@@ -1135,18 +1209,32 @@ export default function PluginsPage() {
                   </div>
                 </div>
 
-                {/* Auto-Build WASM Banner */}
+                {/* Auto-Build Banner */}
                 {inspectResult.needs_compilation && (
                   <div className="p-3.5 rounded-xl bg-sky-950/60 border border-sky-500/40 text-xs flex items-start gap-3">
                     <Zap className="h-4 w-4 text-sky-400 mt-0.5 shrink-0" />
                     <div>
-                      <span className="font-semibold text-sky-300 block">
-                        Código-fonte Go detectado (Auto-Build WASM ativo)
-                      </span>
-                      <p className="text-slate-300 text-[11px] mt-0.5">
-                        O arquivo compactado contém fontes Go ({inspectResult.source_files?.length || 1} arquivo(s)) sem o binário final pré-compilado.
-                        O Kraken Admin Tool compilará o módulo WebAssembly (WASI) automaticamente durante a instalação usando o compilador integrado.
-                      </p>
+                      {manifest.runtime?.type === "container" ? (
+                        <>
+                          <span className="font-semibold text-sky-300 block">
+                            Dockerfile detectado (Auto-Build de Imagem Docker ativo)
+                          </span>
+                          <p className="text-slate-300 text-[11px] mt-0.5">
+                            O pacote do plugin fornece um Dockerfile e arquivos de contexto para compilação local.
+                            O Kraken Admin Tool construirá a imagem do container automaticamente durante a importação/instalação, sem necessidade de publicar em registry público ou gerar imagens externas.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <span className="font-semibold text-sky-300 block">
+                            Código-fonte Go detectado (Auto-Build WASM ativo)
+                          </span>
+                          <p className="text-slate-300 text-[11px] mt-0.5">
+                            O arquivo compactado contém fontes Go ({inspectResult.source_files?.length || 1} arquivo(s)) sem o binário final pré-compilado.
+                            O Kraken Admin Tool compilará o módulo WebAssembly (WASI) automaticamente durante a instalação usando o compilador integrado.
+                          </p>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1443,9 +1531,213 @@ export default function PluginsPage() {
               </div>
             )}
 
-            <div className="pt-3 border-t border-slate-800 flex justify-end">
+            <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+              {"plugin_id" in detailsModalPlugin && isAdmin ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const target = detailsModalPlugin as InstalledPlugin;
+                    setDetailsModalPlugin(null);
+                    setUpdateTargetPlugin(target);
+                    setEnableAfterUpdate(target.status === "enabled");
+                    setUpdateFile(null);
+                    setUpdateError(null);
+                    setUpdateSuccess(null);
+                    setUpdateInspect(null);
+                  }}
+                  className="text-xs h-8 text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/10 border-indigo-500/30"
+                >
+                  <Upload className="h-3.5 w-3.5 mr-1.5" />
+                  Atualizar Pacote (.zip)
+                </Button>
+              ) : <div />}
               <Button size="sm" onClick={() => setDetailsModalPlugin(null)}>
                 Fechar
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Update Plugin Modal */}
+      {updateTargetPlugin && (
+        <Modal
+          isOpen={Boolean(updateTargetPlugin)}
+          onClose={() => {
+            if (!isUpdating) {
+              setUpdateTargetPlugin(null);
+              setUpdateFile(null);
+              setUpdateInspect(null);
+              setUpdateError(null);
+              setUpdateSuccess(null);
+            }
+          }}
+          title={`Atualizar Plugin: ${updateTargetPlugin.name}`}
+          description={`ID: ${updateTargetPlugin.plugin_id} • Versão instalada: v${updateTargetPlugin.version}`}
+          maxWidth="lg"
+        >
+          <div className="space-y-4">
+            <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs flex items-start gap-2.5">
+              <Info className="h-4 w-4 shrink-0 mt-0.5 text-indigo-400" />
+              <div>
+                <span className="font-semibold block">Atualização Direta de Pacote (.zip / .tar.gz)</span>
+                <span>
+                  Envie o novo arquivo compactado com as modificações do plugin. O Kraken atualizará os arquivos em disco e executará a compilação necessária (WASM ou Dockerfile), mesmo que o número da versão seja o mesmo (ideal para desenvolvimento).
+                </span>
+              </div>
+            </div>
+
+            {updateSuccess && (
+              <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>{updateSuccess}</span>
+              </div>
+            )}
+
+            {updateError && (
+              <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                <span>{updateError}</span>
+              </div>
+            )}
+
+            <input
+              type="file"
+              ref={updateFileInputRef}
+              accept=".zip,.tar.gz,.tgz"
+              onChange={(e) => {
+                if (e.target.files?.[0]) {
+                  handleSelectUpdateFile(e.target.files[0]);
+                }
+              }}
+              className="hidden"
+            />
+
+            <div
+              onClick={() => !isUpdating && updateFileInputRef.current?.click()}
+              className={`p-6 border-2 border-dashed rounded-xl text-center cursor-pointer transition ${
+                updateFile
+                  ? "border-indigo-500/60 bg-indigo-500/10"
+                  : "border-slate-800 hover:border-slate-700 bg-slate-950/40"
+              }`}
+            >
+              <Upload className="h-7 w-7 text-indigo-400 mx-auto mb-2" />
+              {updateFile ? (
+                <div>
+                  <span className="text-xs font-semibold text-indigo-300 block">{updateFile.name}</span>
+                  <span className="text-[11px] text-slate-400 font-mono">
+                    {(updateFile.size / 1024).toFixed(1)} KB
+                  </span>
+                  <span className="text-[11px] text-slate-500 block mt-1">
+                    Clique para escolher outro arquivo
+                  </span>
+                </div>
+              ) : (
+                <div>
+                  <span className="text-xs text-slate-300 font-medium block">
+                    Clique para selecionar o novo arquivo .zip ou .tar.gz
+                  </span>
+                  <span className="text-[10px] text-slate-500">Pacotes até 50 MB</span>
+                </div>
+              )}
+            </div>
+
+            {isInspectingUpdate && (
+              <div className="flex items-center gap-2 text-xs text-slate-400 py-1">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin text-indigo-400" />
+                <span>Inspecionando pacote selecionado...</span>
+              </div>
+            )}
+
+            {updateInspect && (
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Versão no novo pacote:</span>
+                  <span className="font-mono text-white font-semibold">
+                    v{updateInspect.manifest?.version || "1.0.0"}
+                    {updateInspect.manifest?.version === updateTargetPlugin.version && (
+                      <span className="ml-1.5 text-[10px] text-amber-400 font-sans font-normal">
+                        (mesma versão — atualização de desenvolvimento)
+                      </span>
+                    )}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Tipo de Execução:</span>
+                  <span className="font-mono text-indigo-300 uppercase text-[11px]">
+                    {updateInspect.manifest?.runtime?.type || "none"}
+                  </span>
+                </div>
+
+                {updateInspect.needs_compilation && (
+                  <div className="text-[11px] text-sky-400 flex items-center gap-1.5 pt-1 border-t border-slate-800/80">
+                    <Hammer className="h-3 w-3 shrink-0" />
+                    <span>
+                      {updateInspect.manifest?.runtime?.type === "container"
+                        ? "O Dockerfile será compilado e a imagem Docker será recriada automaticamente."
+                        : "O código-fonte Go será recompilado em binário WASM automaticamente."}
+                    </span>
+                  </div>
+                )}
+
+                {updateInspect.manifest?.id && updateInspect.manifest.id !== updateTargetPlugin.plugin_id && (
+                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                    <span>
+                      Atenção: O ID no pacote é <strong>{updateInspect.manifest.id}</strong>, diferente do plugin alvo (<strong>{updateTargetPlugin.plugin_id}</strong>).
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="pt-2">
+              <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={enableAfterUpdate}
+                  onChange={(e) => setEnableAfterUpdate(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-900 cursor-pointer"
+                />
+                <span>Manter plugin ativo após a atualização</span>
+              </label>
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setUpdateTargetPlugin(null);
+                  setUpdateFile(null);
+                  setUpdateInspect(null);
+                  setUpdateError(null);
+                  setUpdateSuccess(null);
+                }}
+                disabled={isUpdating}
+              >
+                Cancelar
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handleConfirmUpdate}
+                disabled={!updateFile || isUpdating || isInspectingUpdate}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white"
+              >
+                {isUpdating ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                    Atualizando Plugin...
+                  </>
+                ) : (
+                  <>
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
+                    Confirmar Atualização
+                  </>
+                )}
               </Button>
             </div>
           </div>

@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kraken/admin-tool/backend/internal/models"
@@ -110,3 +111,103 @@ func main() {
 	}
 	t.Logf("Execution output: %+v", res)
 }
+
+func TestInspect_ContainerPluginWithDockerfile(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	manifestContent := `{
+		"id": "com.test.dockerplugin",
+		"name": "Docker Plugin Test",
+		"version": "1.0.0",
+		"runtime": {
+			"type": "container"
+		},
+		"frontend": {
+			"entrypoint": "frontend/worker.js"
+		}
+	}`
+	wManifest, _ := zw.Create("plugin.json")
+	_, _ = wManifest.Write([]byte(manifestContent))
+
+	dockerfileContent := `FROM alpine:latest
+WORKDIR /app
+COPY . .
+CMD ["echo", "running"]
+`
+	wDF, _ := zw.Create("Dockerfile")
+	_, _ = wDF.Write([]byte(dockerfileContent))
+
+	wWorker, _ := zw.Create("frontend/worker.js")
+	_, _ = wWorker.Write([]byte("console.log('worker');"))
+
+	zw.Close()
+
+	insp, err := InspectArchive("plugin.zip", buf.Bytes(), nil)
+	if err != nil {
+		t.Fatalf("InspectArchive failed: %v", err)
+	}
+
+	if !insp.NeedsCompilation {
+		t.Errorf("expected NeedsCompilation=true for container plugin with Dockerfile")
+	}
+	if !insp.SourceDetected {
+		t.Errorf("expected SourceDetected=true for container plugin with Dockerfile")
+	}
+	if insp.Manifest.Runtime.Dockerfile != "Dockerfile" {
+		t.Errorf("expected manifest Runtime.Dockerfile='Dockerfile', got '%s'", insp.Manifest.Runtime.Dockerfile)
+	}
+	if insp.Manifest.Runtime.Entrypoint != "kraken-plugin-com-test-dockerplugin:1.0.0" {
+		t.Errorf("expected auto-generated entrypoint tag, got '%s'", insp.Manifest.Runtime.Entrypoint)
+	}
+}
+
+func TestInspect_ContainerPlugin_MissingBoth_FailsHelpfully(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	manifestContent := `{
+		"id": "com.test.emptycontainer",
+		"name": "Empty Container Test",
+		"version": "1.0.0",
+		"runtime": {
+			"type": "container"
+		}
+	}`
+	wManifest, _ := zw.Create("plugin.json")
+	_, _ = wManifest.Write([]byte(manifestContent))
+	zw.Close()
+
+	_, err := InspectArchive("plugin.zip", buf.Bytes(), nil)
+	if err == nil {
+		t.Fatalf("expected error when neither Dockerfile nor entrypoint is provided, got nil")
+	}
+	if !strings.Contains(err.Error(), "requires a 'Dockerfile' in the plugin archive or an 'entrypoint'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestTarDirectoryToBuffer(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte("FROM alpine\n"), 0644)
+	_ = os.Mkdir(filepath.Join(tmpDir, "backend"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "backend", "app.py"), []byte("print('hello')\n"), 0644)
+
+	buf, err := tarDirectoryToBuffer(tmpDir)
+	if err != nil {
+		t.Fatalf("tarDirectoryToBuffer failed: %v", err)
+	}
+
+	if buf.Len() == 0 {
+		t.Fatalf("expected non-empty tar buffer")
+	}
+}
+
+func TestSanitizeDockerfileContent(t *testing.T) {
+	in := []byte("FROM mcr.microsoft.com/powershell:lts-ubuntu-22.04\nRUN pwsh -Command \"Install-Module -Name PSWSMan -Force; Install-WSMan\"\n")
+	out := string(sanitizeDockerfileContent(in))
+	if !strings.Contains(out, "Enable-PSWSMan -Force") {
+		t.Errorf("expected Enable-PSWSMan -Force fallback in sanitized Dockerfile, got: %s", out)
+	}
+}
+

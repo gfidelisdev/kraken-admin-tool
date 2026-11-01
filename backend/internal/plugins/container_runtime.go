@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -62,23 +64,33 @@ func (m *ContainerRuntimeManager) StartContainer(ctx context.Context, plugin *mo
 	// 1. Check if container already exists
 	existing, err := cli.ContainerInspect(ctx, containerName)
 	if err == nil {
-		if !existing.State.Running {
-			if startErr := cli.ContainerStart(ctx, existing.ID, container.StartOptions{}); startErr != nil {
-				return existing.ID, fmt.Errorf("failed to start existing plugin container: %w", startErr)
-			}
+		if existing.State.Running {
+			return existing.ID, nil
 		}
-		return existing.ID, nil
+		if startErr := cli.ContainerStart(ctx, existing.ID, container.StartOptions{}); startErr == nil {
+			return existing.ID, nil
+		}
+		// Remove stale container that failed to start (e.g., attached to a missing network) and recreate it
+		_ = cli.ContainerRemove(ctx, existing.ID, container.RemoveOptions{Force: true})
 	}
 
-	// 2. Ensure image exists locally or attempt pull
+	// 2. Ensure image exists locally, build from Dockerfile if present, or attempt pull
 	_, _, inspErr := cli.ImageInspectWithRaw(ctx, imageName)
 	if inspErr != nil {
-		rc, pullErr := cli.ImagePull(ctx, imageName, image.PullOptions{})
-		if pullErr != nil {
-			return "", fmt.Errorf("failed to pull plugin container image '%s': %w", imageName, pullErr)
+		if plugin.InstallPath != "" && (hasDockerfile(plugin.InstallPath) || hasDockerfile(filepath.Join(plugin.InstallPath, "backend"))) {
+			if _, buildErr := BuildContainerPluginImage(ctx, m.dockerService, plugin.InstallPath, manifest); buildErr != nil {
+				return "", fmt.Errorf("failed to build container image '%s' from plugin Dockerfile: %w", imageName, buildErr)
+			}
+		} else if strings.HasPrefix(imageName, "kraken-plugin-") {
+			return "", fmt.Errorf("local plugin image '%s' does not exist on the Docker host and no Dockerfile was found in '%s'", imageName, plugin.InstallPath)
+		} else {
+			rc, pullErr := cli.ImagePull(ctx, imageName, image.PullOptions{})
+			if pullErr != nil {
+				return "", fmt.Errorf("failed to pull container image '%s': %w", imageName, pullErr)
+			}
+			_, _ = io.Copy(io.Discard, rc)
+			rc.Close()
 		}
-		_, _ = io.Copy(io.Discard, rc)
-		rc.Close()
 	}
 
 	// 3. Create container
@@ -103,26 +115,64 @@ func (m *ContainerRuntimeManager) StartContainer(ctx context.Context, plugin *mo
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 	}
 
-	netCfg := &network.NetworkingConfig{
-		EndpointsConfig: map[string]*network.EndpointSettings{
-			"kraken-network": {},
-		},
-	}
-
-	resp, err := cli.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, containerName)
-	if err != nil {
-		// Fallback without kraken-network if network doesn't exist
-		resp, err = cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, containerName)
-		if err != nil {
-			return "", fmt.Errorf("failed to create plugin container: %w", err)
+	var netCfg *network.NetworkingConfig
+	if netName := resolveKrakenNetwork(ctx, cli); netName != "" {
+		netCfg = &network.NetworkingConfig{
+			EndpointsConfig: map[string]*network.EndpointSettings{
+				netName: {},
+			},
 		}
 	}
 
+	resp, err := cli.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, containerName)
+	if err != nil && netCfg != nil {
+		// Fallback without custom network if creation failed
+		resp, err = cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, containerName)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to create plugin container: %w", err)
+	}
+
 	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		if netCfg != nil {
+			// If start failed due to network attachment, recreate on default bridge network
+			_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			if fallbackResp, createErr := cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, containerName); createErr == nil {
+				if startErr := cli.ContainerStart(ctx, fallbackResp.ID, container.StartOptions{}); startErr == nil {
+					return fallbackResp.ID, nil
+				}
+			}
+		}
 		return resp.ID, fmt.Errorf("failed to start plugin container: %w", err)
 	}
 
 	return resp.ID, nil
+}
+
+// resolveKrakenNetwork detects the Docker network that kraken-backend runs on so plugin sidecars can communicate via DNS/IP.
+func resolveKrakenNetwork(ctx context.Context, cli *dockerclient.Client) string {
+	// 1. Inspect self container (by hostname or well-known container name)
+	candidates := []string{"kraken-backend"}
+	if hn, err := os.Hostname(); err == nil && hn != "" {
+		candidates = append([]string{hn}, candidates...)
+	}
+	for _, selfID := range candidates {
+		if insp, err := cli.ContainerInspect(ctx, selfID); err == nil && insp.NetworkSettings != nil {
+			for netName := range insp.NetworkSettings.Networks {
+				if netName != "" && netName != "bridge" && netName != "host" && netName != "none" {
+					return netName
+				}
+			}
+		}
+	}
+
+	// 2. Check well-known compose network names
+	for _, netName := range []string{"kraken-admin-tool_kraken-network", "kraken-network"} {
+		if _, err := cli.NetworkInspect(ctx, netName, network.InspectOptions{}); err == nil {
+			return netName
+		}
+	}
+	return ""
 }
 
 // StopContainer stops and removes the plugin container
@@ -188,8 +238,16 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 
 	resp, err := m.httpClient.Do(httpReq)
 	if err != nil {
-		// Fallback to IP if containerName DNS fails in local dev
+		// Fallback to IP if containerName DNS fails
 		ip := insp.NetworkSettings.IPAddress
+		if ip == "" && insp.NetworkSettings != nil {
+			for _, netEndpoint := range insp.NetworkSettings.Networks {
+				if netEndpoint != nil && netEndpoint.IPAddress != "" {
+					ip = netEndpoint.IPAddress
+					break
+				}
+			}
+		}
 		if ip != "" {
 			altURL := fmt.Sprintf("http://%s:%d/call", ip, internalPort)
 			httpReqAlt, _ := http.NewRequestWithContext(ctx, "POST", altURL, bytes.NewReader(data))
@@ -220,9 +278,18 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 }
 
 func sanitizeContainerName(s string) string {
-	s = strings.ToLower(s)
-	s = strings.ReplaceAll(s, ".", "-")
-	s = strings.ReplaceAll(s, "_", "-")
-	return s
+	var sb strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune('-')
+		}
+	}
+	res := strings.Trim(sb.String(), "-")
+	if res == "" {
+		return "plugin"
+	}
+	return res
 }
 

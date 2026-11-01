@@ -30,8 +30,14 @@ type WasmHostBridge struct {
 // WasmRuntimeManager compiles and executes wasm binaries securely
 type WasmRuntimeManager struct {
 	mu          sync.RWMutex
-	compiledMod map[string]wazero.CompiledModule
+	compiledMod map[string]wasmCompiledEntry
 	runtime     wazero.Runtime
+}
+
+type wasmCompiledEntry struct {
+	mod     wazero.CompiledModule
+	modTime time.Time
+	size    int64
 }
 
 func NewWasmRuntimeManager(ctx context.Context) *WasmRuntimeManager {
@@ -39,7 +45,7 @@ func NewWasmRuntimeManager(ctx context.Context) *WasmRuntimeManager {
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
 
 	return &WasmRuntimeManager{
-		compiledMod: make(map[string]wazero.CompiledModule),
+		compiledMod: make(map[string]wasmCompiledEntry),
 		runtime:     r,
 	}
 }
@@ -58,7 +64,8 @@ func (m *WasmRuntimeManager) Execute(
 	payload interface{},
 	bridge *WasmHostBridge,
 ) (interface{}, error) {
-	if _, err := os.Stat(wasmPath); err != nil {
+	fi, err := os.Stat(wasmPath)
+	if err != nil {
 		return nil, fmt.Errorf("wasm entrypoint file not found: %w", err)
 	}
 
@@ -70,17 +77,24 @@ func (m *WasmRuntimeManager) Execute(
 	execCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// Compile or get cached module
+	// Compile or get cached module (auto-recompiles if file on disk was modified)
 	m.mu.Lock()
-	compiled, exists := m.compiledMod[wasmPath]
-	if !exists {
+	cached, exists := m.compiledMod[wasmPath]
+	var compiled wazero.CompiledModule
+	if !exists || !cached.modTime.Equal(fi.ModTime()) || cached.size != fi.Size() {
 		var cErr error
 		compiled, cErr = m.runtime.CompileModule(execCtx, wasmBytes)
 		if cErr != nil {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("failed to compile wasm module: %w", cErr)
 		}
-		m.compiledMod[wasmPath] = compiled
+		m.compiledMod[wasmPath] = wasmCompiledEntry{
+			mod:     compiled,
+			modTime: fi.ModTime(),
+			size:    fi.Size(),
+		}
+	} else {
+		compiled = cached.mod
 	}
 	m.mu.Unlock()
 
@@ -234,10 +248,15 @@ func (m *WasmRuntimeManager) Execute(
 	return string(output), nil
 }
 
-// InvalidateCache clears the compiled WASM cache for a plugin path
+// InvalidateCache clears the compiled WASM cache for a plugin path or all if empty
 func (m *WasmRuntimeManager) InvalidateCache(wasmPath string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if wasmPath == "" {
+		m.compiledMod = make(map[string]wasmCompiledEntry)
+		return
+	}
 	clean := filepath.Clean(wasmPath)
 	delete(m.compiledMod, clean)
+	delete(m.compiledMod, wasmPath)
 }

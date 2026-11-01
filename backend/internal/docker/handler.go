@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -49,7 +50,8 @@ func (h *Handler) getServerID(r *http.Request) uint {
 
 // ListServersHandler handles GET /api/docker/servers
 func (h *Handler) ListServersHandler(w http.ResponseWriter, r *http.Request) {
-	servers, err := h.Service.ListServers(r.Context())
+	probe := r.URL.Query().Get("probe") == "true"
+	servers, err := h.Service.ListServers(r.Context(), probe)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -64,6 +66,70 @@ func (h *Handler) ListServersHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"data": servers,
 	})
+}
+
+// StreamServersStatusHandler streams real-time status probe updates for all registered servers via SSE.
+// Each server is probed in parallel, and as each probe completes, a status update is immediately sent.
+func (h *Handler) StreamServersStatusHandler(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	servers, err := h.Service.ListServers(r.Context(), false)
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Channel to collect status updates as they finish in parallel
+	type updateMsg struct {
+		ServerID        uint   `json:"server_id"`
+		Status          string `json:"status"`
+		Version         string `json:"version,omitempty"`
+		ContainersCount int    `json:"containers_count"`
+		ImagesCount     int    `json:"images_count"`
+		ErrMsg          string `json:"err_msg,omitempty"`
+	}
+
+	updateChan := make(chan updateMsg, len(servers))
+	var wg sync.WaitGroup
+
+	for _, srv := range servers {
+		wg.Add(1)
+		go func(s models.DockerServer) {
+			defer wg.Done()
+			res := h.Service.ProbeServer(r.Context(), s.ID)
+			updateChan <- updateMsg{
+				ServerID:        res.ID,
+				Status:          res.Status,
+				Version:         res.Version,
+				ContainersCount: res.ContainersCount,
+				ImagesCount:     res.ImagesCount,
+				ErrMsg:          res.ErrMsg,
+			}
+		}(srv)
+	}
+
+	go func() {
+		wg.Wait()
+		close(updateChan)
+	}()
+
+	for msg := range updateChan {
+		data, _ := json.Marshal(msg)
+		_, _ = fmt.Fprintf(w, "event: server_status\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	_, _ = fmt.Fprintf(w, "event: complete\ndata: {\"total\":%d}\n\n", len(servers))
+	flusher.Flush()
 }
 
 // CreateServerHandler handles POST /api/docker/servers

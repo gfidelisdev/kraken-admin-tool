@@ -88,9 +88,27 @@ func ParseAndValidateManifest(data []byte) (*models.PluginManifest, error) {
 		}
 		m.Runtime.Entrypoint = ep
 	} else if rtType == "container" {
-		if strings.TrimSpace(m.Runtime.Entrypoint) == "" {
-			return nil, errors.New("container runtime requires 'entrypoint' specifying the container image")
+		ep := strings.TrimSpace(m.Runtime.Entrypoint)
+		df := strings.TrimSpace(m.Runtime.Dockerfile)
+
+		// If entrypoint looks like a Dockerfile, assign it to Dockerfile
+		if df == "" && (strings.EqualFold(filepath.Base(ep), "dockerfile") || strings.HasSuffix(strings.ToLower(ep), ".dockerfile")) {
+			df = ep
+			ep = ""
 		}
+
+		if df != "" {
+			if err := validateRelativeSafePath(df); err != nil {
+				return nil, fmt.Errorf("invalid dockerfile path: %w", err)
+			}
+			m.Runtime.Dockerfile = filepath.ToSlash(df)
+		}
+
+		if ep == "" {
+			ep = fmt.Sprintf("kraken-plugin-%s:%s", sanitizeContainerName(m.ID), m.Version)
+		}
+		m.Runtime.Entrypoint = ep
+
 		if m.Runtime.Port <= 0 || m.Runtime.Port > 65535 {
 			m.Runtime.Port = 8080 // default container internal port
 		}

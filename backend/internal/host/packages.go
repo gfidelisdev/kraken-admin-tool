@@ -83,7 +83,7 @@ func RefreshPackageRepositories(ctx context.Context, exec Executor, pkgManager s
 	case "apt":
 		cmd = "DEBIAN_FRONTEND=noninteractive apt-get update"
 	case "dnf":
-		cmd = "dnf check-update --refresh -q"
+		cmd = "dnf makecache -q"
 	case "yum":
 		cmd = "yum check-update -q"
 	case "apk":

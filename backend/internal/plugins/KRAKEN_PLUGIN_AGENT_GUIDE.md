@@ -19,14 +19,15 @@ Plugins in Kraken Admin Tool run inside a strictly isolated, multi-tier sandbox:
 2. **Backend Execution Options**:
    - **No Backend (`"runtime": { "type": "none" }`)**: Recommended for UI-only plugins, dashboards, widgets, monitoring viewers, and direct API integrations. Requires **zero compilation** and **no Go code**.
    - **WASM Sandbox (`"runtime": { "type": "wasm" }`)**: Embedded WebAssembly runtime powered by pure-Go `wazero`. Reads JSON request from `os.Stdin` and writes JSON response to `os.Stdout`. Quota: 64 MB memory, 15s execution timeout.
-   - **Container Sidecar (`"runtime": { "type": "container" }`)**: Runs as a managed Docker container sidecar for long-running services.
+   - **Container Sidecar (`"runtime": { "type": "container" }`)**: Runs as a managed Docker container sidecar for long-running services, Python/Node/Go servers, or microservices.
+     - **Auto-Build from Dockerfile**: You do **NOT** need to pre-build or push images to Docker Hub or external registries! Simply supply a standard `Dockerfile` in the root or in `backend/Dockerfile`. Kraken Admin Tool automatically compiles and tags the container image upon import.
+     - **Pre-built Images**: If using an existing image from a registry, specify `"entrypoint": "image:tag"`.
 
 3. **Built-in Kraken Auto-Builder (Source-Only Plugins)**:
    > ⚡ **CRITICAL FOR AI ASSISTANTS**:
-   > Chat models and text generators (Microsoft Copilot, ChatGPT, Claude) typically **lack system compilers** (`go` / `tinygo`) in their generation sandboxes.
-   > **You do NOT need to synthesize or guess binary `.wasm` bytes!**
-   > Simply provide the clean Go source code in `backend/main.go` and specify `"runtime": { "type": "wasm", "entrypoint": "backend/plugin.wasm" }`.
-   > **Kraken Admin Tool will automatically detect the Go source code and compile `plugin.wasm` via its integrated builder during installation.**
+   > Chat models and text generators (Microsoft Copilot, ChatGPT, Claude) typically **lack system compilers** (`go` / `tinygo`) in their generation sandboxes and cannot build Docker images.
+   > - **For WASM plugins**: Simply provide Go source code in `backend/main.go`. Kraken Admin Tool compiles `plugin.wasm` automatically.
+   > - **For Container plugins**: Simply provide a `Dockerfile` in the root or `backend/Dockerfile`. Kraken Admin Tool builds the container image locally automatically during import/installation!
 
 ---
 
@@ -133,6 +134,33 @@ Use this whenever your plugin only adds UI pages, dashboards, tables, or interac
 }
 ```
 
+### Mode C: Plugin with Container Backend (Auto-Built from Dockerfile)
+Use this when your plugin requires Python, Node.js, external binaries, or long-running background workers.
+Kraken will automatically build the container image using the provided `Dockerfile` (or `backend/Dockerfile`) during plugin import without requiring an external registry or pre-built images.
+```json
+{
+  "id": "com.mycompany.container-service",
+  "name": "Custom Microservice Plugin",
+  "version": "1.0.0",
+  "description": "Runs a Python or Node sidecar container service",
+  "author": "Your Company / Author",
+  "license": "Apache-2.0",
+  "runtime": {
+    "type": "container",
+    "dockerfile": "Dockerfile",
+    "port": 8080
+  },
+  "frontend": {
+    "entrypoint": "frontend/worker.js"
+  },
+  "permissions": [
+    "ui:sidebar",
+    "docker:read"
+  ]
+}
+```
+> 💡 *Note*: If `dockerfile` is omitted in the manifest, Kraken automatically looks for `Dockerfile` or `backend/Dockerfile` in the plugin archive. If `entrypoint` is omitted, Kraken automatically generates a local tag `kraken-plugin-<id>:<version>`.
+
 ### Permitted Scopes (`permissions`)
 Only declare permissions strictly required by your plugin:
 - `ui:sidebar` — Adds an entry to the Kraken left navigation menu.
@@ -186,12 +214,115 @@ The declarative tree emitted by `kraken.render(node)` supports the following nod
 | `Page` | `title`, `description`, `children` | Top-level container for full-page surface |
 | `Grid` | `cols` (1, 2, 3, 4), `gap`, `children` | Responsive column layout |
 | `Card` | `title`, `description`, `children` | Elevated card container |
+| `FieldGroup` / `FormRow` | `children` | Responsive horizontal group aligning inputs and buttons cleanly |
+| `Form` | `id`, `actionId`, `children` | Form container emitting a `submit` event on submission |
+| `Input` / `TextInput` | `id`, `label`, `placeholder`, `value`, `defaultValue`, `inputType` (`text`, `url`, `number`, `password`, `email`), `disabled`, `required`, `description` | Form input field with automatic two-way binding |
+| `Textarea` | `id`, `label`, `placeholder`, `value`, `defaultValue`, `rows`, `disabled`, `required`, `description` | Multiline text input |
+| `Select` | `id`, `label`, `options` (`[{label, value}]` or `["val1", "val2"]`), `value`, `disabled`, `description` | Dropdown select menu |
+| `Checkbox` | `id`, `label`, `checked`, `disabled`, `description` | Boolean toggle checkbox |
+| `Button` | `id`, `title`, `variant` (`default`, `secondary`, `destructive`, `outline`), `disabled` | Interactive button triggering `kraken.on(id)`. Automatically passes form inputs in `payload.formData` and top-level fields |
 | `StatCard` | `title`, `value`, `description`, `variant` (`running`, `error`, `pending`, `outline`) | Key metric indicator |
 | `Table` | `columns` (`[{key, label}]`), `rows` (`[{...}]`) | Data table with automatic styling |
-| `Button` | `id`, `title`, `variant` (`default`, `secondary`, `destructive`, `outline`), `disabled` | Interactive button triggering `kraken.on(id)` |
 | `Badge` | `label`, `variant` (`running`, `error`, `pending`, `outline`) | Status tag |
-| `Alert` | `title`, `message`, `variant` (`info`, `warning`, `error`, `success`) | Contextual callout banner |
-| `Text` | `content`, `className` | Plain or highlighted text node |
+| `Alert` | `title`, `description`, `variant` (`info`, `warning`, `destructive`, `success`) | Contextual callout banner |
+| `Terminal` / `CodeBlock` | `code`, `value`, `language` | Formatted monospaced output block |
+| `CustomShadowHtml` | `html` | Isolated Shadow DOM HTML container (styles and scripts sandboxed) |
+
+### Form Inputs & Configuration Handling
+
+Plugins that need user configuration (such as API URLs, thresholds, tokens, or filters) should use `Input` / `TextInput` inside a `Card` or `FieldGroup`.
+
+**How Form Data Reaches Your Worker Event Handlers:**
+1. Whenever a `Button` is clicked, Kraken bundles **all form input values** into `payload.formData` and also flattens them directly on `payload` by their `id`.
+   - For example: if you define an `<Input id="api_url" ... />`, your button click handler receives:
+     ```javascript
+     kraken.on("save-config", async (payload) => {
+       const url = payload.api_url || payload.formData?.api_url;
+       await kraken.kv.set("api_url", url);
+     });
+     ```
+2. You can also listen directly to input changes or enter presses with `kraken.on(inputId, (payload, eventType) => ...)`:
+   - `eventType` will be `"change"` or `"enter"`.
+   - `payload.value` contains the typed string.
+3. Persistent settings should be saved to Kraken Key-Value store:
+   - `await kraken.kv.set(key, value)`
+   - `await kraken.kv.get(key)`
+
+#### Example: Configuration Form with Remote API Integration
+
+```javascript
+// Local reactive state
+const state = {
+  apiUrl: "",
+  data: null,
+  loading: false,
+  error: ""
+};
+
+function renderUI() {
+  kraken.render({
+    type: "Page",
+    title: "Monitor de Serviço",
+    children: [
+      ...(state.error ? [{
+        type: "Alert",
+        title: "Erro",
+        description: state.error,
+        variant: "destructive"
+      }] : []),
+      {
+        type: "Card",
+        title: "Configuração da API",
+        description: "Informe o endpoint HTTP para consumo de métricas.",
+        children: [
+          {
+            type: "FieldGroup",
+            children: [
+              {
+                type: "Input",
+                id: "api_url",
+                label: "URL da API",
+                placeholder: "https://api.exemplo.com/metricas",
+                inputType: "url",
+                value: state.apiUrl
+              },
+              {
+                type: "Button",
+                id: "save-api",
+                title: state.loading ? "Salvando..." : "Salvar e Atualizar",
+                variant: "default",
+                disabled: state.loading
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+}
+
+kraken.on("save-api", async (payload) => {
+  const url = (payload.api_url || payload.formData?.api_url || "").trim();
+  if (!url) {
+    state.error = "A URL da API não pode ser vazia.";
+    renderUI();
+    return;
+  }
+  state.apiUrl = url;
+  await kraken.kv.set("api_url", url);
+  state.error = "";
+  await fetchMetrics();
+});
+
+// Initialize on plugin startup
+(async () => {
+  try {
+    state.apiUrl = (await kraken.kv.get("api_url")) || "";
+  } catch (_) {}
+  renderUI();
+  if (state.apiUrl) await fetchMetrics();
+})();
+```
 
 ### Complete Frontend Example (`frontend/worker.js`)
 

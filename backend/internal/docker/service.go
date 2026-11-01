@@ -82,6 +82,7 @@ type DockerService struct {
 	errMsg      string
 	mu          sync.RWMutex
 	clients     map[uint]*client.Client
+	clientLocks sync.Map // uint -> *sync.Mutex
 }
 
 // NewDockerService creates and initializes a multi-host Docker service with default fallback
@@ -216,7 +217,7 @@ func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.C
 		return nil, errors.New("docker daemon is currently unavailable")
 	}
 
-	// Check cached client
+	// Check cached client first
 	s.mu.RLock()
 	cli, exists := s.clients[serverID]
 	s.mu.RUnlock()
@@ -224,12 +225,17 @@ func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.C
 		return cli, nil
 	}
 
-	// Lock to create new client
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Per-server lock to serialize creation for this specific serverID without blocking other servers
+	val, _ := s.clientLocks.LoadOrStore(serverID, &sync.Mutex{})
+	serverMu := val.(*sync.Mutex)
+	serverMu.Lock()
+	defer serverMu.Unlock()
 
-	// Double check after lock
-	if cli, exists := s.clients[serverID]; exists && cli != nil {
+	// Double check after acquiring server lock
+	s.mu.RLock()
+	cli, exists = s.clients[serverID]
+	s.mu.RUnlock()
+	if exists && cli != nil {
 		return cli, nil
 	}
 
@@ -269,8 +275,15 @@ func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.C
 		return nil, fmt.Errorf("failed to create client for server %s: %w", server.Name, err)
 	}
 
-	// Test connection ping
-	pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+	// Test connection ping with bounded timeout
+	timeout := 3 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	pingCtx, pingCancel := context.WithTimeout(ctx, timeout)
 	defer pingCancel()
 
 	if _, err := newCli.Ping(pingCtx); err != nil {
@@ -286,7 +299,10 @@ func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.C
 		"err_msg": "",
 	})
 
+	s.mu.Lock()
 	s.clients[serverID] = newCli
+	s.mu.Unlock()
+
 	return newCli, nil
 }
 
@@ -372,8 +388,93 @@ func (s *DockerService) GetSSHClient(ctx context.Context, serverID uint, overrid
 
 // --- Server Management (CRUD) ---
 
-// ListServers returns all registered Docker servers with updated status and counts
-func (s *DockerService) ListServers(ctx context.Context) ([]models.DockerServer, error) {
+// ServerStatusResult represents the connectivity probe outcome for a single server
+type ServerStatusResult struct {
+	ID              uint   `json:"server_id"`
+	Name            string `json:"name"`
+	HostURL         string `json:"host_url"`
+	Status          string `json:"status"` // CONNECTED, UNREACHABLE, CONNECTING
+	Version         string `json:"version,omitempty"`
+	ContainersCount int    `json:"containers_count"`
+	ImagesCount     int    `json:"images_count"`
+	ErrMsg          string `json:"err_msg,omitempty"`
+}
+
+// ProbeServer checks connectivity to a single server and refreshes its status and counts
+func (s *DockerService) ProbeServer(ctx context.Context, serverID uint) ServerStatusResult {
+	res := ServerStatusResult{
+		ID:     serverID,
+		Status: "UNREACHABLE",
+	}
+
+	var server models.DockerServer
+	if s.db != nil {
+		if err := s.db.First(&server, serverID).Error; err == nil {
+			res.Name = server.Name
+			res.HostURL = server.HostURL
+			res.ContainersCount = server.Containers
+			res.ImagesCount = server.Images
+			res.Version = server.Version
+		}
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+	defer cancel()
+
+	cli, err := s.GetClient(probeCtx, serverID)
+	if err != nil || cli == nil {
+		res.Status = "UNREACHABLE"
+		if err != nil {
+			res.ErrMsg = err.Error()
+		}
+		if s.db != nil {
+			s.db.Model(&models.DockerServer{}).Where("id = ?", serverID).Updates(map[string]interface{}{
+				"status":  res.Status,
+				"err_msg": res.ErrMsg,
+			})
+		}
+		return res
+	}
+
+	ver, verErr := cli.ServerVersion(probeCtx)
+	if verErr != nil {
+		res.Status = "UNREACHABLE"
+		res.ErrMsg = verErr.Error()
+		if s.db != nil {
+			s.db.Model(&models.DockerServer{}).Where("id = ?", serverID).Updates(map[string]interface{}{
+				"status":  res.Status,
+				"err_msg": res.ErrMsg,
+			})
+		}
+		return res
+	}
+
+	res.Status = "CONNECTED"
+	res.Version = ver.Version
+	res.ErrMsg = ""
+
+	cList, _ := cli.ContainerList(probeCtx, container.ListOptions{All: true})
+	res.ContainersCount = len(cList)
+	imgList, _ := cli.ImageList(probeCtx, image.ListOptions{All: false})
+	res.ImagesCount = len(imgList)
+
+	if s.db != nil {
+		s.db.Model(&models.DockerServer{}).Where("id = ?", serverID).Updates(map[string]interface{}{
+			"status":     res.Status,
+			"version":    res.Version,
+			"containers": res.ContainersCount,
+			"images":     res.ImagesCount,
+			"err_msg":    "",
+		})
+	}
+
+	return res
+}
+
+// ListServers returns all registered Docker servers.
+// If probe is true, it verifies connectivity and counts concurrently in parallel.
+// If probe is false or omitted, it returns the database records immediately without blocking.
+func (s *DockerService) ListServers(ctx context.Context, probe ...bool) ([]models.DockerServer, error) {
 	if s.db == nil {
 		// Return single default server mock if no DB
 		return []models.DockerServer{
@@ -392,40 +493,33 @@ func (s *DockerService) ListServers(ctx context.Context) ([]models.DockerServer,
 		return nil, err
 	}
 
-	// Enrich servers with container/image counts and versions
 	for i := range servers {
 		if servers[i].CredentialPolicy == "" {
 			servers[i].CredentialPolicy = "save_securely"
 		}
 		servers[i].HasSavedSudoPassword = (servers[i].SudoPassword != "")
-
-		cli, err := s.GetClient(ctx, servers[i].ID)
-		if err == nil && cli != nil {
-			pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
-			ver, verErr := cli.ServerVersion(pingCtx)
-			pingCancel()
-
-			if verErr == nil {
-				servers[i].Status = "CONNECTED"
-				servers[i].Version = ver.Version
-				servers[i].ErrMsg = ""
-
-				// Fetch quick counts
-				cList, _ := cli.ContainerList(ctx, container.ListOptions{All: true})
-				servers[i].Containers = len(cList)
-				imgList, _ := cli.ImageList(ctx, image.ListOptions{All: false})
-				servers[i].Images = len(imgList)
-			} else {
-				servers[i].Status = "UNREACHABLE"
-				servers[i].ErrMsg = verErr.Error()
-			}
-		} else {
-			servers[i].Status = "UNREACHABLE"
-			if err != nil {
-				servers[i].ErrMsg = err.Error()
-			}
-		}
 	}
+
+	shouldProbe := len(probe) > 0 && probe[0]
+	if !shouldProbe {
+		return servers, nil
+	}
+
+	// Probe all servers in parallel
+	var wg sync.WaitGroup
+	for i := range servers {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			res := s.ProbeServer(ctx, servers[idx].ID)
+			servers[idx].Status = res.Status
+			servers[idx].Version = res.Version
+			servers[idx].Containers = res.ContainersCount
+			servers[idx].Images = res.ImagesCount
+			servers[idx].ErrMsg = res.ErrMsg
+		}(i)
+	}
+	wg.Wait()
 
 	return servers, nil
 }

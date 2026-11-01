@@ -204,6 +204,7 @@ func main() {
 		r.Route("/api/docker", func(r chi.Router) {
 			// Servers: Read-only for all, Server management restricted to Admin only
 			r.Get("/servers", dockerHandler.ListServersHandler)
+			r.Get("/servers/status/stream", dockerHandler.StreamServersStatusHandler)
 
 			r.Group(func(adminRouter chi.Router) {
 				adminRouter.Use(auth.RequireRole("admin"))
@@ -353,11 +354,11 @@ func main() {
 
 	// 6. HTTP Server & Graceful Shutdown
 	server := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 0, // 0 for unbounded streaming / WebSockets
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      0, // 0 for unbounded streaming / WebSockets / long builds
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

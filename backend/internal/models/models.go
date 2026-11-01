@@ -183,8 +183,8 @@ type DockerServer struct {
 	IsDefault             bool      `gorm:"default:false;index" json:"is_default"`
 	Status                string    `gorm:"size:32;default:'UNKNOWN'" json:"status"`
 	ErrMsg                string    `gorm:"type:text" json:"err_msg,omitempty"`
-	Containers            int       `gorm:"-" json:"containers_count"`
-	Images                int       `gorm:"-" json:"images_count"`
+	Containers            int       `gorm:"default:0" json:"containers_count"`
+	Images                int       `gorm:"default:0" json:"images_count"`
 	Version               string    `gorm:"size:64" json:"version,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
@@ -631,6 +631,7 @@ type PluginManifest struct {
 type PluginRuntimeConfig struct {
 	Type       string `json:"type"`                 // "none" | "wasm" | "container"
 	Entrypoint string `json:"entrypoint,omitempty"` // e.g. "backend/plugin.wasm" or image name
+	Dockerfile string `json:"dockerfile,omitempty"` // e.g. "Dockerfile" or "backend/Dockerfile"
 	Port       int    `json:"port,omitempty"`       // container port, e.g. 8080
 }
 

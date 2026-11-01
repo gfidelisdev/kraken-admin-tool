@@ -95,7 +95,7 @@ func CheckDetachedStatus(ctx context.Context, exec Executor, serverID uint) (sta
 	return status, isAlive, exitCode, pid, nil
 }
 
-// StreamDetachedLogs attaches to the persistent output.log on the host using tail,
+// StreamDetachedLogs attaches to the persistent output.log on the host,
 // streaming each line to onLine. It stops when the sentinel finished line is detected
 // or when the process dies. It returns the total lines processed and the exit code.
 func StreamDetachedLogs(ctx context.Context, exec Executor, serverID uint, startLine int, onLine func(line string)) (int, int, error) {
@@ -104,36 +104,17 @@ func StreamDetachedLogs(ctx context.Context, exec Executor, serverID uint, start
 	}
 
 	dir := GetDetachedDir(serverID)
-	tailCmd := fmt.Sprintf(`tail -n +%d -f "%s/output.log" 2>/dev/null`, startLine, dir)
-
-	tailCtx, cancelTail := context.WithCancel(ctx)
-	defer cancelTail()
-
-	// Watchdog goroutine: periodically checks if the remote process is still alive.
-	// If process is dead and status is no longer RUNNING, wait 1 second for tail to catch up then cancel tail.
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-tailCtx.Done():
-				return
-			case <-ticker.C:
-				status, isAlive, _, _, err := CheckDetachedStatus(tailCtx, exec, serverID)
-				if err == nil && !isAlive && status != "RUNNING" && status != "UNKNOWN" {
-					time.Sleep(1200 * time.Millisecond)
-					cancelTail()
-					return
-				}
-			}
-		}
-	}()
-
 	lineCount := startLine - 1
 	exitCode := -1
 
-	onChunk := func(chunk string) {
-		scanner := bufio.NewScanner(strings.NewReader(chunk))
+	// Helper to read new lines from lineCount + 1 to current EOF
+	readNewLines := func() (foundSentinel bool) {
+		catCmd := fmt.Sprintf(`tail -n +%d "%s/output.log" 2>/dev/null`, lineCount+1, dir)
+		stdout, _, _, _ := exec.Execute(ctx, catCmd)
+		if stdout == "" {
+			return false
+		}
+		scanner := bufio.NewScanner(strings.NewReader(stdout))
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, SentinelFinishedPrefix) {
@@ -141,27 +122,78 @@ func StreamDetachedLogs(ctx context.Context, exec Executor, serverID uint, start
 				if ec, err := strconv.Atoi(ecStr); err == nil {
 					exitCode = ec
 				}
-				cancelTail()
-				return
+				foundSentinel = true
+				continue
 			}
 			lineCount++
 			if onLine != nil {
 				onLine(line)
 			}
 		}
+		return foundSentinel
 	}
 
-	_, _, _, _ = exec.ExecuteStream(tailCtx, tailCmd, onChunk)
+	// First pass: read any existing logs
+	if readNewLines() {
+		return lineCount, exitCode, nil
+	}
 
-	// If exitCode was not detected from stream, check exit_code file directly
-	if exitCode == -1 {
-		_, _, ec, _, _ := CheckDetachedStatus(ctx, exec, serverID)
-		if ec >= 0 {
-			exitCode = ec
+	// Check if already finished before entering polling loop
+	status, isAlive, finalExit, _, checkErr := CheckDetachedStatus(ctx, exec, serverID)
+	if checkErr == nil && !isAlive && status != "RUNNING" && status != "UNKNOWN" {
+		readNewLines()
+		if exitCode == -1 && finalExit >= 0 {
+			exitCode = finalExit
+		}
+		return lineCount, exitCode, nil
+	}
+
+	// Polling loop
+	ticker := time.NewTicker(400 * time.Millisecond)
+	defer ticker.Stop()
+
+	consecutiveDeadChecks := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return lineCount, exitCode, ctx.Err()
+		case <-ticker.C:
+			if readNewLines() {
+				return lineCount, exitCode, nil
+			}
+
+			// Check process and job status
+			st, alive, ec, _, err := CheckDetachedStatus(ctx, exec, serverID)
+			if err == nil {
+				if ec >= 0 && exitCode == -1 {
+					exitCode = ec
+				}
+				if !alive && st != "RUNNING" && st != "UNKNOWN" {
+					consecutiveDeadChecks++
+					// Give one extra tick to ensure all buffered output is written to disk
+					if consecutiveDeadChecks >= 2 {
+						readNewLines()
+						if exitCode == -1 && ec >= 0 {
+							exitCode = ec
+						}
+						return lineCount, exitCode, nil
+					}
+				} else if !alive && st == "RUNNING" {
+					// Process died unexpectedly without writing exit code
+					consecutiveDeadChecks++
+					if consecutiveDeadChecks >= 3 {
+						readNewLines()
+						if exitCode == -1 {
+							exitCode = 1
+						}
+						return lineCount, exitCode, nil
+					}
+				} else {
+					consecutiveDeadChecks = 0
+				}
+			}
 		}
 	}
-
-	return lineCount, exitCode, nil
 }
 
 // CleanDetachedJob cleans up the temporary directory on the host once a job is acknowledged or completed

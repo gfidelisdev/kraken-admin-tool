@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -220,11 +221,73 @@ func (e *SSHExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoPas
 	}
 }
 
-// LocalExecutor executes commands locally (for local host or containerized daemons)
-type LocalExecutor struct{}
+// LocalExecutor executes commands locally (either on the host machine via nsenter/docker if containerized, or natively)
+type LocalExecutor struct {
+	useHostNamespace  bool
+	useDockerFallback bool
+}
+
+var (
+	localCapOnce           sync.Once
+	cachedUseHostNamespace bool
+	cachedUseDockerFallback bool
+)
+
+func isRunningInContainer() bool {
+	if os.Getenv("KRAKEN_IN_CONTAINER") == "true" {
+		return true
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/run/.containerenv"); err == nil {
+		return true
+	}
+	return false
+}
+
+func canDirectNsenter() bool {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "true")
+	return cmd.Run() == nil
+}
+
+func canDockerNsenter() bool {
+	if _, err := os.Stat("/var/run/docker.sock"); err == nil {
+		if _, err := exec.LookPath("docker"); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func initLocalExecutorCapabilities() {
+	localCapOnce.Do(func() {
+		if isRunningInContainer() {
+			if canDirectNsenter() {
+				cachedUseHostNamespace = true
+			} else if canDockerNsenter() {
+				cachedUseDockerFallback = true
+			}
+		}
+	})
+}
 
 func NewLocalExecutor() *LocalExecutor {
-	return &LocalExecutor{}
+	initLocalExecutorCapabilities()
+	return &LocalExecutor{
+		useHostNamespace:  cachedUseHostNamespace,
+		useDockerFallback: cachedUseDockerFallback,
+	}
+}
+
+func (e *LocalExecutor) buildCmd(ctx context.Context, cmd string) *exec.Cmd {
+	if e.useHostNamespace {
+		return exec.CommandContext(ctx, "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "sh", "-c", cmd)
+	}
+	if e.useDockerFallback {
+		return exec.CommandContext(ctx, "docker", "run", "--rm", "-i", "--privileged", "--pid=host", "alpine", "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "sh", "-c", cmd)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", cmd)
 }
 
 func (e *LocalExecutor) Execute(ctx context.Context, cmd string) (string, string, int, error) {
@@ -232,7 +295,7 @@ func (e *LocalExecutor) Execute(ctx context.Context, cmd string) (string, string
 }
 
 func (e *LocalExecutor) ExecuteStream(ctx context.Context, cmd string, onChunk func(string)) (string, string, int, error) {
-	execCmd := exec.CommandContext(ctx, "sh", "-c", cmd)
+	execCmd := e.buildCmd(ctx, cmd)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	if onChunk != nil {
 		execCmd.Stdout = &streamWriter{buf: &stdoutBuf, onChunk: onChunk}
@@ -256,6 +319,10 @@ func (e *LocalExecutor) ExecuteStream(ctx context.Context, cmd string, onChunk f
 }
 
 func (e *LocalExecutor) isRoot() bool {
+	if e.useHostNamespace || e.useDockerFallback {
+		// When entering host namespace via nsenter from privileged context, we are root on the host
+		return true
+	}
 	return os.Geteuid() == 0
 }
 
@@ -266,10 +333,10 @@ func (e *LocalExecutor) ExecuteSudo(ctx context.Context, cmd string, sudoPasswor
 func (e *LocalExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoPassword string, onChunk func(string)) (string, string, int, error) {
 	var execCmd *exec.Cmd
 	if e.isRoot() {
-		execCmd = exec.CommandContext(ctx, "sh", "-c", cmd)
+		execCmd = e.buildCmd(ctx, cmd)
 	} else {
 		sudoCmd := fmt.Sprintf("LANG=C LC_ALL=C sudo -S -p '' -- sh -c %s", quoteShell(cmd))
-		execCmd = exec.CommandContext(ctx, "sh", "-c", sudoCmd)
+		execCmd = e.buildCmd(ctx, sudoCmd)
 		if sudoPassword != "" {
 			execCmd.Stdin = strings.NewReader(sudoPassword + "\n")
 		}

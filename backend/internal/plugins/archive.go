@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -90,6 +91,7 @@ func InspectArchive(filename string, data []byte, trustedKeys []models.PluginTru
 	var iconData []byte
 	var signatureData []byte
 	var sourceFiles []string
+	var dockerfileFiles []string
 	wasmFiles := make(map[string]int64)
 
 	var fileCount int
@@ -119,6 +121,9 @@ func InspectArchive(filename string, data []byte, trustedKeys []models.PluginTru
 				sourceFiles = append(sourceFiles, normName)
 			} else if strings.HasSuffix(strings.ToLower(normName), ".wasm") {
 				wasmFiles[normName] = int64(f.UncompressedSize64)
+			} else if strings.EqualFold(filepath.Base(normName), "dockerfile") || strings.HasSuffix(strings.ToLower(normName), ".dockerfile") {
+				dockerfileFiles = append(dockerfileFiles, normName)
+				sourceFiles = append(sourceFiles, normName)
 			}
 
 			if normName == "plugin.json" {
@@ -181,6 +186,9 @@ func InspectArchive(filename string, data []byte, trustedKeys []models.PluginTru
 				sourceFiles = append(sourceFiles, normName)
 			} else if strings.HasSuffix(strings.ToLower(normName), ".wasm") {
 				wasmFiles[normName] = header.Size
+			} else if strings.EqualFold(filepath.Base(normName), "dockerfile") || strings.HasSuffix(strings.ToLower(normName), ".dockerfile") {
+				dockerfileFiles = append(dockerfileFiles, normName)
+				sourceFiles = append(sourceFiles, normName)
 			}
 
 			if normName == "plugin.json" {
@@ -237,6 +245,57 @@ func InspectArchive(filename string, data []byte, trustedKeys []models.PluginTru
 			sourceDetected = true
 		} else if len(sourceFiles) > 0 {
 			sourceDetected = true
+		}
+	} else if manifest.Runtime.Type == "container" {
+		var foundDockerfile string
+		if manifest.Runtime.Dockerfile != "" {
+			dfNorm := filepath.ToSlash(manifest.Runtime.Dockerfile)
+			for _, df := range dockerfileFiles {
+				if strings.EqualFold(df, dfNorm) || strings.EqualFold(filepath.Base(df), filepath.Base(dfNorm)) {
+					foundDockerfile = df
+					break
+				}
+			}
+			if foundDockerfile == "" {
+				return nil, fmt.Errorf("declared dockerfile '%s' not found in plugin archive", manifest.Runtime.Dockerfile)
+			}
+		} else {
+			// Find Dockerfile automatically in archive (prefer root "Dockerfile", then "backend/Dockerfile")
+			for _, df := range dockerfileFiles {
+				if strings.EqualFold(df, "Dockerfile") {
+					foundDockerfile = df
+					break
+				}
+			}
+			if foundDockerfile == "" {
+				for _, df := range dockerfileFiles {
+					if strings.EqualFold(df, "backend/Dockerfile") {
+						foundDockerfile = df
+						break
+					}
+				}
+			}
+			if foundDockerfile == "" && len(dockerfileFiles) > 0 {
+				foundDockerfile = dockerfileFiles[0]
+			}
+		}
+
+		if foundDockerfile != "" {
+			manifest.Runtime.Dockerfile = foundDockerfile
+			needsCompilation = true
+			sourceDetected = true
+		} else {
+			// No Dockerfile found in archive. Check if manifest explicitly specified an image entrypoint.
+			var rawCheck struct {
+				Runtime struct {
+					Entrypoint string `json:"entrypoint"`
+					Dockerfile string `json:"dockerfile"`
+				} `json:"runtime"`
+			}
+			_ = json.Unmarshal(manifestData, &rawCheck)
+			if strings.TrimSpace(rawCheck.Runtime.Entrypoint) == "" && strings.TrimSpace(rawCheck.Runtime.Dockerfile) == "" {
+				return nil, errors.New("container runtime requires a 'Dockerfile' in the plugin archive or an 'entrypoint' specifying a container image")
+			}
 		}
 	}
 

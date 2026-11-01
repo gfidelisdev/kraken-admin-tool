@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   Server,
   Plus,
@@ -11,6 +11,7 @@ import {
   Trash2,
   Edit,
   Shield,
+  ShieldCheck,
   Box,
   Disc,
   Lock,
@@ -38,6 +39,7 @@ import { useServer } from "@/context/ServerContext";
 import {
   api,
   testServerStream,
+  streamServersStatus,
   getHostPackages,
   checkHostPackages,
   upgradeHostPackages,
@@ -128,7 +130,15 @@ const CONNECTION_PRESETS: {
 ];
 
 export default function ServersPage() {
-  const { servers, activeServer, setActiveServer, refreshServers, isLoading } = useServer();
+  const {
+    servers,
+    activeServer,
+    setActiveServer,
+    refreshServers,
+    updateServerState,
+    setAllServersStatus,
+    isLoading,
+  } = useServer();
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<string>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -363,11 +373,32 @@ export default function ServersPage() {
     setIsGuideOpen(true);
   };
 
-  const handleManualRefresh = async () => {
+  const startLiveStatusProbe = useCallback(async () => {
     setIsRefreshing(true);
-    await refreshServers();
-    setIsRefreshing(false);
+    setAllServersStatus("CONNECTING");
+
+    try {
+      await streamServersStatus((update) => {
+        updateServerState(update);
+      });
+    } catch (err) {
+      console.warn("Live status stream ended or failed:", err);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [setAllServersStatus, updateServerState]);
+
+  const handleManualRefresh = async () => {
+    await startLiveStatusProbe();
   };
+
+  const hasProbedOnMount = useRef(false);
+  useEffect(() => {
+    if (!hasProbedOnMount.current) {
+      hasProbedOnMount.current = true;
+      startLiveStatusProbe();
+    }
+  }, [startLiveStatusProbe]);
 
   const handleOpenAddModal = () => {
     setEditingServer(null);
@@ -1051,6 +1082,7 @@ export default function ServersPage() {
 
   const onlineCount = servers.filter((s) => s.status === "CONNECTED").length;
   const offlineCount = servers.filter((s) => s.status === "UNREACHABLE").length;
+  const connectingCount = servers.filter((s) => s.status === "CONNECTING").length;
   const hostUpdates = packageStatus?.updates || [];
 
   return (
@@ -1107,7 +1139,7 @@ export default function ServersPage() {
             <RefreshCw
               className={`mr-1.5 h-3.5 w-3.5 ${isRefreshing ? "animate-spin" : ""}`}
             />
-            Atualizar Status
+            {connectingCount > 0 ? `Verificando (${connectingCount})...` : "Atualizar Status"}
           </Button>
           <Button variant="docker" size="sm" onClick={handleOpenAddModal}>
             <Plus className="mr-1.5 h-4 w-4" />
@@ -1133,7 +1165,9 @@ export default function ServersPage() {
             <CheckCircle2 className="h-4 w-4 text-emerald-400" />
           </div>
           <p className="mt-2 text-2xl font-bold text-emerald-400">{onlineCount}</p>
-          <p className="text-[11px] text-slate-500 mt-1">Respondendo ao Ping</p>
+          <p className="text-[11px] text-slate-500 mt-1">
+            {connectingCount > 0 ? `${connectingCount} verificando em paralelo...` : "Respondendo ao Ping"}
+          </p>
         </div>
 
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
@@ -1158,6 +1192,21 @@ export default function ServersPage() {
           </p>
         </div>
       </div>
+
+      {/* Parallel Probe Progress Banner */}
+      {connectingCount > 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-amber-300 text-xs flex items-center justify-between shadow-sm animate-pulse">
+          <div className="flex items-center gap-2.5">
+            <RefreshCw className="h-4 w-4 animate-spin text-amber-400 shrink-0" />
+            <span>
+              Verificando status de <strong>{connectingCount}</strong> host(s) em paralelo. Os status estão como <em>Tentando conectar...</em> e atualizarão automaticamente.
+            </span>
+          </div>
+          <span className="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold shrink-0 hidden sm:inline">
+            Paralelo Ativo
+          </span>
+        </div>
+      )}
 
       {/* Search and Sort */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
@@ -1317,23 +1366,40 @@ export default function ServersPage() {
                         <div className="flex items-center space-x-1.5">
                           <span
                             className={`h-2 w-2 rounded-full ${
-                              isOnline ? "bg-emerald-400" : "bg-rose-400"
+                              server.status === "CONNECTING"
+                                ? "bg-amber-400 animate-pulse"
+                                : isOnline
+                                ? "bg-emerald-400"
+                                : "bg-rose-400"
                             }`}
                           />
                           <span
-                            className={`text-xs font-medium ${
-                              isOnline ? "text-emerald-400" : "text-rose-400"
+                            className={`text-xs font-medium flex items-center gap-1.5 ${
+                              server.status === "CONNECTING"
+                                ? "text-amber-400 font-semibold"
+                                : isOnline
+                                ? "text-emerald-400"
+                                : "text-rose-400"
                             }`}
                           >
-                            {isOnline ? "Online" : "Inacessível"}
+                            {server.status === "CONNECTING" ? (
+                              <>
+                                <RefreshCw className="h-3 w-3 animate-spin text-amber-400 shrink-0" />
+                                <span>Tentando conectar...</span>
+                              </>
+                            ) : isOnline ? (
+                              "Online"
+                            ) : (
+                              "Inacessível"
+                            )}
                           </span>
                         </div>
-                        {server.version && (
+                        {server.version && server.status !== "CONNECTING" && (
                           <span className="text-[10px] font-mono text-slate-400">
                             Docker {server.version}
                           </span>
                         )}
-                        {server.err_msg && (
+                        {server.err_msg && server.status !== "CONNECTING" && (
                           <span
                             className="text-[10px] text-rose-400/80 line-clamp-1 max-w-[200px]"
                             title={server.err_msg}
@@ -2059,66 +2125,80 @@ export default function ServersPage() {
             </div>
 
             {/* Sudo Privilege Escalation Policy */}
-            <div className="pt-2 border-t border-slate-800/80">
-              <label className="text-[11px] font-medium text-slate-300 block mb-1">
-                Privilégios de Administrador (Sudo / Gerenciamento de Pacotes)
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSudoPolicy("always_prompt")}
-                  className={`p-2.5 rounded-lg border text-left transition-all ${
-                    sudoPolicy === "always_prompt"
-                      ? "bg-sky-500/10 border-sky-500/40 text-sky-300"
-                      : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
-                  }`}
-                >
-                  <div className="text-xs font-medium flex items-center gap-1.5">
-                    <KeyRound className="h-3.5 w-3.5" />
-                    Sempre Solicitar Sudo
+            {connectionType === "local" || hostUrl.startsWith("unix://") ? (
+              <div className="pt-2 border-t border-slate-800/80">
+                <div className="rounded-lg border border-sky-500/20 bg-sky-500/10 p-3 text-xs text-sky-300 flex items-start gap-2">
+                  <ShieldCheck className="h-4 w-4 shrink-0 text-sky-400 mt-0.5" />
+                  <div>
+                    <div className="font-semibold text-slate-200">Acesso Administrativo Direto (Host Root)</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                      Este servidor local utiliza integração direta via namespace do host (<code className="text-sky-300">nsenter</code>). As operações de verificação e atualização de pacotes são executadas nativamente com privilégios de root, sem necessidade de senha de sudo.
+                    </div>
                   </div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">
-                    Solicita a senha a cada verificação ou atualização que exigir root.
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSudoPolicy("save_securely")}
-                  className={`p-2.5 rounded-lg border text-left transition-all ${
-                    sudoPolicy === "save_securely"
-                      ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300"
-                      : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
-                  }`}
-                >
-                  <div className="text-xs font-medium flex items-center gap-1.5">
-                    <Lock className="h-3.5 w-3.5" />
-                    Salvar Sudo Criptografado
-                  </div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">
-                    Senha de sudo salva com criptografia AES-GCM para atualizações automáticas.
-                  </div>
-                </button>
-              </div>
-
-              {sudoPolicy === "save_securely" && (
-                <div className="mt-2.5">
-                  <label className="text-[11px] font-medium text-slate-400">
-                    Senha de Sudo do Host
-                  </label>
-                  <Input
-                    type="password"
-                    placeholder="Digite a senha de sudo / root"
-                    value={sudoPassword}
-                    onChange={(e) => setSudoPassword(e.target.value)}
-                    className="mt-1"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    Enviada ao comando sudo exclusivamente via stdin seguro. Nunca exposta em ps ou logs.
-                  </p>
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div className="pt-2 border-t border-slate-800/80">
+                <label className="text-[11px] font-medium text-slate-300 block mb-1">
+                  Privilégios de Administrador (Sudo / Gerenciamento de Pacotes)
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSudoPolicy("always_prompt")}
+                    className={`p-2.5 rounded-lg border text-left transition-all ${
+                      sudoPolicy === "always_prompt"
+                        ? "bg-sky-500/10 border-sky-500/40 text-sky-300"
+                        : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
+                    }`}
+                  >
+                    <div className="text-xs font-medium flex items-center gap-1.5">
+                      <KeyRound className="h-3.5 w-3.5" />
+                      Sempre Solicitar Sudo
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      Solicita a senha a cada verificação ou atualização que exigir root.
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSudoPolicy("save_securely")}
+                    className={`p-2.5 rounded-lg border text-left transition-all ${
+                      sudoPolicy === "save_securely"
+                        ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300"
+                        : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
+                    }`}
+                  >
+                    <div className="text-xs font-medium flex items-center gap-1.5">
+                      <Lock className="h-3.5 w-3.5" />
+                      Salvar Sudo Criptografado
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      Senha de sudo salva com criptografia AES-GCM para atualizações automáticas.
+                    </div>
+                  </button>
+                </div>
+
+                {sudoPolicy === "save_securely" && (
+                  <div className="mt-2.5">
+                    <label className="text-[11px] font-medium text-slate-400">
+                      Senha de Sudo do Host
+                    </label>
+                    <Input
+                      type="password"
+                      placeholder="Digite a senha de sudo / root"
+                      value={sudoPassword}
+                      onChange={(e) => setSudoPassword(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Enviada ao comando sudo exclusivamente via stdin seguro. Nunca exposta em ps ou logs.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Package Manager Preference */}
             <div className="space-y-1.5 pt-2 border-t border-slate-800">
@@ -2272,7 +2352,13 @@ export default function ServersPage() {
                       </select>
                     </div>
                     <span>•</span>
-                    <span>Sudo: {(packageStatus?.has_saved_sudo_password ?? packageModalServer.has_saved_sudo_password) ? "🔒 Senha Salva" : "⚡ Solicitar Sempre"}</span>
+                    <span>
+                      {packageStatus?.requires_sudo === false || packageModalServer?.host_url?.startsWith("unix://")
+                        ? "Privilégios: ⚡ Root Direto (Host)"
+                        : (packageStatus?.has_saved_sudo_password ?? packageModalServer.has_saved_sudo_password)
+                        ? "Sudo: 🔒 Senha Salva"
+                        : "Sudo: ⚡ Solicitar Sempre"}
+                    </span>
                     {packageStatus?.last_checked && (
                       <>
                         <span>•</span>

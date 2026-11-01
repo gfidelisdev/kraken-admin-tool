@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import {
   Box,
@@ -19,6 +19,14 @@ import {
   Clock,
   ShieldCheck,
   Puzzle,
+  GripVertical,
+  ArrowUp,
+  ArrowDown,
+  Minimize2,
+  Maximize2,
+  EyeOff,
+  SlidersHorizontal,
+  LayoutGrid,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import {
@@ -32,13 +40,52 @@ import {
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
-import { Table, TableHeader, TableRow, TableHead, SortableTableHead, TableBody, TableCell, TableEmpty } from "@/components/ui/Table";
+import {
+  Table,
+  TableHeader,
+  TableRow,
+  TableHead,
+  SortableTableHead,
+  TableBody,
+  TableCell,
+  TableEmpty,
+} from "@/components/ui/Table";
 import { sortItems, SortDirection } from "@/lib/sort";
 import { useServer } from "@/context/ServerContext";
 import { usePlugins } from "@/context/PluginContext";
 import { PluginSurfaceRenderer } from "@/components/plugins/PluginSurfaceRenderer";
 import { PullImageModal } from "@/components/modals/PullImageModal";
+import {
+  CustomizeDashboardModal,
+  DashboardItemDefinition,
+} from "@/components/modals/CustomizeDashboardModal";
 import { formatDate } from "@/lib/utils";
+
+const STORAGE_KEY = "kraken_dashboard_layout_v1";
+
+const DEFAULT_ORDER = [
+  "metrics",
+  "plugin_widgets",
+  "infra_health",
+  "quick_nav",
+  "audit_logs",
+];
+
+const DEFAULT_VISIBILITY: Record<string, boolean> = {
+  metrics: true,
+  plugin_widgets: true,
+  infra_health: true,
+  quick_nav: true,
+  audit_logs: true,
+};
+
+const DEFAULT_COLLAPSED: Record<string, boolean> = {
+  metrics: false,
+  plugin_widgets: false,
+  infra_health: false,
+  quick_nav: false,
+  audit_logs: false,
+};
 
 export default function DashboardOverviewPage() {
   const { activeServer } = useServer();
@@ -51,8 +98,63 @@ export default function DashboardOverviewPage() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pullModalOpen, setPullModalOpen] = useState(false);
+  const [customizeModalOpen, setCustomizeModalOpen] = useState(false);
   const [auditSortKey, setAuditSortKey] = useState<string>("timestamp");
   const [auditSortDir, setAuditSortDir] = useState<SortDirection>("desc");
+
+  // Dashboard Layout State (Order, Visibility, Collapsed/Compact view)
+  const [order, setOrder] = useState<string[]>(DEFAULT_ORDER);
+  const [visibility, setVisibility] = useState<Record<string, boolean>>(DEFAULT_VISIBILITY);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(DEFAULT_COLLAPSED);
+
+  // Drag-and-drop state
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  // Load saved preferences on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed.order)) {
+          // Ensure all default items exist even if new ones are added
+          const mergedOrder = [
+            ...parsed.order.filter((id: string) => DEFAULT_ORDER.includes(id)),
+            ...DEFAULT_ORDER.filter((id) => !parsed.order.includes(id)),
+          ];
+          setOrder(mergedOrder);
+        }
+        if (parsed.visibility && typeof parsed.visibility === "object") {
+          setVisibility({ ...DEFAULT_VISIBILITY, ...parsed.visibility });
+        }
+        if (parsed.collapsed && typeof parsed.collapsed === "object") {
+          setCollapsed({ ...DEFAULT_COLLAPSED, ...parsed.collapsed });
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to load dashboard layout from localStorage:", e);
+    }
+  }, []);
+
+  // Save preferences to localStorage
+  const saveLayout = useCallback(
+    (newOrder: string[], newVisibility: Record<string, boolean>, newCollapsed: Record<string, boolean>) => {
+      try {
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            order: newOrder,
+            visibility: newVisibility,
+            collapsed: newCollapsed,
+          })
+        );
+      } catch (e) {
+        console.warn("Failed to persist dashboard layout:", e);
+      }
+    },
+    []
+  );
 
   const handleAuditSort = (key: string) => {
     if (auditSortKey === key) {
@@ -130,40 +232,190 @@ export default function DashboardOverviewPage() {
     (p) => p.status?.toLowerCase() === "running"
   ).length;
 
-  return (
-    <div className="space-y-8 animate-in fade-in duration-300">
-      {/* Top Banner & Refresh */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Dashboard Overview</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Real-time status of Docker engine, Kubernetes workloads and cluster operations.
-          </p>
-        </div>
-        <div className="flex items-center space-x-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchDashboardData}
-            isLoading={isLoading}
-            className="text-xs"
-          >
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-            Refresh
-          </Button>
-          <Button
-            variant="docker"
-            size="sm"
-            onClick={() => setPullModalOpen(true)}
-            className="text-xs"
-          >
-            <Download className="mr-1.5 h-3.5 w-3.5" />
-            Pull Image
-          </Button>
-        </div>
-      </div>
+  // Reorder Handler
+  const handleReorder = (newOrder: string[]) => {
+    setOrder(newOrder);
+    saveLayout(newOrder, visibility, collapsed);
+  };
 
-      {/* Metrics Row */}
+  const handleMove = (id: string, direction: "up" | "down") => {
+    const currentIndex = order.indexOf(id);
+    if (currentIndex === -1) return;
+    const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= order.length) return;
+
+    const newOrder = [...order];
+    const [moved] = newOrder.splice(currentIndex, 1);
+    newOrder.splice(targetIndex, 0, moved);
+    setOrder(newOrder);
+    saveLayout(newOrder, visibility, collapsed);
+  };
+
+  // Visibility Handlers
+  const handleToggleVisibility = (id: string) => {
+    const next = { ...visibility, [id]: !visibility[id] };
+    setVisibility(next);
+    saveLayout(order, next, collapsed);
+  };
+
+  const handleSetAllVisibility = (visible: boolean) => {
+    const next: Record<string, boolean> = {};
+    order.forEach((id) => {
+      next[id] = visible;
+    });
+    setVisibility(next);
+    saveLayout(order, next, collapsed);
+  };
+
+  // Collapse/Expand Handlers
+  const handleToggleCollapse = (id: string) => {
+    const next = { ...collapsed, [id]: !collapsed[id] };
+    setCollapsed(next);
+    saveLayout(order, visibility, next);
+  };
+
+  const handleSetAllCollapse = (isCollapsed: boolean) => {
+    const next: Record<string, boolean> = {};
+    order.forEach((id) => {
+      next[id] = isCollapsed;
+    });
+    setCollapsed(next);
+    saveLayout(order, visibility, next);
+  };
+
+  // Reset to default
+  const handleResetLayout = () => {
+    setOrder(DEFAULT_ORDER);
+    setVisibility(DEFAULT_VISIBILITY);
+    setCollapsed(DEFAULT_COLLAPSED);
+    saveLayout(DEFAULT_ORDER, DEFAULT_VISIBILITY, DEFAULT_COLLAPSED);
+  };
+
+  // Drag and drop handlers
+  const handleDragStart = (e: React.DragEvent, id: string) => {
+    e.dataTransfer.setData("text/plain", id);
+    e.dataTransfer.effectAllowed = "move";
+    setDraggedId(id);
+  };
+
+  const handleDragOver = (e: React.DragEvent, id: string) => {
+    e.preventDefault();
+    if (draggedId && draggedId !== id) {
+      setDragOverId(id);
+    }
+  };
+
+  const handleDragLeave = () => {
+    setDragOverId(null);
+  };
+
+  const handleDrop = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    setDragOverId(null);
+    setDraggedId(null);
+    const sourceId = e.dataTransfer.getData("text/plain");
+    if (!sourceId || sourceId === targetId) return;
+
+    const fromIndex = order.indexOf(sourceId);
+    const toIndex = order.indexOf(targetId);
+    if (fromIndex === -1 || toIndex === -1) return;
+
+    const newOrder = [...order];
+    const [moved] = newOrder.splice(fromIndex, 1);
+    newOrder.splice(toIndex, 0, moved);
+    setOrder(newOrder);
+    saveLayout(newOrder, visibility, collapsed);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedId(null);
+    setDragOverId(null);
+  };
+
+  // Item definitions for customizing
+  const itemDefinitions: DashboardItemDefinition[] = useMemo(
+    () => [
+      {
+        id: "metrics",
+        title: "Métricas de Containers & Workloads",
+        description: "Contadores de containers Docker, imagens locais, pods Kubernetes e deployments.",
+        icon: <Box className="h-4 w-4" />,
+      },
+      {
+        id: "plugin_widgets",
+        title: "Widgets de Plugins Ativos",
+        description: "Extensões e widgets declarativos fornecidos pelos plugins instalados.",
+        icon: <Puzzle className="h-4 w-4" />,
+      },
+      {
+        id: "infra_health",
+        title: "Saúde da Infraestrutura",
+        description: "Conexão com Docker Engine, cluster Kubernetes e banco de dados PostgreSQL.",
+        icon: <Activity className="h-4 w-4" />,
+      },
+      {
+        id: "quick_nav",
+        title: "Acesso Rápido a Recursos",
+        description: "Atalhos rápidos para gerenciar containers, pods e transmissão ao vivo de logs.",
+        icon: <ArrowRight className="h-4 w-4" />,
+      },
+      {
+        id: "audit_logs",
+        title: "Auditoria Recente de Operações",
+        description: "Histórico das últimas operações e ações executadas no cluster.",
+        icon: <ShieldCheck className="h-4 w-4" />,
+      },
+    ],
+    []
+  );
+
+  // Section Renders (Full vs Compact)
+  const renderMetrics = (isCompact: boolean) => {
+    if (isCompact) {
+      return (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 py-1">
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div>
+              <span className="text-[11px] text-slate-400 block font-medium">Containers</span>
+              <span className="text-lg font-bold text-white">{containers.length}</span>
+            </div>
+            <span className="flex items-center text-[11px] text-emerald-400 font-medium">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />
+              {runningContainers}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div>
+              <span className="text-[11px] text-slate-400 block font-medium">Imagens</span>
+              <span className="text-lg font-bold text-white">{images.length}</span>
+            </div>
+            <Disc className="h-4 w-4 text-sky-400" />
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div>
+              <span className="text-[11px] text-slate-400 block font-medium">Pods K8s</span>
+              <span className="text-lg font-bold text-white">{pods.length}</span>
+            </div>
+            <span className="flex items-center text-[11px] text-indigo-400 font-medium">
+              <span className="h-2 w-2 rounded-full bg-indigo-400 mr-1.5 animate-pulse" />
+              {runningPods}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div>
+              <span className="text-[11px] text-slate-400 block font-medium">Deployments</span>
+              <span className="text-lg font-bold text-white">{deployments.length}</span>
+            </div>
+            <Layers className="h-4 w-4 text-indigo-400" />
+          </div>
+        </div>
+      );
+    }
+
+    return (
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Docker Containers */}
         <Card className="hover:border-sky-500/40 transition-all glow-blue">
@@ -174,9 +426,7 @@ export default function DashboardOverviewPage() {
             <Box className="h-5 w-5 text-sky-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-extrabold text-white">
-              {containers.length}
-            </div>
+            <div className="text-3xl font-extrabold text-white">{containers.length}</div>
             <div className="mt-2 flex items-center text-xs text-slate-400">
               <span className="flex items-center text-emerald-400 font-semibold mr-2">
                 <span className="h-2 w-2 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />
@@ -196,12 +446,8 @@ export default function DashboardOverviewPage() {
             <Disc className="h-5 w-5 text-sky-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-extrabold text-white">
-              {images.length}
-            </div>
-            <p className="mt-2 text-xs text-slate-400">
-              Cached images in local Docker repository
-            </p>
+            <div className="text-3xl font-extrabold text-white">{images.length}</div>
+            <p className="mt-2 text-xs text-slate-400">Cached images in local Docker repository</p>
           </CardContent>
         </Card>
 
@@ -214,9 +460,7 @@ export default function DashboardOverviewPage() {
             <Server className="h-5 w-5 text-indigo-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-extrabold text-white">
-              {pods.length}
-            </div>
+            <div className="text-3xl font-extrabold text-white">{pods.length}</div>
             <div className="mt-2 flex items-center text-xs text-slate-400">
               <span className="flex items-center text-emerald-400 font-semibold mr-2">
                 <span className="h-2 w-2 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />
@@ -236,53 +480,113 @@ export default function DashboardOverviewPage() {
             <Layers className="h-5 w-5 text-indigo-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-extrabold text-white">
-              {deployments.length}
-            </div>
-            <p className="mt-2 text-xs text-slate-400">
-              Configured application workloads
-            </p>
+            <div className="text-3xl font-extrabold text-white">{deployments.length}</div>
+            <p className="mt-2 text-xs text-slate-400">Configured application workloads</p>
           </CardContent>
         </Card>
       </div>
+    );
+  };
 
-      {/* Plugin Dashboard Widgets */}
-      {dashboardWidgets.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
+  const renderPluginWidgets = (isCompact: boolean) => {
+    if (dashboardWidgets.length === 0) {
+      return (
+        <div className="p-4 rounded-xl border border-dashed border-slate-800 text-center text-xs text-slate-500">
+          Nenhum widget de plugin ativo no momento. Instale plugins com widgets na aba de Plugins.
+        </div>
+      );
+    }
+
+    if (isCompact) {
+      return (
+        <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
+          <div className="flex items-center gap-2 text-slate-300">
             <Puzzle className="h-4 w-4 text-sky-400" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Widgets de Plugins Ativos
-            </h3>
+            <span>
+              <strong className="text-white">{dashboardWidgets.length}</strong> widget(s) de plugins ativos (
+              {dashboardWidgets.map((w) => w.ext.title).join(", ")})
+            </span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {dashboardWidgets.map((item) => (
-              <Card key={`${item.plugin.plugin_id}-${item.ext.id}`} className="border-slate-800 bg-slate-900/60 shadow-lg">
-                <CardHeader className="pb-3 border-b border-slate-800/60 flex flex-row items-center justify-between">
-                  <div>
-                    <CardTitle className="text-sm font-semibold text-white">{item.ext.title}</CardTitle>
-                    <CardDescription className="text-[11px] text-slate-400">
-                      Plugin: {item.plugin.name}
-                    </CardDescription>
-                  </div>
-                  <Badge variant="outline" className="text-[10px]">
-                    Extensão
-                  </Badge>
-                </CardHeader>
-                <CardContent className="pt-4">
-                  <PluginSurfaceRenderer
-                    pluginId={item.plugin.plugin_id}
-                    surface="widget"
-                    contextParams={{ widgetId: item.ext.id }}
-                  />
-                </CardContent>
-              </Card>
-            ))}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => handleToggleCollapse("plugin_widgets")}
+            className="text-xs text-sky-400 hover:text-sky-300 h-7"
+          >
+            Expandir
+          </Button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {dashboardWidgets.map((item) => (
+          <Card key={`${item.plugin.plugin_id}-${item.ext.id}`} className="border-slate-800 bg-slate-900/60 shadow-lg">
+            <CardHeader className="pb-3 border-b border-slate-800/60 flex flex-row items-center justify-between">
+              <div>
+                <CardTitle className="text-sm font-semibold text-white">{item.ext.title}</CardTitle>
+                <CardDescription className="text-[11px] text-slate-400">
+                  Plugin: {item.plugin.name}
+                </CardDescription>
+              </div>
+              <Badge variant="outline" className="text-[10px]">
+                Extensão
+              </Badge>
+            </CardHeader>
+            <CardContent className="pt-4">
+              <PluginSurfaceRenderer
+                pluginId={item.plugin.plugin_id}
+                surface="widget"
+                contextParams={{ widgetId: item.ext.id }}
+              />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    );
+  };
+
+  const renderInfraHealth = (isCompact: boolean) => {
+    if (isCompact) {
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 py-1">
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div className="flex items-center gap-2">
+              <Cpu className="h-4 w-4 text-sky-400" />
+              <span className="text-xs font-semibold text-white">Docker Engine</span>
+            </div>
+            {status?.docker_connected ? (
+              <Badge variant="running" className="text-[10px]">Connected</Badge>
+            ) : (
+              <Badge variant="stopped" className="text-[10px]">Disconnected</Badge>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div className="flex items-center gap-2">
+              <Activity className="h-4 w-4 text-indigo-400" />
+              <span className="text-xs font-semibold text-white">Kubernetes</span>
+            </div>
+            {status?.k8s_connected ? (
+              <Badge variant="k8s" className="text-[10px]">Connected</Badge>
+            ) : (
+              <Badge variant="stopped" className="text-[10px]">Unavailable</Badge>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800">
+            <div className="flex items-center gap-2">
+              <Database className="h-4 w-4 text-emerald-400" />
+              <span className="text-xs font-semibold text-white">PostgreSQL DB</span>
+            </div>
+            <Badge variant="running" className="text-[10px]">Healthy</Badge>
           </div>
         </div>
-      )}
+      );
+    }
 
-      {/* Cluster & Engine Infrastructure Health */}
+    return (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Docker Engine Card */}
         <Card>
@@ -381,8 +685,41 @@ export default function DashboardOverviewPage() {
           </CardContent>
         </Card>
       </div>
+    );
+  };
 
-      {/* Quick Navigation Cards */}
+  const renderQuickNav = (isCompact: boolean) => {
+    if (isCompact) {
+      return (
+        <div className="flex flex-wrap gap-2 py-1">
+          <Link
+            href="/containers"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 hover:bg-slate-800/70 hover:border-sky-500/50 text-xs font-medium text-slate-200 transition"
+          >
+            <Box className="h-4 w-4 text-sky-400" />
+            <span>Gerenciar Containers</span>
+          </Link>
+
+          <Link
+            href="/pods"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 hover:bg-slate-800/70 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition"
+          >
+            <Server className="h-4 w-4 text-indigo-400" />
+            <span>Kubernetes Pods</span>
+          </Link>
+
+          <Link
+            href="/logs"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 hover:bg-slate-800/70 hover:border-emerald-500/50 text-xs font-medium text-slate-200 transition"
+          >
+            <Terminal className="h-4 w-4 text-emerald-400" />
+            <span>Live Log Stream</span>
+          </Link>
+        </div>
+      );
+    }
+
+    return (
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Link
           href="/containers"
@@ -432,14 +769,40 @@ export default function DashboardOverviewPage() {
           <ArrowRight className="h-4 w-4 text-slate-500 group-hover:text-white transition-transform group-hover:translate-x-1" />
         </Link>
       </div>
+    );
+  };
 
-      {/* Recent Audit Activities */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <ShieldCheck className="h-5 w-5 text-sky-400" />
-            <h2 className="text-lg font-bold text-white">Recent Operations Audit</h2>
+  const renderAuditLogs = (isCompact: boolean) => {
+    if (isCompact) {
+      const latest = sortedAuditLogs[0];
+      return (
+        <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
+          <div className="flex items-center gap-2 text-slate-300 truncate pr-2">
+            <ShieldCheck className="h-4 w-4 text-sky-400 shrink-0" />
+            <span className="truncate">
+              Total de <strong className="text-white">{auditLogs.length}</strong> logs de auditoria
+              {latest && (
+                <span className="text-slate-400 ml-1.5">
+                  (Última ação: <span className="font-mono text-slate-200">{latest.action}</span> por{" "}
+                  <span className="text-white font-medium">{latest.username}</span> em{" "}
+                  {formatDate(latest.created_at)})
+                </span>
+              )}
+            </span>
           </div>
+          <Link
+            href="/audit"
+            className="text-xs text-sky-400 hover:text-sky-300 font-medium shrink-0 flex items-center gap-1"
+          >
+            Ver todos <ArrowRight className="h-3 w-3" />
+          </Link>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-end">
           <Link
             href="/audit"
             className="text-xs text-sky-400 hover:text-sky-300 font-medium flex items-center gap-1"
@@ -524,12 +887,243 @@ export default function DashboardOverviewPage() {
           </TableBody>
         </Table>
       </div>
+    );
+  };
+
+  // Section render router
+  const renderSectionContent = (id: string, isCompact: boolean) => {
+    switch (id) {
+      case "metrics":
+        return renderMetrics(isCompact);
+      case "plugin_widgets":
+        return renderPluginWidgets(isCompact);
+      case "infra_health":
+        return renderInfraHealth(isCompact);
+      case "quick_nav":
+        return renderQuickNav(isCompact);
+      case "audit_logs":
+        return renderAuditLogs(isCompact);
+      default:
+        return null;
+    }
+  };
+
+  const hiddenCount = order.filter((id) => visibility[id] === false).length;
+  const visibleItems = order.filter((id) => visibility[id] !== false);
+
+  return (
+    <div className="space-y-6 animate-in fade-in duration-300 pb-12">
+      {/* Top Banner, Refresh, Pull Image & Customize Layout */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-white">Dashboard Overview</h1>
+          <p className="text-xs text-slate-400 mt-1">
+            Real-time status of Docker engine, Kubernetes workloads and cluster operations.
+          </p>
+        </div>
+        <div className="flex items-center space-x-2 flex-wrap">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCustomizeModalOpen(true)}
+            className="text-xs border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-slate-200"
+          >
+            <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5 text-sky-400" />
+            Personalizar
+            {hiddenCount > 0 && (
+              <span className="ml-1.5 px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-400 text-[10px] border border-slate-700">
+                {hiddenCount} oculto{hiddenCount > 1 ? "s" : ""}
+              </span>
+            )}
+          </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={fetchDashboardData}
+            isLoading={isLoading}
+            className="text-xs"
+          >
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+            Refresh
+          </Button>
+
+          <Button
+            variant="docker"
+            size="sm"
+            onClick={() => setPullModalOpen(true)}
+            className="text-xs"
+          >
+            <Download className="mr-1.5 h-3.5 w-3.5" />
+            Pull Image
+          </Button>
+        </div>
+      </div>
+
+      {/* Main Dynamic Drag-and-Drop & Collapsible Dashboard Canvas */}
+      {visibleItems.length === 0 ? (
+        <div className="p-12 rounded-2xl border border-dashed border-slate-800 text-center space-y-4 bg-slate-950/40">
+          <LayoutGrid className="h-10 w-10 text-slate-600 mx-auto" />
+          <div>
+            <h3 className="text-sm font-semibold text-white">Todos os blocos estão ocultos</h3>
+            <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">
+              Você ocultou todos os itens da dashboard principal. Reabra a personalização para escolher quais exibir.
+            </p>
+          </div>
+          <div className="flex items-center justify-center gap-2 pt-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => setCustomizeModalOpen(true)}
+              className="text-xs"
+            >
+              <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
+              Personalizar Dashboard
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleResetLayout}
+              className="text-xs"
+            >
+              Restaurar Padrão
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {visibleItems.map((id, index) => {
+            const def = itemDefinitions.find((d) => d.id === id);
+            if (!def) return null;
+
+            const isCompact = Boolean(collapsed[id]);
+            const isDragging = draggedId === id;
+            const isDragOver = dragOverId === id;
+            const isFirst = index === 0;
+            const isLast = index === visibleItems.length - 1;
+
+            return (
+              <section
+                key={id}
+                draggable
+                onDragStart={(e) => handleDragStart(e, id)}
+                onDragOver={(e) => handleDragOver(e, id)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, id)}
+                onDragEnd={handleDragEnd}
+                className={`rounded-2xl border transition-all duration-200 p-4 ${
+                  isDragging
+                    ? "opacity-40 border-dashed border-sky-500 scale-[0.99]"
+                    : isDragOver
+                    ? "border-sky-500/80 bg-slate-800/40 ring-2 ring-sky-500/30 scale-[1.005]"
+                    : "border-slate-800/80 bg-slate-950/30 hover:border-slate-700/80"
+                }`}
+              >
+                {/* Section Header Controls */}
+                <div className="flex items-center justify-between pb-3 border-b border-slate-800/60 mb-4 select-none">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <button
+                      type="button"
+                      aria-label="Arrastar bloco"
+                      className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 p-1 rounded hover:bg-slate-800/60 transition"
+                      title="Arrastar e soltar para reordenar"
+                    >
+                      <GripVertical className="h-4 w-4" />
+                    </button>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="text-sky-400 shrink-0">{def.icon}</div>
+                      <h2 className="text-sm font-semibold text-white tracking-wide truncate">
+                        {def.title}
+                      </h2>
+                    </div>
+                    {isCompact && (
+                      <Badge variant="outline" className="text-[10px] text-slate-400 py-0 px-1.5 uppercase">
+                        Compacto
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* Header Actions */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleMove(id, "up")}
+                      disabled={isFirst}
+                      title="Mover para cima"
+                      className="h-7 w-7 p-0 text-slate-400 hover:text-white disabled:opacity-20"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleMove(id, "down")}
+                      disabled={isLast}
+                      title="Mover para baixo"
+                      className="h-7 w-7 p-0 text-slate-400 hover:text-white disabled:opacity-20"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleToggleCollapse(id)}
+                      title={isCompact ? "Expandir visualização" : "Compactar visualização"}
+                      className="h-7 w-7 p-0 text-slate-400 hover:text-sky-400"
+                    >
+                      {isCompact ? (
+                        <Maximize2 className="h-3.5 w-3.5" />
+                      ) : (
+                        <Minimize2 className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleToggleVisibility(id)}
+                      title="Ocultar item da dashboard"
+                      className="h-7 w-7 p-0 text-slate-400 hover:text-rose-400"
+                    >
+                      <EyeOff className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Section Content */}
+                <div className="transition-all duration-300">
+                  {renderSectionContent(id, isCompact)}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
 
       {/* Pull Image Modal */}
       <PullImageModal
         isOpen={pullModalOpen}
         onClose={() => setPullModalOpen(false)}
         onSuccess={fetchDashboardData}
+      />
+
+      {/* Customize Dashboard Modal */}
+      <CustomizeDashboardModal
+        isOpen={customizeModalOpen}
+        onClose={() => setCustomizeModalOpen(false)}
+        definitions={itemDefinitions}
+        order={order}
+        visibility={visibility}
+        collapsed={collapsed}
+        onReorder={handleReorder}
+        onToggleVisibility={handleToggleVisibility}
+        onToggleCollapse={handleToggleCollapse}
+        onSetAllVisibility={handleSetAllVisibility}
+        onSetAllCollapse={handleSetAllCollapse}
+        onReset={handleResetLayout}
       />
     </div>
   );

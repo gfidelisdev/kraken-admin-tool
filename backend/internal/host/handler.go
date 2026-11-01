@@ -85,6 +85,17 @@ func (h *Handler) GetPackageStatusHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Auto-detect or heal local server package manager if erroneously set to container's apk
+	if !docker.IsSSHHost(server.HostURL) && (server.PackageManager == "" || server.PackageManager == "apk" || server.PackageManager == "unknown") {
+		exec := NewLocalExecutor()
+		if detected, err := DetectPackageManager(r.Context(), exec); err == nil && detected != "unknown" {
+			if detected != server.PackageManager {
+				server.PackageManager = detected
+				h.DB.Model(&server).Update("package_manager", detected)
+			}
+		}
+	}
+
 	var updates []models.HostPackageUpdate
 	h.DB.Where("server_id = ?", id).Order("is_security desc, name asc").Find(&updates)
 
@@ -109,8 +120,14 @@ func (h *Handler) GetPackageStatusHandler(w http.ResponseWriter, r *http.Request
 		lastChecked = *server.PackagesLastChecked
 	}
 
+	isLocalHost := !docker.IsSSHHost(server.HostURL)
 	hasSavedSudo := server.SudoPassword != ""
-	requiresSudo := server.SSHUser != "root" && !strings.EqualFold(server.SSHUser, "root")
+	requiresSudo := !isLocalHost && server.SSHUser != "root" && !strings.EqualFold(server.SSHUser, "root")
+	sudoPolicy := server.SudoPolicy
+	if isLocalHost {
+		requiresSudo = false
+		sudoPolicy = "not_required"
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.HostPackageStatus{
@@ -124,7 +141,7 @@ func (h *Handler) GetPackageStatusHandler(w http.ResponseWriter, r *http.Request
 		Updates:               pkgUpdates,
 		LastChecked:           lastChecked,
 		RequiresSudo:          requiresSudo,
-		SudoPolicy:            server.SudoPolicy,
+		SudoPolicy:            sudoPolicy,
 		HasSavedSudoPassword:  hasSavedSudo,
 	})
 }
@@ -150,6 +167,8 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to connect to host: " + err.Error()})
 		return
 	}
+
+	isLocalHost := !docker.IsSSHHost(server.HostURL)
 
 	// Resolve sudo password based on policy and request
 	sudoPassword := req.SudoPassword
@@ -182,13 +201,13 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 		pkgManager = server.PackageManager
 	}
 
-	if pkgManager == "" || pkgManager == "unknown" {
+	if pkgManager == "" || pkgManager == "unknown" || (isLocalHost && pkgManager == "apk") {
 		detected, dErr := DetectPackageManager(r.Context(), exec)
 		if dErr == nil && detected != "unknown" {
 			pkgManager = detected
 			h.DB.Model(server).Update("package_manager", pkgManager)
 			server.PackageManager = pkgManager
-		} else {
+		} else if pkgManager == "" || pkgManager == "unknown" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -202,7 +221,7 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	// If refreshing repositories requested, sudo might be needed
 	if req.RefreshRepos {
-		if sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
+		if !isLocalHost && sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -300,6 +319,13 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 		updates = make([]models.PackageUpdate, 0)
 	}
 
+	requiresSudo := !isLocalHost && server.SSHUser != "root" && !strings.EqualFold(server.SSHUser, "root")
+	sudoPolicy := server.SudoPolicy
+	if isLocalHost {
+		requiresSudo = false
+		sudoPolicy = "not_required"
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.HostPackageStatus{
 		ServerID:              server.ID,
@@ -311,8 +337,8 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 		SecurityUpdatesCount:  secCount,
 		Updates:               updates,
 		LastChecked:           now,
-		RequiresSudo:          server.SSHUser != "root",
-		SudoPolicy:            server.SudoPolicy,
+		RequiresSudo:          requiresSudo,
+		SudoPolicy:            sudoPolicy,
 		HasSavedSudoPassword:  server.SudoPassword != "",
 	})
 }
@@ -344,6 +370,8 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	isLocalHost := !docker.IsSSHHost(server.HostURL)
+
 	// Resolve sudo password
 	sudoPassword := req.SudoPassword
 	if sudoPassword == "" {
@@ -360,7 +388,7 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
+	if !isLocalHost && sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -404,13 +432,13 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 		pkgManager = server.PackageManager
 	}
 
-	if pkgManager == "" || pkgManager == "unknown" {
+	if pkgManager == "" || pkgManager == "unknown" || (isLocalHost && pkgManager == "apk") {
 		detected, dErr := DetectPackageManager(r.Context(), exec)
 		if dErr == nil && detected != "unknown" {
 			pkgManager = detected
 			h.DB.Model(server).Update("package_manager", pkgManager)
 			server.PackageManager = pkgManager
-		} else {
+		} else if pkgManager == "" || pkgManager == "unknown" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -622,7 +650,8 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 				}
 			}
 
-			if sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
+			isLocalHost := !docker.IsSSHHost(server.HostURL)
+	if !isLocalHost && sudoPassword == "" && server.SSHUser != "" && !strings.EqualFold(server.SSHUser, "root") {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -666,13 +695,13 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 				pkgManager = server.PackageManager
 			}
 
-			if pkgManager == "" || pkgManager == "unknown" {
+			if pkgManager == "" || pkgManager == "unknown" || (isLocalHost && pkgManager == "apk") {
 				detected, dErr := DetectPackageManager(r.Context(), exec)
 				if dErr == nil && detected != "unknown" {
 					pkgManager = detected
 					h.DB.Model(server).Update("package_manager", pkgManager)
 					server.PackageManager = pkgManager
-				} else {
+				} else if pkgManager == "" || pkgManager == "unknown" {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusBadRequest)
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{

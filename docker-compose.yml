@@ -27,6 +27,8 @@ services:
       dockerfile: Dockerfile
     container_name: kraken-backend
     restart: unless-stopped
+    privileged: true
+    pid: host
     depends_on:
       postgres:
         condition: service_healthy

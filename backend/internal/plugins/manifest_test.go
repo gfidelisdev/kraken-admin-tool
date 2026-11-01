@@ -90,3 +90,69 @@ func TestParseAndValidateManifest_PathTraversalEntrypoint(t *testing.T) {
 		t.Fatalf("expected error for directory traversal entrypoint, got nil")
 	}
 }
+
+func TestParseAndValidateManifest_ContainerRuntimeDockerfile(t *testing.T) {
+	// Case 1: only dockerfile specified
+	raw := []byte(`{
+		"id": "com.kraken.docker-service",
+		"name": "Docker Service",
+		"version": "2.1.0",
+		"runtime": {
+			"type": "container",
+			"dockerfile": "Dockerfile",
+			"port": 9000
+		}
+	}`)
+
+	m, err := ParseAndValidateManifest(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if m.Runtime.Dockerfile != "Dockerfile" {
+		t.Errorf("expected Dockerfile, got %s", m.Runtime.Dockerfile)
+	}
+	expectedTag := "kraken-plugin-com-kraken-docker-service:2.1.0"
+	if m.Runtime.Entrypoint != expectedTag {
+		t.Errorf("expected entrypoint tag %s, got %s", expectedTag, m.Runtime.Entrypoint)
+	}
+	if m.Runtime.Port != 9000 {
+		t.Errorf("expected port 9000, got %d", m.Runtime.Port)
+	}
+
+	// Case 2: entrypoint set to Dockerfile
+	raw2 := []byte(`{
+		"id": "com.kraken.df-entrypoint",
+		"name": "DF Entrypoint",
+		"version": "1.0.0",
+		"runtime": {
+			"type": "container",
+			"entrypoint": "backend/Dockerfile"
+		}
+	}`)
+	m2, err2 := ParseAndValidateManifest(raw2)
+	if err2 != nil {
+		t.Fatalf("unexpected error: %v", err2)
+	}
+	if m2.Runtime.Dockerfile != "backend/Dockerfile" {
+		t.Errorf("expected Dockerfile backend/Dockerfile, got %s", m2.Runtime.Dockerfile)
+	}
+	if m2.Runtime.Entrypoint != "kraken-plugin-com-kraken-df-entrypoint:1.0.0" {
+		t.Errorf("expected auto tag, got %s", m2.Runtime.Entrypoint)
+	}
+
+	// Case 3: path traversal in dockerfile
+	raw3 := []byte(`{
+		"id": "com.kraken.df-traversal",
+		"name": "DF Traversal",
+		"version": "1.0.0",
+		"runtime": {
+			"type": "container",
+			"dockerfile": "../../Dockerfile"
+		}
+	}`)
+	_, err3 := ParseAndValidateManifest(raw3)
+	if err3 == nil {
+		t.Errorf("expected error for directory traversal in dockerfile, got nil")
+	}
+}
