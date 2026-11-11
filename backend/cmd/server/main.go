@@ -97,6 +97,8 @@ func main() {
 
 	// 4. Initialize Handlers
 	authHandler := auth.NewHandler(dbHandle.DB, cfg.JWTSecret, cfg.AllowRegistration)
+	authHandler.SetAdminRecoveryKey(cfg.AdminRecoveryKey)
+	authHandler.SetMicrosoftConfig(cfg.MicrosoftClientID, cfg.MicrosoftTenantID)
 	dockerHandler := docker.NewHandler(dockerService, dbHandle.DB)
 	hostHandler := host.NewHandler(dbHandle.DB, dockerService)
 	sourceHandler := source.NewHandler(sourceService, dbHandle.DB)
@@ -107,11 +109,32 @@ func main() {
 	pluginsManager, pErr := plugins.NewManager(context.Background(), dbHandle.DB, dockerService, cfg.PluginsDir)
 	if pErr != nil {
 		log.Printf("[PLUGINS] Warning: failed to initialize plugins manager: %v", pErr)
+	} else {
+		dockerService.SetCredentialResolver(pluginsManager)
+		pluginsManager.SetMicrosoftTokenProvider(func(ctx context.Context, scope string) (string, *models.MicrosoftSessionAccount, error) {
+			claims := auth.GetUserFromContext(ctx)
+			if claims == nil || claims.ID == "" || authHandler.MSBroker == nil {
+				return "", nil, nil
+			}
+			return authHandler.MSBroker.GetScopedToken(ctx, claims.ID, scope)
+		})
+		pluginsManager.SetMicrosoftSessionRevoker(func(userID uint, sessionID string) {
+			if authHandler.MSBroker == nil {
+				return
+			}
+			if sessionID != "" {
+				authHandler.MSBroker.DeleteSession(sessionID)
+			}
+			if userID > 0 {
+				authHandler.MSBroker.DeleteUserSessions(userID)
+			}
+		})
 	}
 	pluginsHandler := plugins.NewHandler(pluginsManager)
 
 	// Rate limiter for sensitive auth endpoints (5 burst, 1 request per 2s per IP)
 	authRateLimiter := auth.NewIPRateLimiter(rate.Every(2*time.Second), 5)
+	authRateLimiter.SetTrustedProxies(cfg.TrustedProxies)
 
 	// 5. Setup Chi Router & Middleware
 	r := chi.NewRouter()
@@ -159,11 +182,13 @@ func main() {
 
 	// Public Auth endpoints
 	r.Route("/api/auth", func(r chi.Router) {
-		r.Post("/register", authHandler.Register)
+		r.With(authRateLimiter.Middleware("Too many registration attempts. Please wait before trying again.")).Post("/register", authHandler.Register)
 		r.With(authRateLimiter.Middleware("Too many login attempts. Please wait before trying again.")).Post("/login", authHandler.Login)
+		r.With(authRateLimiter.Middleware("Too many login attempts. Please wait before trying again.")).Post("/microsoft/device-code", authHandler.StartMicrosoftDeviceLogin)
+		r.Post("/microsoft/poll", authHandler.PollMicrosoftDeviceLogin)
 		r.With(authRateLimiter.Middleware("Too many recovery attempts. Please wait before trying again.")).Post("/recover-password", authHandler.RequestPasswordRecovery)
 		r.With(authRateLimiter.Middleware("Too many recovery attempts. Please wait before trying again.")).Post("/recover-password/otp", authHandler.RecoverPasswordViaOTP)
-		r.Post("/admin-recovery", authHandler.MasterAdminRecovery)
+		r.With(authRateLimiter.Middleware("Too many recovery attempts. Please wait before trying again.")).Post("/admin-recovery", authHandler.MasterAdminRecovery)
 	})
 
 	// Protected Endpoints
@@ -172,6 +197,9 @@ func main() {
 
 		// Profile & Ticket & Account (All authenticated users: admin, operator, viewer)
 		r.Get("/api/auth/me", authHandler.Me)
+		r.Get("/api/users/me/dashboard", authHandler.GetDashboardLayout)
+		r.Put("/api/users/me/dashboard", authHandler.SaveDashboardLayout)
+		r.Post("/api/auth/logout", authHandler.Logout)
 		r.Post("/api/auth/change-password", authHandler.ChangePassword)
 		r.Post("/api/auth/ws-ticket", authHandler.CreateWSTicket)
 		r.Get("/api/auth/otp/setup", authHandler.SetupOTP)
@@ -206,15 +234,15 @@ func main() {
 			r.Get("/servers", dockerHandler.ListServersHandler)
 			r.Get("/servers/status/stream", dockerHandler.StreamServersStatusHandler)
 
-			r.Group(func(adminRouter chi.Router) {
-				adminRouter.Use(auth.RequireRole("admin"))
-				adminRouter.Post("/servers", dockerHandler.CreateServerHandler)
-				adminRouter.Post("/servers/test", dockerHandler.TestServerHandler)
-				adminRouter.Post("/servers/test/stream", dockerHandler.TestServerStreamHandler)
-				adminRouter.Put("/servers/{id}", dockerHandler.UpdateServerHandler)
-				adminRouter.Delete("/servers/{id}", dockerHandler.DeleteServerHandler)
-				adminRouter.Post("/servers/{id}/default", dockerHandler.SetDefaultServerHandler)
+			r.Group(func(srvRouter chi.Router) {
+				srvRouter.Use(auth.RequireRoles("admin", "operator"))
+				srvRouter.Post("/servers", dockerHandler.CreateServerHandler)
+				srvRouter.Post("/servers/test", dockerHandler.TestServerHandler)
+				srvRouter.Post("/servers/test/stream", dockerHandler.TestServerStreamHandler)
+				srvRouter.Put("/servers/{id}", dockerHandler.UpdateServerHandler)
+				srvRouter.Delete("/servers/{id}", dockerHandler.DeleteServerHandler)
 			})
+			r.With(auth.RequireRole("admin")).Post("/servers/{id}/default", dockerHandler.SetDefaultServerHandler)
 
 			// Containers: List for all, mutations restricted to Admin & Operator
 			r.Get("/containers", dockerHandler.ListContainersHandler)
@@ -269,11 +297,11 @@ func main() {
 			r.Get("/{id}/source-dirs", sourceHandler.ListSearchDirsHandler)
 			r.Get("/{id}/sources/links", sourceHandler.ListSourceLinksHandler)
 			r.Get("/{id}/sources/files", sourceHandler.ListDiscoveredFilesHandler)
-			r.Get("/{id}/sources/content", sourceHandler.GetSourceContentHandler)
 
 			// Package & workload source operations restricted to Admin & Operator
 			r.Group(func(opRouter chi.Router) {
 				opRouter.Use(auth.RequireRoles("admin", "operator"))
+				opRouter.Get("/{id}/sources/content", sourceHandler.GetSourceContentHandler)
 				opRouter.Post("/{id}/packages/check", hostHandler.CheckPackagesHandler)
 				opRouter.Post("/{id}/packages/upgrade", hostHandler.UpgradePackagesHandler)
 				opRouter.Post("/{id}/packages/upgrade/stream", hostHandler.UpgradePackagesStreamHandler)
@@ -315,22 +343,32 @@ func main() {
 
 		// Plugins & Store Endpoints
 		r.Route("/api/plugins", func(r chi.Router) {
-			// Read-only / execution / AI guide
+			// Read-only / AI guide (All authenticated users)
 			r.Get("/", pluginsHandler.ListPluginsHandler)
 			r.Get("/store", pluginsHandler.ListStorePluginsHandler)
 			r.Get("/ai-guide", pluginsHandler.GetAIGuideHandler)
 			r.Get("/{id}/worker.js", pluginsHandler.GetWorkerJSHandler)
-			r.Post("/{id}/call", pluginsHandler.CallPluginHandler)
+			r.Post("/{id}/enable", pluginsHandler.EnablePluginHandler)
+			r.Post("/{id}/disable", pluginsHandler.DisablePluginHandler)
 
-			// Admin-only operations: Upload, URL install, enable/disable, delete, catalog & key management
+			// Execution and Vault operations restricted to Admin & Operator
+			r.Group(func(opRouter chi.Router) {
+				opRouter.Use(auth.RequireRoles("admin", "operator"))
+				opRouter.Post("/{id}/call", pluginsHandler.CallPluginHandler)
+				opRouter.Post("/{id}/vault/secrets/list", pluginsHandler.ListVaultSecretsHandler)
+				opRouter.Post("/{id}/vault/secrets", pluginsHandler.PutVaultSecretHandler)
+				opRouter.Post("/{id}/vault/test", pluginsHandler.TestVaultConnectionHandler)
+			})
+
+			// Admin-only operations: Upload, URL install, delete, catalog & key management
 			r.Group(func(adminRouter chi.Router) {
 				adminRouter.Use(auth.RequireRole("admin"))
 				adminRouter.Post("/inspect-upload", pluginsHandler.InspectUploadHandler)
 				adminRouter.Post("/inspect-url", pluginsHandler.InspectURLHandler)
+				adminRouter.Post("/inspect-directory", pluginsHandler.InspectDirectoryHandler)
 				adminRouter.Post("/install-upload", pluginsHandler.InstallUploadHandler)
 				adminRouter.Post("/install-url", pluginsHandler.InstallURLHandler)
-				adminRouter.Post("/{id}/enable", pluginsHandler.EnablePluginHandler)
-				adminRouter.Post("/{id}/disable", pluginsHandler.DisablePluginHandler)
+				adminRouter.Post("/install-directory", pluginsHandler.InstallDirectoryHandler)
 				adminRouter.Post("/{id}/rebuild", pluginsHandler.RebuildPluginHandler)
 				adminRouter.Delete("/{id}", pluginsHandler.DeletePluginHandler)
 

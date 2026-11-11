@@ -1,10 +1,13 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { getPluginWorkerJS, callPlugin } from "@/lib/api";
+import DOMPurify from "dompurify";
+import { getPluginWorkerJS, callPlugin, getPlugins, api } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
+import { CodeEditor } from "./CodeEditor";
 import {
   RefreshCw,
   AlertCircle,
@@ -46,8 +49,21 @@ interface UINode {
   html?: string;
   code?: string;
   language?: string;
+  theme?: string;
+  readOnly?: boolean;
+  lineNumbers?: boolean;
+  minimap?: boolean;
+  wordWrap?: "off" | "on" | "bounded" | string;
+  tabSize?: number;
+  insertSpaces?: boolean;
+  automaticLayout?: boolean;
+  height?: number;
+  saveActionId?: string;
   props?: Record<string, any>;
   helperText?: string;
+  copyText?: string;
+  open?: boolean;
+  onCloseId?: string;
 }
 
 export function PluginSurfaceRenderer({
@@ -56,6 +72,7 @@ export function PluginSurfaceRenderer({
   contextParams,
   className,
 }: PluginSurfaceRendererProps) {
+  const { user } = useAuth();
   const [uiTree, setUiTree] = useState<UINode | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +83,14 @@ export function PluginSurfaceRenderer({
   const blobUrlRef = useRef<string | null>(null);
   const pendingRequestsRef = useRef<Map<string, { resolve: (val: any) => void; reject: (err: any) => void }>>(new Map());
   const contextParamsStr = JSON.stringify(contextParams || {});
+  const sanitizedUserStr = JSON.stringify({
+    id: user?.id,
+    username: user?.username,
+    email: user?.email,
+    role: user?.role,
+    auth_provider: user?.auth_provider || "local",
+    microsoft_account: user?.microsoft_account || null,
+  });
 
   const updateFormField = useCallback((fieldId: string, value: any) => {
     formValuesRef.current = {
@@ -80,11 +105,16 @@ export function PluginSurfaceRenderer({
     if (!uiTree) return;
     const updates: Record<string, any> = {};
     function scanTree(node: UINode) {
-      if (node.id && (node.value !== undefined || node.defaultValue !== undefined)) {
-        const incoming = node.value !== undefined ? node.value : node.defaultValue;
-        if (prevNodeValuesRef.current[node.id] !== incoming) {
-          prevNodeValuesRef.current[node.id] = incoming;
-          updates[node.id] = incoming;
+      if (node.id) {
+        if (node.value !== undefined || node.defaultValue !== undefined) {
+          const incoming = node.value !== undefined ? node.value : node.defaultValue;
+          if (prevNodeValuesRef.current[node.id] !== incoming) {
+            prevNodeValuesRef.current[node.id] = incoming;
+            updates[node.id] = incoming;
+          }
+        } else if (node.type === "CodeEditor" && updates[node.id] === undefined && formValuesRef.current[node.id] === undefined) {
+          updates[node.id] = "";
+          prevNodeValuesRef.current[node.id] = "";
         }
       }
       if (node.children) {
@@ -115,6 +145,9 @@ export function PluginSurfaceRenderer({
 
   // Initialize isolated Web Worker
   useEffect(() => {
+    if (!user?.id) {
+      return;
+    }
     let isMounted = true;
     setIsLoading(true);
     setError(null);
@@ -137,6 +170,10 @@ self.kraken = {
   surface: "${surface}",
   params: ${contextParamsStr},
   formData: _formData,
+  user: ${sanitizedUserStr},
+  session: {
+    user: ${sanitizedUserStr}
+  },
 
   render: function(tree) {
     self.postMessage({ type: 'KRAKEN_RENDER_UI', tree: tree });
@@ -160,6 +197,10 @@ self.kraken = {
         self.postMessage({ type: 'KRAKEN_CALL_BACKEND', id, action, payload });
       });
     }
+  },
+
+  call: function(action, payload) {
+    return self.kraken.backend.call(action, payload);
   },
 
   kv: {
@@ -226,6 +267,9 @@ self.onmessage = function(e) {
         const worker = new Worker(blobUrl);
         workerRef.current = worker;
 
+        // Send KRAKEN_INIT event for backward compatibility with workers waiting for init
+        worker.postMessage({ type: "KRAKEN_INIT" });
+
         worker.onmessage = async (e) => {
           const msg = e.data;
           if (!msg) return;
@@ -233,6 +277,19 @@ self.onmessage = function(e) {
           if (msg.type === "KRAKEN_RENDER_UI") {
             setUiTree(msg.tree);
             setIsLoading(false);
+          } else if (msg.type === "KRAKEN_COPY_CLIPBOARD") {
+            try {
+              if (typeof navigator !== "undefined" && navigator?.clipboard?.writeText) {
+                navigator.clipboard.writeText(msg.text || "").catch(console.error);
+                if (msg.autoClearAfterMs) {
+                  setTimeout(() => {
+                    navigator.clipboard.writeText("").catch(() => {});
+                  }, msg.autoClearAfterMs);
+                }
+              }
+            } catch (err) {
+              console.error("[PLUGIN CLIPBOARD ERROR]", err);
+            }
           } else if (msg.type === "KRAKEN_CALL_BACKEND") {
             try {
               const res = await callPlugin(pluginId, msg.action, msg.payload);
@@ -243,6 +300,60 @@ self.onmessage = function(e) {
               }
             } catch (err: any) {
               worker.postMessage({ type: "KRAKEN_RPC_REPLY", id: msg.id, error: err?.message || "RPC failed" });
+            }
+          } else if (msg.type === "KRAKEN_CREATE_SERVER") {
+            try {
+              // Verify plugin has the mandatory 'hosts:create' permission
+              let hasHostsCreate = false;
+              try {
+                const { plugins } = await getPlugins();
+                const p = plugins.find((item) => item.plugin_id === pluginId);
+                if (p) {
+                  let perms: string[] = [];
+                  if (p.granted_permissions) {
+                    try {
+                      perms = JSON.parse(p.granted_permissions);
+                    } catch {}
+                  } else if (p.manifest_json) {
+                    try {
+                      const m = JSON.parse(p.manifest_json);
+                      perms = m.permissions || [];
+                    } catch {}
+                  }
+                  hasHostsCreate = perms.includes("hosts:create");
+                }
+              } catch (permErr) {
+                console.warn("[PLUGIN HOSTS:CREATE CHECK FAILED]", permErr);
+              }
+
+              if (!hasHostsCreate) {
+                throw new Error(`Permissão negada: o plugin '${pluginId}' não possui a permissão 'hosts:create' necessária.`);
+              }
+
+              // Sanitize and allowlist fields to prevent prototype pollution or privilege escalation
+              const raw = msg.payload || {};
+              const sanitizedPayload = {
+                name: String(raw.name || "").trim(),
+                host_url: String(raw.host_url || "").trim(),
+                server_host: String(raw.server_host || "").trim(),
+                server_port: String(raw.server_port || "22").trim(),
+                ssh_user: String(raw.ssh_user || "").trim(),
+                ssh_auth_method: String(raw.ssh_auth_method || "").trim(),
+                credential_source: "plugin",
+                credential_plugin_id: pluginId, // Force to caller's plugin ID
+                secret_reference: String(raw.secret_reference || "").trim(),
+                secret_version: raw.secret_version ? String(raw.secret_version).trim() : undefined,
+                vault_config: typeof raw.vault_config === "object" ? JSON.stringify(raw.vault_config) : (raw.vault_config ? String(raw.vault_config).trim() : undefined),
+                credential_policy: "save_securely",
+              };
+
+              const server = await api.post("/api/docker/servers", sanitizedPayload);
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("kraken:refresh-servers"));
+              }
+              worker.postMessage({ type: "KRAKEN_CREATE_SERVER_REPLY", id: msg.id, success: true, server });
+            } catch (err: any) {
+              worker.postMessage({ type: "KRAKEN_CREATE_SERVER_REPLY", id: msg.id, success: false, error: err?.message || "Falha ao cadastrar servidor no Kraken" });
             }
           }
         };
@@ -272,7 +383,7 @@ self.onmessage = function(e) {
         blobUrlRef.current = null;
       }
     };
-  }, [pluginId, surface, contextParamsStr]);
+  }, [pluginId, surface, contextParamsStr, sanitizedUserStr, user?.id]);
 
   if (isLoading) {
     return (
@@ -479,6 +590,37 @@ function renderNode(
   const nodeKey = node.id ? `id-${node.id}` : `node-${path}`;
 
   switch (node.type) {
+    case "Modal":
+    case "Dialog": {
+      if (node.open === false) return null;
+      return (
+        <div key={nodeKey} className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl max-w-lg w-full p-6 space-y-4 my-8 relative">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-white tracking-tight">{node.title || "Diálogo"}</h3>
+                {node.description && <p className="text-xs text-slate-400 mt-0.5">{node.description}</p>}
+              </div>
+              {node.onCloseId && (
+                <button
+                  type="button"
+                  onClick={() => onEvent(node.onCloseId!, "click", {})}
+                  className="text-slate-400 hover:text-white text-base font-bold p-1 rounded-md hover:bg-slate-800 transition-colors ml-4 shrink-0"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <div className="space-y-4">
+              {node.children && node.children.map((child, idx) =>
+                renderNode(child, onEvent, formValues, updateFormField, formValuesRef, `${path}.modal.${child.id || child.type || 'n'}.${idx}`)
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     case "Page":
       return (
         <div key={nodeKey} className="space-y-6">
@@ -540,8 +682,12 @@ function renderNode(
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="bg-slate-900 border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
               <tr>
-                {node.columns?.map((col) => (
-                  <th key={col.key} className="px-4 py-3">
+                {node.columns?.map((col: any) => (
+                  <th
+                    key={col.key}
+                    style={col.width ? { width: col.width } : undefined}
+                    className={`px-4 py-3 ${col.className || ""}`}
+                  >
                     {col.label}
                   </th>
                 ))}
@@ -549,13 +695,27 @@ function renderNode(
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {Array.isArray(node.rows) && node.rows.length > 0 ? (
-                node.rows.map((row, idx) => (
+                node.rows.map((row: any, idx: number) => (
                   <tr key={idx} className="hover:bg-slate-900/40 transition">
-                    {node.columns?.map((col) => (
-                      <td key={col.key} className="px-4 py-2.5 font-mono text-xs">
-                        {row[col.key] !== undefined ? String(row[col.key]) : "-"}
-                      </td>
-                    ))}
+                    {node.columns?.map((col: any) => {
+                      const cellVal = row[col.key];
+                      const isNode = typeof cellVal === "object" && cellVal !== null;
+                      return (
+                        <td
+                          key={col.key}
+                          style={col.width ? { width: col.width } : undefined}
+                          className={`px-4 py-2 text-xs align-middle ${col.cellClassName || ""}`}
+                        >
+                          {isNode ? (
+                            Array.isArray(cellVal)
+                              ? cellVal.map((c: any, cIdx: number) => renderNode(c, onEvent, formValues, updateFormField, formValuesRef, `${path}.tbl.${col.key}.${idx}.${cIdx}`))
+                              : renderNode(cellVal, onEvent, formValues, updateFormField, formValuesRef, `${path}.tbl.${col.key}.${idx}`)
+                          ) : (
+                            cellVal !== undefined ? String(cellVal) : "-"
+                          )}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))
               ) : (
@@ -626,6 +786,23 @@ function renderNode(
         <PluginTextareaField
           key={nodeKey}
           node={node}
+          fieldVal={fieldVal}
+          updateFormField={updateFormField}
+          onEvent={onEvent}
+          formValuesRef={formValuesRef}
+        />
+      );
+    }
+
+    case "CodeEditor": {
+      const fieldVal = node.id && formValues[node.id] !== undefined
+        ? formValues[node.id]
+        : (node.value ?? node.defaultValue ?? "");
+
+      return (
+        <CodeEditor
+          key={nodeKey}
+          node={node as any}
           fieldVal={fieldVal}
           updateFormField={updateFormField}
           onEvent={onEvent}
@@ -728,6 +905,13 @@ function renderNode(
           size="sm"
           disabled={node.disabled}
           onClick={() => {
+            if (node.copyText !== undefined && node.copyText !== null) {
+              try {
+                if (typeof navigator !== "undefined" && navigator?.clipboard?.writeText) {
+                  navigator.clipboard.writeText(String(node.copyText)).catch(console.error);
+                }
+              } catch (_) {}
+            }
             const payload = {
               value: node.value,
               formData: { ...formValuesRef.current },
@@ -799,8 +983,12 @@ function ShadowHost({ html }: { html: string }) {
       shadow = containerRef.current.attachShadow({ mode: "open" });
     }
 
-    // Basic sanitization: strip script tags
-    const sanitized = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+    const sanitized = DOMPurify.sanitize(html, {
+      ADD_TAGS: ["style"],
+      FORCE_BODY: true,
+      FORBID_TAGS: ["script", "iframe", "object", "embed", "form"],
+      FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus", "onblur"],
+    });
 
     shadow.innerHTML = `
       <style>

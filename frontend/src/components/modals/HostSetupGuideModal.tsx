@@ -139,7 +139,7 @@ export function HostSetupGuideModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Guia de Configuração de Hosts Docker"
+      title="Guia de Configuração de Hosts"
       description="Instruções passo a passo para preparar o host remoto e conectar ao Kraken Admin Tool."
       maxWidth="2xl"
     >
@@ -241,7 +241,7 @@ export function HostSetupGuideModal({
                 </div>
                 <ol className="list-decimal list-inside space-y-2 text-slate-300 leading-relaxed">
                   <li>No campo <strong>Friendly Name</strong>, digite um nome identificador (ex: <code className="text-sky-300">Local Docker Engine</code>).</li>
-                  <li>No campo <strong>Docker Host URL</strong>, insira exatamente: <code className="text-sky-300">unix:///var/run/docker.sock</code>.</li>
+                  <li>No campo <strong>Host URL</strong>, insira exatamente: <code className="text-sky-300">unix:///var/run/docker.sock</code>.</li>
                   <li>Deixe a opção <strong>TLS / SSL Encryption</strong> desmarcada (não aplicável para sockets Unix).</li>
                   <li>Clique no botão <strong>Test Connection</strong>. Você deve ver a mensagem de sucesso indicando a versão do Docker conectado.</li>
                   <li>Clique em <strong>Save Server</strong> para concluir.</li>
@@ -318,7 +318,7 @@ export function HostSetupGuideModal({
                 </div>
                 <ol className="list-decimal list-inside space-y-2 text-slate-300 leading-relaxed">
                   <li>No campo <strong>Friendly Name</strong>, digite um nome (ex: <code className="text-sky-300">Lab Worker Node 01</code>).</li>
-                  <li>No campo <strong>Docker Host URL</strong>, informe a URL com a porta 2375: <code className="text-sky-300">tcp://IP_DO_SERVIDOR:2375</code>.</li>
+                  <li>No campo <strong>Host URL</strong>, informe a URL com a porta 2375: <code className="text-sky-300">tcp://IP_DO_SERVIDOR:2375</code>.</li>
                   <li>Mantenha a opção <strong>TLS / SSL Encryption</strong> desmarcada.</li>
                   <li>Clique em <strong>Test Connection</strong> para verificar se o host remoto responde à requisição.</li>
                   <li>Clique em <strong>Save Server</strong>.</li>
@@ -405,7 +405,7 @@ export function HostSetupGuideModal({
                 </div>
                 <ol className="list-decimal list-inside space-y-2 text-slate-300 leading-relaxed">
                   <li>No campo <strong>Friendly Name</strong>, digite um nome (ex: <code className="text-sky-300">Production Node (TLS)</code>).</li>
-                  <li>No campo <strong>Docker Host URL</strong>, informe: <code className="text-sky-300">tcp://SEU_HOST_OU_IP:2376</code>.</li>
+                  <li>No campo <strong>Host URL</strong>, informe: <code className="text-sky-300">tcp://SEU_HOST_OU_IP:2376</code>.</li>
                   <li>Ative a opção <strong>TLS / SSL Encryption (Port 2376)</strong>.</li>
                   <li>Cole o conteúdo do arquivo <code className="text-indigo-300">ca.pem</code> no campo <strong>CA Certificate</strong>.</li>
                   <li>Cole o conteúdo do arquivo <code className="text-indigo-300">cert.pem</code> no campo <strong>Client Certificate</strong>.</li>
@@ -511,7 +511,7 @@ export function HostSetupGuideModal({
                 </div>
                 <ol className="list-decimal list-inside space-y-2 text-slate-300 leading-relaxed">
                   <li>No campo <strong>Friendly Name</strong>, digite um nome (ex: <code className="text-sky-300">AWS Cloud Worker (SSH)</code>).</li>
-                  <li>No campo <strong>Docker Host URL</strong>, informe a URL: <code className="text-sky-300">ssh://SEU_USUARIO@IP_DO_HOST:22</code>.</li>
+                  <li>No campo <strong>Host URL</strong>, informe a URL: <code className="text-sky-300">ssh://SEU_USUARIO@IP_DO_HOST:22</code>.</li>
                   <li>Na seção <strong>SSH Configuration</strong>, selecione o método <strong>Chave SSH / Certificado</strong>.</li>
                   <li>Confirme o <strong>SSH User</strong> (ex: <code className="text-indigo-300">ubuntu</code>, <code className="text-indigo-300">root</code> ou <code className="text-indigo-300">deployer</code>).</li>
                   <li>Cole o conteúdo da sua chave privada (geralmente em <code className="text-indigo-300">~/.ssh/id_ed25519</code> ou <code className="text-indigo-300">~/.ssh/id_rsa</code>) no campo <strong>SSH Private Key</strong>.</li>
@@ -595,7 +595,7 @@ export function HostSetupGuideModal({
                 </div>
                 <ol className="list-decimal list-inside space-y-2 text-slate-300 leading-relaxed">
                   <li>No campo <strong>Friendly Name</strong>, digite um nome amigável (ex: <code className="text-sky-300">Staging VPS (SSH Password)</code>).</li>
-                  <li>No campo <strong>Docker Host URL</strong>, informe a URL: <code className="text-sky-300">ssh://SEU_USUARIO@IP_DO_HOST:22</code>.</li>
+                  <li>No campo <strong>Host URL</strong>, informe a URL: <code className="text-sky-300">ssh://SEU_USUARIO@IP_DO_HOST:22</code>.</li>
                   <li>Na seção <strong>SSH Configuration</strong>, selecione a opção <strong>Usuário e Senha</strong>.</li>
                   <li>Preencha o campo <strong>SSH User</strong> com o nome do usuário remoto.</li>
                   <li>Preencha o campo <strong>SSH Password</strong> com a senha do usuário.</li>

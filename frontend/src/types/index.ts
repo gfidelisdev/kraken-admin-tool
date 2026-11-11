@@ -1,3 +1,11 @@
+export interface MicrosoftSessionAccount {
+  id: string;
+  email: string;
+  name: string;
+  tenant_id?: string;
+  source: "kraken_session";
+}
+
 export interface User {
   id: number;
   username: string;
@@ -6,6 +14,8 @@ export interface User {
   status: "active" | "pending" | "rejected" | string;
   otp_enabled?: boolean;
   created_at?: string;
+  auth_provider?: "local" | "microsoft" | string;
+  microsoft_account?: MicrosoftSessionAccount | null;
 }
 
 export interface OTPSetupResponse {
@@ -36,6 +46,34 @@ export interface PasswordResetRequest {
 export interface AuthResponse {
   token: string;
   user: User;
+}
+
+export interface MicrosoftDeviceCodeRequest {
+  tenant_id?: string;
+  client_id?: string;
+}
+
+export interface MicrosoftDeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+  message: string;
+}
+
+export interface MicrosoftPollRequest {
+  device_code: string;
+  tenant_id?: string;
+  client_id?: string;
+}
+
+export interface MicrosoftPollResponse {
+  status: "pending_authorization" | "slow_down" | "authenticated" | "pending" | "rejected" | "inactive" | "error" | string;
+  token?: string;
+  user?: User;
+  interval?: number;
+  error?: string;
 }
 
 export interface PortSummary {
@@ -95,6 +133,11 @@ export interface DockerServer {
   ssh_user?: string;
   ssh_auth_method?: "key" | "password" | string;
   credential_policy?: "save_securely" | "always_prompt" | string;
+  credential_source?: "local" | "plugin" | "vault" | string;
+  credential_plugin_id?: string;
+  secret_reference?: string;
+  secret_version?: string;
+  vault_config?: string;
   sudo_policy?: "save_securely" | "always_prompt" | string;
   has_saved_sudo_password?: boolean;
   package_manager?: string;
@@ -126,6 +169,11 @@ export interface CreateServerPayload {
   ssh_private_key?: string;
   ssh_key_passphrase?: string;
   credential_policy?: "save_securely" | "always_prompt" | string;
+  credential_source?: "local" | "plugin" | "vault" | string;
+  credential_plugin_id?: string;
+  secret_reference?: string;
+  secret_version?: string;
+  vault_config?: string;
   sudo_policy?: "save_securely" | "always_prompt" | string;
   sudo_password?: string;
   package_manager?: string;
@@ -145,6 +193,11 @@ export interface TestServerPayload {
   ssh_password?: string;
   ssh_private_key?: string;
   ssh_key_passphrase?: string;
+  credential_source?: "local" | "plugin" | "vault" | string;
+  credential_plugin_id?: string;
+  secret_reference?: string;
+  secret_version?: string;
+  vault_config?: string;
 }
 
 export interface ServerDiagnosticLog {
@@ -476,6 +529,7 @@ export interface ActiveUpgradeJob {
   finished_at?: string;
   duration_seconds?: number;
   logs_count?: number;
+  logs?: PackageUpgradeLog[];
   result?: PackageUpgradeResult;
 }
 
@@ -580,6 +634,7 @@ export interface InstalledPlugin {
   install_path: string;
   container_id?: string;
   installed_by?: string;
+  icon_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -591,10 +646,11 @@ export interface PluginInspectResponse {
   signature_verified: boolean;
   signer_key_id?: string;
   signer_name?: string;
-  archive_format: "zip" | "tar.gz";
+  archive_format: "zip" | "tar.gz" | "directory" | string;
   size_bytes: number;
   readme_markdown?: string;
   icon_svg?: string;
+  icon_url?: string;
   needs_compilation?: boolean;
   source_detected?: boolean;
   source_files?: string[];
@@ -644,5 +700,60 @@ export interface PluginCallResponse<T = any> {
   success: boolean;
   result?: T;
   error?: string;
+}
+
+// Key Vault & Dynamic Credential Resolution types
+export interface VaultSecretItem {
+  id: string;
+  name: string;
+  version?: string;
+  content_type?: string;
+  vault_uri?: string;
+  enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+  expires_at?: string;
+  tags?: Record<string, string>;
+}
+
+export interface ListVaultSecretsRequest {
+  vault_config?: Record<string, any>;
+  filter?: string;
+  content_type?: string;
+}
+
+export interface ListVaultSecretsResponse {
+  secrets: VaultSecretItem[];
+}
+
+export interface PutVaultSecretRequest {
+  name: string;
+  value: string;
+  content_type?: "ssh-private-key" | "password" | string;
+  vault_config?: Record<string, any>;
+  tags?: Record<string, string>;
+}
+
+export interface TestVaultConnectionRequest {
+  vault_config?: Record<string, any>;
+}
+
+export interface TestVaultConnectionResponse {
+  success: boolean;
+  message: string;
+  vault?: string;
+  user?: string;
+}
+
+export interface ResolvedCredentials {
+  ssh_user?: string;
+  ssh_auth_method?: "key" | "password";
+  ssh_password?: string;
+  ssh_private_key?: string;
+  ssh_key_passphrase?: string;
+  tls_key?: string;
+  tls_cert?: string;
+  tls_ca_cert?: string;
+  sudo_password?: string;
 }
 

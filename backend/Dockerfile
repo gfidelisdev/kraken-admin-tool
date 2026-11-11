@@ -27,8 +27,9 @@ RUN addgroup -S -g 1001 kraken && \
 
 WORKDIR /app
 
-# Copy compiled binary and entrypoint script
+# Copy compiled binary, bundled plugins, and entrypoint script
 COPY --from=builder /app/bin/kraken-backend /app/kraken-backend
+COPY --from=builder /app/bundled_plugins /app/bundled_plugins
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh && chown -R kraken:kraken /app && \
     mkdir -p /tmp/go-cache /tmp/go && chmod -R 777 /tmp/go-cache /tmp/go

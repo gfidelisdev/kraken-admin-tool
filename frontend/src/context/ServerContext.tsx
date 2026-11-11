@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { DockerServer } from "@/types";
 import { api, getActiveServerId, setActiveServerId, ServerStatusStreamUpdate } from "@/lib/api";
+import { useAuth } from "./AuthContext";
 
 interface ServerContextType {
   servers: DockerServer[];
@@ -17,11 +18,13 @@ interface ServerContextType {
 const ServerContext = createContext<ServerContextType | undefined>(undefined);
 
 export function ServerProvider({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, user } = useAuth();
   const [servers, setServers] = useState<DockerServer[]>([]);
   const [activeServer, setActiveServerState] = useState<DockerServer | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   const refreshServers = useCallback(async () => {
+    if (!isAuthenticated) return;
     try {
       const data = await api.get<DockerServer[]>("/api/docker/servers");
       const list = Array.isArray(data) ? data : [];
@@ -48,10 +51,21 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [isAuthenticated, user?.id]);
 
   useEffect(() => {
     refreshServers();
+  }, [refreshServers]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleRefresh = () => {
+      refreshServers();
+    };
+    window.addEventListener("kraken:refresh-servers", handleRefresh);
+    return () => {
+      window.removeEventListener("kraken:refresh-servers", handleRefresh);
+    };
   }, [refreshServers]);
 
   const updateServerState = useCallback((update: ServerStatusStreamUpdate) => {

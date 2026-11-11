@@ -142,6 +142,12 @@ func (m *JobManager) GetJob(serverID uint) *UpgradeJob {
 	return m.jobs[serverID]
 }
 
+func (m *JobManager) SetJob(serverID uint, job *UpgradeJob) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobs[serverID] = job
+}
+
 func (m *JobManager) GetActiveJobs() []*UpgradeJob {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -319,6 +325,94 @@ func (m *JobManager) StartBackgroundUpgrade(
 	return nil
 }
 
+// ResumeDetachedUpgrade resumes monitoring an existing detached upgrade that was started previously (e.g. before a server restart)
+func (m *JobManager) ResumeDetachedUpgrade(
+	job *UpgradeJob,
+	db *gorm.DB,
+	dockerService *docker.DockerService,
+	execResolver func(ctx context.Context) (Executor, error),
+	server *models.DockerServer,
+	startLine int,
+	userID uint,
+	username string,
+) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	job.cancelFunc = cancel
+
+	initExec, err := execResolver(ctx)
+	if err != nil {
+		cancel()
+		return err
+	}
+
+	go func() {
+		defer cancel()
+
+		var currentExec Executor = initExec
+		lastLineProcessed := startLine
+		retryCount := 0
+		maxRetries := 30
+
+		for {
+			if currentExec == nil {
+				reconnCtx, reconnCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				var rErr error
+				currentExec, rErr = execResolver(reconnCtx)
+				reconnCancel()
+				if rErr != nil {
+					retryCount++
+					if retryCount > maxRetries {
+						job.AddLog(PackageUpgradeLog{
+							Type:      "log",
+							Message:   "Não foi possível restabelecer conexão com o host para acompanhar logs. O processo continua no host.",
+							Level:     "error",
+							Timestamp: time.Now().UTC().Format(time.RFC3339),
+						})
+						break
+					}
+					time.Sleep(3 * time.Second)
+					continue
+				}
+				retryCount = 0
+			}
+
+			linesCount, exitCode, sErr := StreamDetachedLogs(ctx, currentExec, server.ID, lastLineProcessed+1, func(line string) {
+				job.AddLog(PackageUpgradeLog{
+					Type:      "log",
+					Message:   line,
+					Level:     "stdout",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+			})
+
+			if linesCount > lastLineProcessed {
+				lastLineProcessed = linesCount
+			}
+
+			if sErr == nil && exitCode >= 0 {
+				finishJob(job, db, currentExec, server, exitCode, userID, username)
+				return
+			}
+
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			status, isAlive, finalExit, _, checkErr := CheckDetachedStatus(checkCtx, currentExec, server.ID)
+			checkCancel()
+
+			if checkErr == nil {
+				if !isAlive && status != "RUNNING" {
+					finishJob(job, db, currentExec, server, finalExit, userID, username)
+					return
+				}
+			}
+
+			currentExec = nil
+			time.Sleep(2 * time.Second)
+		}
+	}()
+
+	return nil
+}
+
 func finishJob(job *UpgradeJob, db *gorm.DB, exec Executor, server *models.DockerServer, exitCode int, userID uint, username string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -328,28 +422,33 @@ func finishJob(job *UpgradeJob, db *gorm.DB, exec Executor, server *models.Docke
 	// Refresh remaining updates count from host
 	remaining, _ := CheckAvailableUpdates(ctx, exec, job.PackageManager)
 	now := time.Now()
-	db.Where("server_id = ?", server.ID).Delete(&models.HostPackageUpdate{})
 	secCount := 0
 	for _, u := range remaining {
 		if u.IsSecurity {
 			secCount++
 		}
-		db.Create(&models.HostPackageUpdate{
-			ServerID:       server.ID,
-			Name:           u.Name,
-			CurrentVersion: u.CurrentVersion,
-			NewVersion:     u.NewVersion,
-			Repository:     u.Repository,
-			IsSecurity:     u.IsSecurity,
-			CreatedAt:      now,
-		})
 	}
 
-	db.Model(server).Updates(map[string]interface{}{
-		"packages_last_checked":   &now,
-		"available_updates_count": len(remaining),
-		"security_updates_count":  secCount,
-	})
+	if db != nil {
+		db.Where("server_id = ?", server.ID).Delete(&models.HostPackageUpdate{})
+		for _, u := range remaining {
+			db.Create(&models.HostPackageUpdate{
+				ServerID:       server.ID,
+				Name:           u.Name,
+				CurrentVersion: u.CurrentVersion,
+				NewVersion:     u.NewVersion,
+				Repository:     u.Repository,
+				IsSecurity:     u.IsSecurity,
+				CreatedAt:      now,
+			})
+		}
+
+		db.Model(server).Updates(map[string]interface{}{
+			"packages_last_checked":   &now,
+			"available_updates_count": len(remaining),
+			"security_updates_count":  secCount,
+		})
+	}
 
 	if success {
 		audit.Log(db, userID, username, "UPGRADE_PACKAGES", "host", server.Name,

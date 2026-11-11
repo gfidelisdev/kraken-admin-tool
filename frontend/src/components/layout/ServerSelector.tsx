@@ -42,7 +42,7 @@ export function ServerSelector() {
           <Server className="h-4 w-4 text-sky-400" />
           <span
             className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-slate-900 ${
-              isConnected ? "bg-emerald-400" : "bg-rose-400"
+              isConnected ? "bg-emerald-400" : activeServer ? "bg-rose-400" : "bg-slate-500"
             }`}
           />
         </div>
@@ -50,7 +50,7 @@ export function ServerSelector() {
         <div className="hidden sm:block text-left">
           <div className="flex items-center space-x-1.5">
             <span className="text-xs font-semibold text-slate-200 leading-none">
-              {activeServer?.name || "Local Host"}
+              {activeServer?.name || "Nenhum Host"}
             </span>
             {activeServer?.is_default && (
               <span className="rounded bg-sky-500/10 border border-sky-500/20 px-1 py-0.2 text-[9px] font-mono text-sky-400">
@@ -59,7 +59,7 @@ export function ServerSelector() {
             )}
           </div>
           <p className="text-[10px] text-slate-400 leading-none mt-1 font-mono truncate max-w-[130px]">
-            {activeServer?.host_url || "Connecting..."}
+            {activeServer?.host_url || "Nenhum host ativo"}
           </p>
         </div>
 
@@ -70,7 +70,7 @@ export function ServerSelector() {
       {isOpen && (
         <div className="absolute left-0 sm:left-auto sm:right-0 mt-2 w-72 rounded-xl border border-slate-800 bg-slate-900/95 p-1.5 shadow-2xl backdrop-blur-md z-50 animate-in fade-in zoom-in-95">
           <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-slate-800 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-            <span>Docker Hosts ({servers.length})</span>
+            <span>Hosts ({servers.length})</span>
             <Link
               href="/servers"
               onClick={() => setIsOpen(false)}
@@ -82,6 +82,11 @@ export function ServerSelector() {
           </div>
 
           <div className="max-h-64 overflow-y-auto divide-y divide-slate-800/40 my-1">
+            {servers.length === 0 && (
+              <div className="py-4 px-3 text-center text-xs text-slate-400">
+                Nenhum host disponível para seu usuário.
+              </div>
+            )}
             {servers.map((server) => {
               const isSelected = activeServer?.id === server.id;
               const serverOnline = server.status === "CONNECTED";

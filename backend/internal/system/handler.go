@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/database"
 	"github.com/kraken/admin-tool/backend/internal/docker"
 	"github.com/kraken/admin-tool/backend/internal/k8s"
@@ -31,17 +32,43 @@ func NewHandler(dbHandle *database.Handle, docker *docker.DockerService, k8s *k8
 	}
 }
 
-func getServerID(r *http.Request) uint {
+func (h *Handler) getAuthorizedServerID(r *http.Request) uint {
+	var requestedID uint
 	if header := r.Header.Get("X-Server-ID"); header != "" {
 		if id, err := strconv.ParseUint(header, 10, 32); err == nil {
-			return uint(id)
+			requestedID = uint(id)
 		}
 	}
-	if query := r.URL.Query().Get("serverId"); query != "" {
+	if query := r.URL.Query().Get("serverId"); query != "" && requestedID == 0 {
 		if id, err := strconv.ParseUint(query, 10, 32); err == nil {
-			return uint(id)
+			requestedID = uint(id)
 		}
 	}
+
+	claims := auth.GetUserFromContext(r.Context())
+	if claims == nil || claims.UserID == 0 {
+		return 0
+	}
+
+	if h.DBHandle == nil || h.DBHandle.DB == nil {
+		return requestedID
+	}
+
+	if requestedID > 0 {
+		var count int64
+		h.DBHandle.DB.Model(&models.DockerServer{}).Where("id = ? AND user_id = ?", requestedID, claims.UserID).Count(&count)
+		if count > 0 {
+			return requestedID
+		}
+		return 0
+	}
+
+	// If no server specified, pick the user's default or first server
+	var srv models.DockerServer
+	if err := h.DBHandle.DB.Where("user_id = ?", claims.UserID).Order("is_default desc, id asc").First(&srv).Error; err == nil {
+		return srv.ID
+	}
+
 	return 0
 }
 
@@ -50,7 +77,7 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	serverID := getServerID(r)
+	serverID := h.getAuthorizedServerID(r)
 
 	dockerConnected := false
 	dockerVersion := ""

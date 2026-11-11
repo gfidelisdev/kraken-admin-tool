@@ -4,9 +4,11 @@ services:
     image: postgres:16-alpine
     container_name: kraken-postgres
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       POSTGRES_USER: ${DB_USER:-kraken}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-kraken_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       POSTGRES_DB: ${DB_NAME:-kraken_db}
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
@@ -32,20 +34,28 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
-      PORT: 8080
-      ENVIRONMENT: production
-      DB_HOST: postgres
-      DB_PORT: 5432
+      PORT: ${PORT:-8080}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
       DB_USER: ${DB_USER:-kraken}
-      DB_PASSWORD: ${DB_PASSWORD:-kraken_password}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       DB_NAME: ${DB_NAME:-kraken_db}
-      JWT_SECRET: ${JWT_SECRET:-kraken-production-jwt-secret-key-32bytes-long!}
-      DOCKER_HOST: unix:///var/run/docker.sock
-      KUBECONFIG: /home/kraken/.kube/config
-      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      ENCRYPTION_KEY_PREVIOUS: ${ENCRYPTION_KEY_PREVIOUS:-}
+      ADMIN_RECOVERY_KEY: ${ADMIN_RECOVERY_KEY:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
+      KUBECONFIG: ${KUBECONFIG:-/home/kraken/.kube/config}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
-      PLUGINS_DIR: /app/data/plugins
+      PLUGINS_DIR: ${PLUGINS_DIR:-/app/data/plugins}
     volumes:
       # Host Docker daemon socket to inspect and manage Docker containers & images
       - /var/run/docker.sock:/var/run/docker.sock

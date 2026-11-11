@@ -11,6 +11,7 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (username: string, password: string) => Promise<void>;
+  completeMicrosoftLogin: (token: string, user: User) => void;
   register: (username: string, email: string, password: string) => Promise<any>;
   logout: () => void;
   refreshUser: () => Promise<void>;
@@ -64,6 +65,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const completeMicrosoftLogin = (newToken: string, newUser: User) => {
+    setToken(newToken);
+    setTokenState(newToken);
+    setUser(newUser);
+    setIsLoading(false);
+  };
+
   const register = async (username: string, email: string, password: string) => {
     setIsLoading(true);
     try {
@@ -84,11 +92,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = () => {
+    api.post("/api/auth/logout", {}).catch(() => {});
     removeToken();
     setUser(null);
     setTokenState(null);
     if (typeof window !== "undefined") {
       sessionStorage.removeItem("kraken_otp_dismissed");
+      try {
+        if (window.indexedDB) {
+          window.indexedDB.deleteDatabase("kraken_azure_kv_plugin_db");
+        }
+      } catch (_) {}
       window.location.href = "/login";
     }
   };
@@ -97,7 +111,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isInitialOTPPrompt, setIsInitialOTPPrompt] = useState(false);
 
   useEffect(() => {
-    if (user && user.status === "active" && !user.otp_enabled) {
+    if (user && user.status === "active" && !user.otp_enabled && user.auth_provider !== "microsoft") {
       if (typeof window !== "undefined") {
         const dismissed = sessionStorage.getItem("kraken_otp_dismissed");
         if (!dismissed) {
@@ -121,6 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isLoading,
         isAuthenticated: !!user,
         login,
+        completeMicrosoftLogin,
         register,
         logout,
         refreshUser: fetchCurrentUser,

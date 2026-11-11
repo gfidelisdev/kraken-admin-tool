@@ -377,7 +377,7 @@ func TestHandler_AdminResetPassword_AutoGenerate(t *testing.T) {
 
 func TestHandler_MasterAdminRecovery(t *testing.T) {
 	db := setupTestDB(t)
-	h := NewHandler(db, "my-super-secret-jwt-key", false)
+	h := NewHandler(db, "my-super-secret-jwt-key-32-bytes-minimum!!", false)
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte("lostpass123"), bcrypt.DefaultCost)
 	adminUser := models.User{
@@ -389,22 +389,37 @@ func TestHandler_MasterAdminRecovery(t *testing.T) {
 	}
 	db.Create(&adminUser)
 
-	// Attempt with wrong key -> 401
 	recoveryBody, _ := json.Marshal(models.MasterRecoveryRequest{
 		Username:    "admin",
 		NewPassword: "newemergencyadminpassword123",
 	})
+
+	// 1. Disabled by default when ADMIN_RECOVERY_KEY is not configured -> 403
+	h.SetAdminRecoveryKey("")
+	disabledReq := httptest.NewRequest("POST", "/api/auth/admin-recovery", bytes.NewReader(recoveryBody))
+	disabledReq.Header.Set("X-Master-Key", "kraken-admin-master-recovery")
+	disabledRec := httptest.NewRecorder()
+	h.MasterAdminRecovery(disabledRec, disabledReq)
+	if disabledRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when ADMIN_RECOVERY_KEY is unset, got %d", disabledRec.Code)
+	}
+
+	// 2. Configure dedicated strong ADMIN_RECOVERY_KEY
+	const dedicatedRecoveryKey = "dedicated-admin-recovery-key-at-least-32-chars-long!"
+	h.SetAdminRecoveryKey(dedicatedRecoveryKey)
+
+	// Attempt with wrong key (or JWT_SECRET) -> 401
 	badReq := httptest.NewRequest("POST", "/api/auth/admin-recovery", bytes.NewReader(recoveryBody))
-	badReq.Header.Set("X-Master-Key", "wrong-key")
+	badReq.Header.Set("X-Master-Key", "my-super-secret-jwt-key-32-bytes-minimum!!")
 	badRec := httptest.NewRecorder()
 	h.MasterAdminRecovery(badRec, badReq)
 	if badRec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 Unauthorized for bad master key, got %d", badRec.Code)
+		t.Fatalf("expected 401 Unauthorized when passing JWT_SECRET instead of ADMIN_RECOVERY_KEY, got %d", badRec.Code)
 	}
 
-	// Attempt with valid master key
+	// 3. Attempt with valid dedicated ADMIN_RECOVERY_KEY -> 200
 	goodReq := httptest.NewRequest("POST", "/api/auth/admin-recovery", bytes.NewReader(recoveryBody))
-	goodReq.Header.Set("X-Master-Key", "my-super-secret-jwt-key")
+	goodReq.Header.Set("X-Master-Key", dedicatedRecoveryKey)
 	goodRec := httptest.NewRecorder()
 	h.MasterAdminRecovery(goodRec, goodReq)
 	if goodRec.Code != http.StatusOK {

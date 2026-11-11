@@ -22,12 +22,15 @@ var (
 
 func getMasterKey() []byte {
 	masterKeyOnce.Do(func() {
-		secret := os.Getenv("ENCRYPTION_KEY")
-		if strings.TrimSpace(secret) == "" {
-			secret = os.Getenv("JWT_SECRET")
+		secret := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY"))
+		if secret == "" {
+			secret = strings.TrimSpace(os.Getenv("JWT_SECRET"))
 		}
-		if strings.TrimSpace(secret) == "" {
-			secret = "kraken-default-internal-encryption-key-must-change"
+		if secret == "" {
+			b := make([]byte, 32)
+			_, _ = rand.Read(b)
+			masterKey = b
+			return
 		}
 		hash := sha256.Sum256([]byte(secret))
 		masterKey = hash[:]
@@ -65,22 +68,7 @@ func Encrypt(plaintext string) (string, error) {
 	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// Decrypt decrypts a string if prefixed with encPrefix, otherwise returns as-is
-func Decrypt(data string) (string, error) {
-	if data == "" {
-		return "", nil
-	}
-	if !strings.HasPrefix(data, encPrefix) {
-		return data, nil // Return unencrypted data as-is for backward compatibility
-	}
-
-	rawB64 := strings.TrimPrefix(data, encPrefix)
-	ciphertext, err := base64.StdEncoding.DecodeString(rawB64)
-	if err != nil {
-		return "", err
-	}
-
-	key := getMasterKey()
+func decryptWithKey(ciphertext, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -103,4 +91,41 @@ func Decrypt(data string) (string, error) {
 	}
 
 	return string(plaintextBytes), nil
+}
+
+// Decrypt decrypts a string if prefixed with encPrefix, otherwise returns as-is.
+// Supports seamless key rotation via ENCRYPTION_KEY_PREVIOUS (comma-separated list of prior keys).
+func Decrypt(data string) (string, error) {
+	if data == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(data, encPrefix) {
+		return data, nil // Return unencrypted data as-is for backward compatibility
+	}
+
+	rawB64 := strings.TrimPrefix(data, encPrefix)
+	ciphertext, err := base64.StdEncoding.DecodeString(rawB64)
+	if err != nil {
+		return "", err
+	}
+
+	plaintext, err := decryptWithKey(ciphertext, getMasterKey())
+	if err == nil {
+		return plaintext, nil
+	}
+
+	if prevRaw := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY_PREVIOUS")); prevRaw != "" {
+		for _, prevSecret := range strings.Split(prevRaw, ",") {
+			prevSecret = strings.TrimSpace(prevSecret)
+			if prevSecret == "" {
+				continue
+			}
+			h := sha256.Sum256([]byte(prevSecret))
+			if pt, prevErr := decryptWithKey(ciphertext, h[:]); prevErr == nil {
+				return pt, nil
+			}
+		}
+	}
+
+	return "", err
 }

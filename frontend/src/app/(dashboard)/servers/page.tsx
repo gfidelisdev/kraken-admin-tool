@@ -49,6 +49,7 @@ import {
   updateHostPackageManager,
   updateHostSudoPolicy,
   clearHostSudoPassword,
+  listPluginVaultSecrets,
 } from "@/lib/api";
 import {
   DockerServer,
@@ -60,6 +61,7 @@ import {
   PackageUpgradeLog,
   PackageUpgradeResult,
   ActiveUpgradeJob,
+  VaultSecretItem,
 } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -200,9 +202,28 @@ export default function ServersPage() {
 
   // Credential & Sudo Policy State
   const [credentialPolicy, setCredentialPolicy] = useState<"save_securely" | "always_prompt">("save_securely");
+  const [credentialSource, setCredentialSource] = useState<"local" | "plugin">("local");
+  const [credentialPluginId, setCredentialPluginId] = useState<string>("com.kraken.azure-keyvault");
+  const [secretReference, setSecretReference] = useState<string>("");
+  const [vaultSecrets, setVaultSecrets] = useState<VaultSecretItem[]>([]);
+  const [isLoadingVaultSecrets, setIsLoadingVaultSecrets] = useState<boolean>(false);
   const [sudoPolicy, setSudoPolicy] = useState<"save_securely" | "always_prompt" | "">("always_prompt");
   const [sudoPassword, setSudoPassword] = useState("");
   const [formPackageManager, setFormPackageManager] = useState<string>("");
+
+  const loadVaultSecretsForForm = useCallback(async (pluginId: string = "com.kraken.azure-keyvault") => {
+    setIsLoadingVaultSecrets(true);
+    try {
+      const res = await listPluginVaultSecrets(pluginId);
+      if (res && Array.isArray(res.secrets)) {
+        setVaultSecrets(res.secrets);
+      }
+    } catch {
+      // Plugin might not be configured yet; allow manual secret name entry
+    } finally {
+      setIsLoadingVaultSecrets(false);
+    }
+  }, []);
 
   // Package Management Modal State
   const [packageModalServer, setPackageModalServer] = useState<DockerServer | null>(null);
@@ -340,6 +361,21 @@ export default function ServersPage() {
     }
   }, [upgradeLogs]);
 
+  // Auto-reattach if server modal is open and an active upgrade job is running, but no stream is attached
+  useEffect(() => {
+    if (!currentModalServerId || !packageModalServer) return;
+    const active = activeJobsMap[currentModalServerId];
+    if (
+      active?.status === "running" &&
+      !upgradingServers[currentModalServerId] &&
+      !streamControllersRef.current[currentModalServerId]
+    ) {
+      setUpgradingServers((prev) => ({ ...prev, [currentModalServerId]: true }));
+      setConsoleOpenServers((prev) => ({ ...prev, [currentModalServerId]: true }));
+      handleTriggerUpgradePackages(undefined, undefined, true, undefined, packageModalServer);
+    }
+  }, [currentModalServerId, activeJobsMap, upgradingServers, packageModalServer]);
+
   // Compute URL based on fields
   const computedUrl = useMemo(() => {
     if (isManualUrl && hostUrl.trim()) {
@@ -423,6 +459,9 @@ export default function ServersPage() {
     setSshKeyPassphrase("");
 
     setCredentialPolicy("save_securely");
+    setCredentialSource("local");
+    setCredentialPluginId("com.kraken.azure-keyvault");
+    setSecretReference("");
     setSudoPolicy("always_prompt");
     setSudoPassword("");
     setFormPackageManager("");
@@ -446,6 +485,17 @@ export default function ServersPage() {
     setShowCertFields(server.tls_verify);
 
     setCredentialPolicy((server.credential_policy as "save_securely" | "always_prompt") || "save_securely");
+    const isPluginManaged =
+      server.credential_source === "plugin" ||
+      server.credential_source === "vault" ||
+      Boolean(server.secret_reference);
+    setCredentialSource(isPluginManaged ? "plugin" : "local");
+    const targetPluginId = server.credential_plugin_id || "com.kraken.azure-keyvault";
+    setCredentialPluginId(targetPluginId);
+    setSecretReference(server.secret_reference || "");
+    if (isPluginManaged) {
+      loadVaultSecretsForForm(targetPluginId);
+    }
     setSudoPolicy((server.sudo_policy as "save_securely" | "always_prompt" | "") || "always_prompt");
     setSudoPassword("");
     setFormPackageManager(server.package_manager || "");
@@ -594,9 +644,27 @@ export default function ServersPage() {
           ? {
               ssh_user: sshUser.trim() || undefined,
               ssh_auth_method: sshAuthMethod,
-              ssh_password: sshAuthMethod === "password" ? sshPassword || undefined : undefined,
-              ssh_private_key: sshAuthMethod === "key" ? sshPrivateKey.trim() || undefined : undefined,
-              ssh_key_passphrase: sshAuthMethod === "key" ? sshKeyPassphrase || undefined : undefined,
+              ssh_password:
+                credentialSource === "local" && sshAuthMethod === "password"
+                  ? sshPassword || undefined
+                  : undefined,
+              ssh_private_key:
+                credentialSource === "local" && sshAuthMethod === "key"
+                  ? sshPrivateKey.trim() || undefined
+                  : undefined,
+              ssh_key_passphrase:
+                credentialSource === "local" && sshAuthMethod === "key"
+                  ? sshKeyPassphrase || undefined
+                  : undefined,
+              credential_source: credentialSource,
+              credential_plugin_id:
+                credentialSource === "plugin"
+                  ? credentialPluginId || "com.kraken.azure-keyvault"
+                  : undefined,
+              secret_reference:
+                credentialSource === "plugin"
+                  ? secretReference.trim() || undefined
+                  : undefined,
             }
           : {}),
       };
@@ -678,9 +746,27 @@ export default function ServersPage() {
           ? {
               ssh_user: sshUser.trim() || undefined,
               ssh_auth_method: sshAuthMethod,
-              ssh_password: sshAuthMethod === "password" ? sshPassword || undefined : undefined,
-              ssh_private_key: sshAuthMethod === "key" ? sshPrivateKey.trim() || undefined : undefined,
-              ssh_key_passphrase: sshAuthMethod === "key" ? sshKeyPassphrase || undefined : undefined,
+              ssh_password:
+                credentialSource === "local" && sshAuthMethod === "password"
+                  ? sshPassword || undefined
+                  : undefined,
+              ssh_private_key:
+                credentialSource === "local" && sshAuthMethod === "key"
+                  ? sshPrivateKey.trim() || undefined
+                  : undefined,
+              ssh_key_passphrase:
+                credentialSource === "local" && sshAuthMethod === "key"
+                  ? sshKeyPassphrase || undefined
+                  : undefined,
+              credential_source: credentialSource,
+              credential_plugin_id:
+                credentialSource === "plugin"
+                  ? credentialPluginId || "com.kraken.azure-keyvault"
+                  : undefined,
+              secret_reference:
+                credentialSource === "plugin"
+                  ? secretReference.trim() || undefined
+                  : undefined,
             }
           : {}),
       };
@@ -755,22 +841,27 @@ export default function ServersPage() {
       if (activeJob && activeJob.has_active_job) {
         setConsoleOpenServers((prev) => ({ ...prev, [server.id]: true }));
         setUpgradingServers((prev) => ({ ...prev, [server.id]: true }));
+        if (activeJob.logs && activeJob.logs.length > 0) {
+          setUpgradeLogsByServer((prev) => ({ ...prev, [server.id]: activeJob.logs || [] }));
+        }
         if (activeJob.duration_seconds !== undefined) {
           setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: activeJob.duration_seconds || 0 }));
         } else if (activeJob.started_at) {
           const elapsed = Math.round((Date.now() - new Date(activeJob.started_at).getTime()) / 1000);
           setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: elapsed > 0 ? elapsed : 0 }));
         }
-        // Immediately reattach to stream
-        setTimeout(() => {
-          handleTriggerUpgradePackages(undefined, undefined, true);
-        }, 50);
+        // Immediately reattach to stream passing server directly
+        handleTriggerUpgradePackages(undefined, undefined, true, undefined, server);
       } else if (activeJob && (activeJob.status === "success" || activeJob.status === "failed")) {
+        setConsoleOpenServers((prev) => ({ ...prev, [server.id]: true }));
         if (activeJob.result) {
           setUpgradeResultsByServer((prev) => ({ ...prev, [server.id]: activeJob.result || null }));
-          if (activeJob.duration_seconds !== undefined) {
-            setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: activeJob.duration_seconds || 0 }));
-          }
+        }
+        if (activeJob.duration_seconds !== undefined) {
+          setUpgradeDurationsByServer((prev) => ({ ...prev, [server.id]: activeJob.duration_seconds || 0 }));
+        }
+        if (activeJob.logs && activeJob.logs.length > 0) {
+          setUpgradeLogsByServer((prev) => ({ ...prev, [server.id]: activeJob.logs || [] }));
         }
       }
 
@@ -863,15 +954,17 @@ export default function ServersPage() {
     overridePackages?: string[],
     overridePassword?: string,
     isReattach: boolean = false,
-    saveSudoPolicy?: string
+    saveSudoPolicy?: string,
+    targetServerParam?: DockerServer
   ) => {
-    if (!packageModalServer) return;
-    const targetServerId = packageModalServer.id;
-    const targetServerName = packageModalServer.name;
-    const hasSaved = packageStatus?.has_saved_sudo_password ?? packageModalServer.has_saved_sudo_password;
+    const targetServer = targetServerParam || packageModalServerRef.current || packageModalServer;
+    if (!targetServer) return;
+    const targetServerId = targetServer.id;
+    const targetServerName = targetServer.name;
+    const hasSaved = packageStatus?.has_saved_sudo_password ?? targetServer.has_saved_sudo_password;
     const pwd = isReattach ? undefined : (overridePassword !== undefined ? overridePassword : (hasSaved ? undefined : ""));
     const pkgsToUpgrade = isReattach ? undefined : (overridePackages !== undefined ? overridePackages : (selectedPackages.length > 0 ? selectedPackages : undefined));
-    const pm = isReattach ? undefined : (selectedPackageManager && selectedPackageManager !== "auto" ? selectedPackageManager : undefined);
+    const pm = isReattach ? undefined : (selectedPackageManager && selectedPackageManager !== "auto" ? selectedPackageManager : (targetServer.package_manager || undefined));
 
     setPackageActionError(null);
     setPackageActionSuccess(null);
@@ -1122,10 +1215,10 @@ export default function ServersPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
             <Server className="h-6 w-6 text-sky-400" />
-            Servidores & Hosts Docker Remotos
+            Servidores & Hosts Remotos
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Gerencie múltiplos nós Docker e clusters remotos via SSH, TCP ou TLS.
+            Gerencie múltiplos hosts, nós Docker e clusters remotos via SSH, TCP ou TLS.
           </p>
         </div>
 
@@ -1352,7 +1445,23 @@ export default function ServersPage() {
                         )}
 
                         <span className="text-[10px] text-slate-400 font-mono">
-                          {server.credential_policy === "always_prompt" ? (
+                          {server.credential_source === "plugin" ||
+                          server.credential_source === "vault" ||
+                          server.secret_reference ? (
+                            <span
+                              className="text-sky-400 font-medium"
+                              title={
+                                server.secret_reference
+                                  ? `Azure Key Vault Secret: ${server.secret_reference}`
+                                  : "Resolução JIT via Azure Key Vault"
+                              }
+                            >
+                              ☁️ Azure KV{" "}
+                              {server.secret_reference
+                                ? `(${server.secret_reference})`
+                                : "(JIT)"}
+                            </span>
+                          ) : server.credential_policy === "always_prompt" ? (
                             <span className="text-amber-400/90 font-medium">⚡ Sempre solicitar</span>
                           ) : (
                             <span className="text-emerald-400/90 font-medium">🔒 Salvo criptografado</span>
@@ -1564,8 +1673,8 @@ export default function ServersPage() {
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={editingServer ? "Editar Host Docker" : "Adicionar Host Docker Remoto"}
-        description="Configure o acesso ao daemon Docker via SSH, TCP ou Socket com verificação em tempo real."
+        title={editingServer ? "Editar Host" : "Adicionar Host Remoto"}
+        description="Configure o acesso ao host via SSH, TCP ou Socket com verificação em tempo real."
         maxWidth="2xl"
       >
         <form onSubmit={handleSaveServer} className="space-y-4">
@@ -1768,27 +1877,128 @@ export default function ServersPage() {
                 </div>
               </div>
 
+              {/* Credential Source Selector (Local vs Azure Key Vault Plugin JIT) */}
+              <div>
+                <label className="text-[11px] font-medium text-slate-400">
+                  Origem da Credencial SSH
+                </label>
+                <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-900 rounded-lg border border-slate-800 mt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCredentialSource("local");
+                      setTestResult(null);
+                    }}
+                    className={`py-1.5 px-2 rounded text-xs font-medium transition-all flex items-center justify-center gap-1.5 ${
+                      credentialSource === "local"
+                        ? "bg-sky-500/20 text-sky-300 border border-sky-500/40"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>Credencial Local</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCredentialSource("plugin");
+                      setCredentialPluginId("com.kraken.azure-keyvault");
+                      setTestResult(null);
+                      if (vaultSecrets.length === 0) {
+                        loadVaultSecretsForForm("com.kraken.azure-keyvault");
+                      }
+                    }}
+                    className={`py-1.5 px-2 rounded text-xs font-medium transition-all flex items-center justify-center gap-1.5 ${
+                      credentialSource === "plugin"
+                        ? "bg-sky-500/20 text-sky-300 border border-sky-500/40"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    <span>Azure Key Vault (JIT)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Azure Key Vault Secret Selector when Plugin JIT is active */}
+              {credentialSource === "plugin" && (
+                <div className="space-y-2 rounded-lg border border-sky-500/30 bg-sky-950/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-sky-300">
+                      Secret no Azure Key Vault (Resolução Just-in-Time)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => loadVaultSecretsForForm(credentialPluginId || "com.kraken.azure-keyvault")}
+                      disabled={isLoadingVaultSecrets}
+                      className="inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${isLoadingVaultSecrets ? "animate-spin" : ""}`} />
+                      <span>{isLoadingVaultSecrets ? "Buscando..." : "Listar do Cofre"}</span>
+                    </button>
+                  </div>
+
+                  {vaultSecrets.length > 0 && (
+                    <div>
+                      <select
+                        value={secretReference}
+                        onChange={(e) => {
+                          setSecretReference(e.target.value);
+                          setTestResult(null);
+                        }}
+                        className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+                      >
+                        <option value="">-- Selecione um Secret do Azure Key Vault --</option>
+                        {vaultSecrets.map((sec) => (
+                          <option key={sec.name} value={sec.name}>
+                            {sec.name} {sec.content_type ? `(${sec.content_type})` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div>
+                    <Input
+                      placeholder="Nome do secret no cofre (ex: maquinasvirtuais-p04poa-dev01)"
+                      value={secretReference}
+                      onChange={(e) => {
+                        setSecretReference(e.target.value);
+                        setTestResult(null);
+                      }}
+                    />
+                    <p className="mt-1 text-[10px] text-slate-400">
+                      A senha ou chave SSH será buscada em tempo real diretamente no Azure Key Vault a cada conexão.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Password Field */}
-              {sshAuthMethod === "password" && (
+              {credentialSource === "local" && sshAuthMethod === "password" && (
                 <div>
                   <label className="text-[11px] font-medium text-slate-400">Senha SSH</label>
                   <div className="mt-1">
                     <Input
                       type="password"
-                      placeholder="Digite a senha de login do usuário SSH"
+                      placeholder={
+                        editingServer
+                          ? "Deixe em branco para manter a senha atual"
+                          : "Digite a senha de login do usuário SSH"
+                      }
                       value={sshPassword}
                       onChange={(e) => {
                         setSshPassword(e.target.value);
                         setTestResult(null);
                       }}
-                      required
+                      required={!editingServer}
                     />
                   </div>
                 </div>
               )}
 
               {/* Key Fields */}
-              {sshAuthMethod === "key" && (
+              {credentialSource === "local" && sshAuthMethod === "key" && (
                 <div className="space-y-2">
                   <ProvisionKeyPanel
                     serverHost={serverHost}
@@ -1964,7 +2174,7 @@ export default function ServersPage() {
           {isManualUrl && (
             <div className="space-y-1">
               <label className="text-xs font-medium text-slate-300">
-                Docker Host URL Completa
+                Host URL Completa
               </label>
               <Input
                 value={hostUrl}
@@ -2299,7 +2509,7 @@ export default function ServersPage() {
         isOpen={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDeleteServer}
-        title="Remover Host Docker"
+        title="Remover Host"
         description={`Tem certeza que deseja remover o servidor "${deleteTarget?.name}" (${deleteTarget?.host_url})? Qualquer sessão ativa será redirecionada para o servidor padrão.`}
         confirmLabel="Remover Servidor"
       />
@@ -2618,8 +2828,12 @@ export default function ServersPage() {
                   <div className="flex-1 p-4 font-mono text-xs overflow-y-auto space-y-1 bg-slate-950/95 scrollbar-thin scrollbar-thumb-slate-800">
                     {upgradeLogs.length === 0 ? (
                       <p className="text-slate-500 italic flex items-center gap-2">
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin text-sky-400" />
-                        Conectando ao host e iniciando comando de atualização...
+                        {isUpgrading && (
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                        )}
+                        {isUpgrading
+                          ? "Conectando ao host e iniciando comando de atualização..."
+                          : "Nenhum registro de log disponível para esta execução."}
                       </p>
                     ) : (
                       upgradeLogs.map((log, index) => {

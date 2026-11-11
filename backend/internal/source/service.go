@@ -518,9 +518,68 @@ func (s *Service) UnbindSource(ctx context.Context, serverID uint, req models.Un
 	}).Error
 }
 
-// GetSourceFileContent reads any source file from the host in read-only mode
+func isAllowedSourceFilename(p string) bool {
+	base := strings.ToLower(filepath.Base(p))
+	if base == "dockerfile" || strings.HasPrefix(base, "dockerfile.") || strings.HasSuffix(base, ".dockerfile") {
+		return true
+	}
+	if strings.HasPrefix(base, "docker-compose") || strings.HasPrefix(base, "compose.") {
+		if strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml") {
+			return true
+		}
+	}
+	return false
+}
+
+// GetSourceFileContent reads a discovered or search-directory-scoped source file from the host in read-only mode
 func (s *Service) GetSourceFileContent(ctx context.Context, serverID uint, filePath string) (string, error) {
-	return s.dockerService.ReadFileFromHost(ctx, serverID, filePath)
+	if s.db == nil {
+		return "", errors.New("database not available")
+	}
+
+	cleanPath := filepath.Clean(strings.TrimSpace(filePath))
+	if cleanPath == "" || !filepath.IsAbs(cleanPath) {
+		return "", errors.New("file path must be a valid absolute path")
+	}
+
+	if err := ValidateSearchPath(cleanPath); err != nil {
+		return "", err
+	}
+
+	// Allow if explicitly registered as a discovered/bound SourceLink for this server
+	var linkCount int64
+	if err := s.db.WithContext(ctx).Model(&models.SourceLink{}).
+		Where("server_id = ? AND file_path = ?", serverID, cleanPath).
+		Count(&linkCount).Error; err == nil && linkCount > 0 {
+		return s.dockerService.ReadFileFromHost(ctx, serverID, cleanPath)
+	}
+
+	// Otherwise, require the file to be a recognized Dockerfile/Compose file inside an enabled SourceSearchDir
+	if !isAllowedSourceFilename(cleanPath) {
+		return "", errors.New("access denied: only discovered source files (Dockerfile / docker-compose) inside configured search directories may be read")
+	}
+
+	var dirs []models.SourceSearchDir
+	if err := s.db.WithContext(ctx).Where("server_id = ? AND enabled = ?", serverID, true).Find(&dirs).Error; err != nil {
+		return "", err
+	}
+
+	inAllowedDir := false
+	for _, d := range dirs {
+		dirClean := filepath.Clean(d.Path)
+		if dirClean == "/" {
+			continue
+		}
+		if strings.HasPrefix(cleanPath, dirClean+"/") {
+			inAllowedDir = true
+			break
+		}
+	}
+	if !inAllowedDir {
+		return "", errors.New("access denied: file path is outside configured source search directories")
+	}
+
+	return s.dockerService.ReadFileFromHost(ctx, serverID, cleanPath)
 }
 
 // ListSourceLinks returns discovered links for images or stacks

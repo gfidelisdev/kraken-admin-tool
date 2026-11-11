@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,21 +42,24 @@ func (h *Handler) resolveServerAndExecutor(r *http.Request, serverID uint) (*mod
 
 	cleanHost := strings.TrimSpace(server.HostURL)
 	if docker.IsSSHHost(cleanHost) {
-		// Extract transient SSH credentials if server is in always_prompt mode
-		transientPassword := r.Header.Get("X-Host-Password")
-		transientKey := r.Header.Get("X-Host-Key")
-		transientPassphrase := r.Header.Get("X-Host-Key-Passphrase")
-
 		var overrides []docker.SSHConfig
-		if transientPassword != "" || transientKey != "" {
-			overrides = append(overrides, docker.SSHConfig{
-				Password:      transientPassword,
-				PrivateKey:    transientKey,
-				KeyPassphrase: transientPassphrase,
-			})
+		ctx := context.Background()
+		if r != nil {
+			ctx = r.Context()
+			transientPassword := r.Header.Get("X-Host-Password")
+			transientKey := r.Header.Get("X-Host-Key")
+			transientPassphrase := r.Header.Get("X-Host-Key-Passphrase")
+
+			if transientPassword != "" || transientKey != "" {
+				overrides = append(overrides, docker.SSHConfig{
+					Password:      transientPassword,
+					PrivateKey:    transientKey,
+					KeyPassphrase: transientPassphrase,
+				})
+			}
 		}
 
-		client, _, err := h.DockerService.GetSSHClient(r.Context(), serverID, overrides...)
+		client, _, err := h.DockerService.GetSSHClient(ctx, serverID, overrides...)
 		if err != nil {
 			return &server, nil, err
 		}
@@ -121,9 +125,15 @@ func (h *Handler) GetPackageStatusHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	isLocalHost := !docker.IsSSHHost(server.HostURL)
-	hasSavedSudo := server.SudoPassword != ""
+	isPluginManaged := server.CredentialSource == models.CredentialSourcePlugin ||
+		server.CredentialSource == models.CredentialSourceVault ||
+		strings.TrimSpace(server.SecretReference) != ""
+	hasSavedSudo := server.SudoPassword != "" || isPluginManaged
 	requiresSudo := !isLocalHost && server.SSHUser != "root" && !strings.EqualFold(server.SSHUser, "root")
 	sudoPolicy := server.SudoPolicy
+	if isPluginManaged && (sudoPolicy == "" || sudoPolicy == "always_prompt") {
+		sudoPolicy = "save_securely"
+	}
 	if isLocalHost {
 		requiresSudo = false
 		sudoPolicy = "not_required"
@@ -169,19 +179,21 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isLocalHost := !docker.IsSSHHost(server.HostURL)
+	isPluginManaged := server.CredentialSource == models.CredentialSourcePlugin ||
+		server.CredentialSource == models.CredentialSourceVault ||
+		strings.TrimSpace(server.SecretReference) != ""
 
 	// Resolve sudo password based on policy and request
 	sudoPassword := req.SudoPassword
 	if sudoPassword == "" {
 		sudoPassword = r.Header.Get("X-Sudo-Password")
 	}
-	if sudoPassword == "" && server.SudoPassword != "" && server.SudoPolicy != "always_prompt" {
-		decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
-		if decErr == nil {
-			sudoPassword = decrypted
-			if server.SudoPolicy == "" {
-				server.SudoPolicy = "save_securely"
-				h.DB.Model(server).Update("sudo_policy", "save_securely")
+	if sudoPassword == "" && (server.SudoPolicy != "always_prompt" || isPluginManaged) {
+		if resolved, resErr := h.DockerService.ResolveServerCredentials(r.Context(), server, "sudo_exec"); resErr == nil {
+			if resolved.SudoPassword != "" {
+				sudoPassword = resolved.SudoPassword
+			} else if resolved.SSHPassword != "" {
+				sudoPassword = resolved.SSHPassword
 			}
 		}
 	}
@@ -321,6 +333,9 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	requiresSudo := !isLocalHost && server.SSHUser != "root" && !strings.EqualFold(server.SSHUser, "root")
 	sudoPolicy := server.SudoPolicy
+	if isPluginManaged && (sudoPolicy == "" || sudoPolicy == "always_prompt") {
+		sudoPolicy = "save_securely"
+	}
 	if isLocalHost {
 		requiresSudo = false
 		sudoPolicy = "not_required"
@@ -339,7 +354,7 @@ func (h *Handler) CheckPackagesHandler(w http.ResponseWriter, r *http.Request) {
 		LastChecked:           now,
 		RequiresSudo:          requiresSudo,
 		SudoPolicy:            sudoPolicy,
-		HasSavedSudoPassword:  server.SudoPassword != "",
+		HasSavedSudoPassword:  server.SudoPassword != "" || isPluginManaged,
 	})
 }
 
@@ -371,19 +386,21 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	isLocalHost := !docker.IsSSHHost(server.HostURL)
+	isPluginManaged := server.CredentialSource == models.CredentialSourcePlugin ||
+		server.CredentialSource == models.CredentialSourceVault ||
+		strings.TrimSpace(server.SecretReference) != ""
 
 	// Resolve sudo password
 	sudoPassword := req.SudoPassword
 	if sudoPassword == "" {
 		sudoPassword = r.Header.Get("X-Sudo-Password")
 	}
-	if sudoPassword == "" && server.SudoPassword != "" && server.SudoPolicy != "always_prompt" {
-		decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
-		if decErr == nil {
-			sudoPassword = decrypted
-			if server.SudoPolicy == "" {
-				server.SudoPolicy = "save_securely"
-				h.DB.Model(server).Update("sudo_policy", "save_securely")
+	if sudoPassword == "" && (server.SudoPolicy != "always_prompt" || isPluginManaged) {
+		if resolved, resErr := h.DockerService.ResolveServerCredentials(r.Context(), server, "sudo_exec"); resErr == nil {
+			if resolved.SudoPassword != "" {
+				sudoPassword = resolved.SudoPassword
+			} else if resolved.SSHPassword != "" {
+				sudoPassword = resolved.SSHPassword
 			}
 		}
 	}
@@ -512,6 +529,101 @@ func (h *Handler) UpgradePackagesHandler(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (h *Handler) recoverDetachedJob(ctx context.Context, serverID uint) *UpgradeJob {
+	server, exec, err := h.resolveServerAndExecutor(nil, serverID)
+	if err != nil || server == nil || exec == nil {
+		return nil
+	}
+
+	status, isAlive, exitCode, _, checkErr := CheckDetachedStatus(ctx, exec, serverID)
+	if checkErr != nil || status == "NONE" || status == "ERROR" {
+		return nil
+	}
+
+	dir := GetDetachedDir(serverID)
+	catCmd := fmt.Sprintf(`cat "%s/output.log" 2>/dev/null`, dir)
+	stdout, _, _, _ := exec.Execute(ctx, catCmd)
+
+	lines := strings.Split(stdout, "\n")
+	logs := make([]PackageUpgradeLog, 0, len(lines)+1)
+	cleanStatus := status
+	finalExit := exitCode
+
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if strings.HasPrefix(trimmed, SentinelFinishedPrefix) {
+			ecStr := strings.TrimSuffix(strings.TrimPrefix(trimmed, SentinelFinishedPrefix), "===")
+			if ec, err := strconv.Atoi(ecStr); err == nil {
+				finalExit = ec
+				if ec == 0 {
+					cleanStatus = "SUCCESS"
+				} else {
+					cleanStatus = "FAILED"
+				}
+			}
+			continue
+		}
+		if trimmed != "" {
+			logs = append(logs, PackageUpgradeLog{
+				Type:      "log",
+				Message:   trimmed,
+				Level:     "stdout",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+	}
+
+	jobStatus := "running"
+	if !isAlive {
+		if cleanStatus == "SUCCESS" || finalExit == 0 {
+			jobStatus = "success"
+		} else {
+			jobStatus = "failed"
+		}
+	}
+
+	jobID := fmt.Sprintf("pkg-upg-%d-recovered", serverID)
+	now := time.Now()
+	job := &UpgradeJob{
+		ID:             jobID,
+		ServerID:       serverID,
+		ServerName:     server.Name,
+		Status:         jobStatus,
+		PackageManager: server.PackageManager,
+		StartedAt:      now,
+		Logs:           logs,
+		subscribers:    make(map[chan PackageUpgradeLog]struct{}),
+	}
+
+	if !isAlive {
+		job.FinishedAt = &now
+		success := finalExit == 0 || cleanStatus == "SUCCESS"
+		msg := "Atualização concluída com sucesso"
+		if !success {
+			msg = fmt.Sprintf("Atualização de pacotes finalizada com código de erro %d", finalExit)
+		}
+		job.Result = &PackageUpgradeResult{
+			Success:               success,
+			Message:               msg,
+			RemainingUpdatesCount: 0,
+			SecurityUpdatesCount:  0,
+		}
+	}
+
+	h.JobMgr.SetJob(serverID, job)
+
+	// If still running, resume detached background worker
+	if isAlive {
+		execResolver := func(c context.Context) (Executor, error) {
+			_, e, err := h.resolveServerAndExecutor(nil, serverID)
+			return e, err
+		}
+		_ = h.JobMgr.ResumeDetachedUpgrade(job, h.DB, h.DockerService, execResolver, server, len(logs), 0, "system")
+	}
+
+	return job
+}
+
 // GetActiveUpgradeJobHandler returns the status of any active or recently finished background upgrade job
 func (h *Handler) GetActiveUpgradeJobHandler(w http.ResponseWriter, r *http.Request) {
 	idParam := chi.URLParam(r, "id")
@@ -523,7 +635,12 @@ func (h *Handler) GetActiveUpgradeJobHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	job := h.JobMgr.GetJob(uint(id))
+	serverID := uint(id)
+	job := h.JobMgr.GetJob(serverID)
+	if job == nil {
+		job = h.recoverDetachedJob(r.Context(), serverID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if job == nil {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -534,6 +651,9 @@ func (h *Handler) GetActiveUpgradeJobHandler(w http.ResponseWriter, r *http.Requ
 
 	job.mu.RLock()
 	defer job.mu.RUnlock()
+
+	logsCopy := make([]PackageUpgradeLog, len(job.Logs))
+	copy(logsCopy, job.Logs)
 
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_active_job":   job.Status == "running",
@@ -547,12 +667,16 @@ func (h *Handler) GetActiveUpgradeJobHandler(w http.ResponseWriter, r *http.Requ
 		"finished_at":      job.FinishedAt,
 		"duration_seconds": job.DurationSec,
 		"logs_count":       len(job.Logs),
+		"logs":             logsCopy,
 		"result":           job.Result,
 	})
 }
 
 // ListActiveUpgradeJobsHandler returns all currently running upgrade jobs across all servers
 func (h *Handler) ListActiveUpgradeJobsHandler(w http.ResponseWriter, r *http.Request) {
+	if h.JobMgr.GetJob(1) == nil {
+		_ = h.recoverDetachedJob(r.Context(), 1)
+	}
 	jobs := h.JobMgr.GetActiveJobs()
 	type activeItem struct {
 		ServerID       uint      `json:"server_id"`
@@ -595,6 +719,9 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 
 	serverID := uint(id)
 	existingJob := h.JobMgr.GetJob(serverID)
+	if existingJob == nil {
+		existingJob = h.recoverDetachedJob(r.Context(), serverID)
+	}
 
 	var job *UpgradeJob
 
@@ -635,17 +762,19 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 			}
 
 			// Resolve sudo password
+			isPluginManaged := server.CredentialSource == models.CredentialSourcePlugin ||
+				server.CredentialSource == models.CredentialSourceVault ||
+				strings.TrimSpace(server.SecretReference) != ""
 			sudoPassword := req.SudoPassword
 			if sudoPassword == "" {
 				sudoPassword = r.Header.Get("X-Sudo-Password")
 			}
-			if sudoPassword == "" && server.SudoPassword != "" && server.SudoPolicy != "always_prompt" {
-				decrypted, decErr := krakencrypto.Decrypt(server.SudoPassword)
-				if decErr == nil {
-					sudoPassword = decrypted
-					if server.SudoPolicy == "" {
-						server.SudoPolicy = "save_securely"
-						h.DB.Model(server).Update("sudo_policy", "save_securely")
+			if sudoPassword == "" && (server.SudoPolicy != "always_prompt" || isPluginManaged) {
+				if resolved, resErr := h.DockerService.ResolveServerCredentials(r.Context(), server, "sudo_exec"); resErr == nil {
+					if resolved.SudoPassword != "" {
+						sudoPassword = resolved.SudoPassword
+					} else if resolved.SSHPassword != "" {
+						sudoPassword = resolved.SSHPassword
 					}
 				}
 			}

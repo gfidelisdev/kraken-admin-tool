@@ -10,23 +10,26 @@ import (
 
 // Claims defines custom JWT claims
 type Claims struct {
-	UserID   uint   `json:"user_id"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	UserID       uint   `json:"user_id"`
+	Username     string `json:"username"`
+	Role         string `json:"role"`
+	AuthProvider string `json:"auth_provider,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// GenerateToken generates a signed JWT string for a user
-func GenerateToken(user *models.User, secret string, duration time.Duration) (string, error) {
+// GenerateTokenWithSession generates a signed JWT string for a user with auth provider and session ID (jti)
+func GenerateTokenWithSession(user *models.User, secret string, duration time.Duration, authProvider string, sessionID string) (string, error) {
 	if secret == "" {
 		return "", errors.New("jwt secret is required")
 	}
 
 	claims := Claims{
-		UserID:   user.ID,
-		Username: user.Username,
-		Role:     user.Role,
+		UserID:       user.ID,
+		Username:     user.Username,
+		Role:         user.Role,
+		AuthProvider: authProvider,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        sessionID,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(duration)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
@@ -37,6 +40,11 @@ func GenerateToken(user *models.User, secret string, duration time.Duration) (st
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
+}
+
+// GenerateToken generates a signed JWT string for a user
+func GenerateToken(user *models.User, secret string, duration time.Duration) (string, error) {
+	return GenerateTokenWithSession(user, secret, duration, "local", "")
 }
 
 // ValidateToken parses and validates a JWT token string

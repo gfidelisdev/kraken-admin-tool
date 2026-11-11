@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kraken/admin-tool/backend/internal/audit"
+	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/host"
 	"github.com/kraken/admin-tool/backend/internal/models"
 )
@@ -57,7 +58,13 @@ func (m *Manager) ResolveHostAdapter(
 		return rawResp, nil
 	}
 
-	log.Printf("[PLUGIN:%s] Intercepted host adapter operation: '%s' (user: %s)", pluginID, operation, username)
+	if userID == 0 {
+		if claims := auth.GetUserFromContext(ctx); claims != nil {
+			userID = claims.UserID
+		}
+	}
+
+	log.Printf("[PLUGIN:%s] Intercepted host adapter operation: '%s' (user: %s, userID: %d)", pluginID, operation, username, userID)
 
 	switch operation {
 	case "network.scan_external_listeners":
@@ -96,7 +103,41 @@ func (m *Manager) ResolveHostAdapter(
 				Error:     "Plugin lacks mandatory permission 'hosts:read'",
 			}, nil
 		}
-		return m.executeHostsList(ctx)
+		return m.executeHostsList(ctx, userID)
+
+	case "hosts.bind_credential":
+		if !permMap["hosts:create"] && !permMap["credentials:manage"] {
+			return HostAdapterResponse{
+				Status:    "denied",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Error:     "Plugin lacks permission 'hosts:create' or 'credentials:manage'",
+			}, nil
+		}
+		return m.executeBindHostCredential(ctx, pluginID, dataObj, userID)
+
+	case "auth.logout", "auth.disconnect":
+		if m.msSessionRevoker != nil {
+			claims := auth.GetUserFromContext(ctx)
+			sid := ""
+			if claims != nil {
+				sid = claims.ID
+			}
+			m.msSessionRevoker(userID, sid)
+		}
+		if m.db != nil {
+			if userID > 0 {
+				m.db.Where("plugin_id = ? AND (user_id = ? OR user_id = 0)", pluginID, userID).Delete(&models.PluginKVStore{})
+			} else {
+				m.db.Where("plugin_id = ? AND user_id = 0", pluginID).Delete(&models.PluginKVStore{})
+			}
+		}
+		return HostAdapterResponse{
+			Status:    "success",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Data: map[string]interface{}{
+				"message": "Microsoft session invalidated and credentials cleared successfully",
+			},
+		}, nil
 
 	case "hosts.exec":
 		if !permMap["hosts:exec"] {
@@ -279,10 +320,21 @@ func (m *Manager) executeBlockPort(
 	}, nil
 }
 
-// executeHostsList returns list of monitored hosts
-func (m *Manager) executeHostsList(ctx context.Context) (HostAdapterResponse, error) {
+// executeHostsList returns list of monitored hosts for the specific user
+func (m *Manager) executeHostsList(ctx context.Context, userID uint) (HostAdapterResponse, error) {
+	if userID == 0 {
+		return HostAdapterResponse{
+			Status:    "success",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Data: map[string]interface{}{
+				"hosts": []interface{}{},
+			},
+		}, nil
+	}
+
 	var servers []models.DockerServer
-	if err := m.db.Find(&servers).Error; err != nil {
+	query := m.db.Order("is_default desc, id asc").Where("user_id = ?", userID)
+	if err := query.Find(&servers).Error; err != nil {
 		return HostAdapterResponse{
 			Status:    "error",
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -316,6 +368,75 @@ func (m *Manager) executeHostsList(ctx context.Context) (HostAdapterResponse, er
 	}, nil
 }
 
+// executeBindHostCredential binds a host to a plugin secret reference
+func (m *Manager) executeBindHostCredential(
+	ctx context.Context,
+	pluginID string,
+	params map[string]interface{},
+	userID uint,
+) (HostAdapterResponse, error) {
+	rawServerID, _ := params["server_id"]
+	secretName, _ := params["secret_name"].(string)
+
+	var serverID uint
+	switch v := rawServerID.(type) {
+	case float64:
+		serverID = uint(v)
+	case int:
+		serverID = uint(v)
+	case string:
+		id64, _ := strconv.ParseUint(strings.TrimSpace(v), 10, 32)
+		serverID = uint(id64)
+	}
+
+	if serverID == 0 {
+		return HostAdapterResponse{
+			Status:    "error",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     "Invalid or missing 'server_id' parameter",
+		}, nil
+	}
+
+	var srv models.DockerServer
+	query := m.db.Where("id = ?", serverID)
+	if userID > 0 {
+		query = query.Where("user_id = ?", userID)
+	} else {
+		return HostAdapterResponse{
+			Status:    "error",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     "User authentication required to bind host credentials",
+		}, nil
+	}
+	if err := query.First(&srv).Error; err != nil {
+		return HostAdapterResponse{
+			Status:    "error",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     fmt.Sprintf("Server ID %d not found or not accessible", serverID),
+		}, nil
+	}
+
+	srv.CredentialSource = "plugin"
+	srv.CredentialPluginID = pluginID
+	srv.SecretReference = strings.TrimSpace(secretName)
+	if err := m.db.Save(&srv).Error; err != nil {
+		return HostAdapterResponse{
+			Status:    "error",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     fmt.Sprintf("Failed to update server credentials: %v", err),
+		}, nil
+	}
+
+	return HostAdapterResponse{
+		Status:    "success",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Data: map[string]interface{}{
+			"message":   fmt.Sprintf("Server '%s' bound to secret '%s' successfully.", srv.Name, secretName),
+			"server_id": srv.ID,
+		},
+	}, nil
+}
+
 // executeHostExec executes an arbitrary shell command on a host
 func (m *Manager) executeHostExec(
 	ctx context.Context,
@@ -337,11 +458,19 @@ func (m *Manager) executeHostExec(
 	var srv models.DockerServer
 	err := m.db.Where("name = ? OR host_url LIKE ?", targetHost, "%"+targetHost+"%").First(&srv).Error
 	if err != nil {
-		return HostAdapterResponse{
-			Status:    "error",
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Error:     fmt.Sprintf("Server '%s' not found", targetHost),
-		}, nil
+		lowerHost := strings.ToLower(strings.TrimSpace(targetHost))
+		if lowerHost == "" || lowerHost == "localhost" || lowerHost == "127.0.0.1" || lowerHost == "local" || lowerHost == "local daemon" {
+			srv = models.DockerServer{
+				Name:    "Local Daemon",
+				HostURL: "unix:///var/run/docker.sock",
+			}
+		} else {
+			return HostAdapterResponse{
+				Status:    "error",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Error:     fmt.Sprintf("Server '%s' not found", targetHost),
+			}, nil
+		}
 	}
 
 	out, runErr := m.execOnServer(ctx, srv, cmd)
@@ -350,8 +479,9 @@ func (m *Manager) executeHostExec(
 		exitCode = 1
 	}
 
+	safeCmd := redactCommandSecrets(cmd)
 	audit.Log(m.db, userID, username, "HOST_COMMAND_EXEC", "host", srv.Name,
-		fmt.Sprintf("Plugin '%s' executed command '%s' on %s", pluginID, cmd, srv.Name), "SUCCESS")
+		fmt.Sprintf("Plugin '%s' executed command '%s' on %s", pluginID, safeCmd, srv.Name), "SUCCESS")
 
 	return HostAdapterResponse{
 		Status:    "success",
@@ -361,6 +491,19 @@ func (m *Manager) executeHostExec(
 			"exit_code": exitCode,
 		},
 	}, nil
+}
+
+var (
+	secretTokenAssignmentRegex = regexp.MustCompile(`(?i)(AKV_TOKEN|ARM_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|CLIENT_SECRET)=('[^']*'|"[^"]*"|\S+)`)
+	secretParamRegex           = regexp.MustCompile(`(?i)(refresh_token|client_secret|access_token|password)=([^&'"\s]+)`)
+	secretJsonValueRegex       = regexp.MustCompile(`(?i)"(value|password|ssh_password|ssh_private_key|sudo_password)"\s*:\s*"[^"]*"`)
+)
+
+func redactCommandSecrets(cmd string) string {
+	redacted := secretTokenAssignmentRegex.ReplaceAllString(cmd, `$1='[REDACTED]'`)
+	redacted = secretParamRegex.ReplaceAllString(redacted, `$1=[REDACTED]`)
+	redacted = secretJsonValueRegex.ReplaceAllString(redacted, `"$1":"[REDACTED]"`)
+	return redacted
 }
 
 // execOnServer runs a command on server via SSH or Local

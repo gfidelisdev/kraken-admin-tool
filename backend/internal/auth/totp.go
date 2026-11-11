@@ -4,13 +4,21 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+)
+
+var (
+	totpReplayMu    sync.Mutex
+	totpReplayCache = make(map[string]time.Time)
 )
 
 const (
@@ -98,4 +106,33 @@ func ValidateTOTPCode(secret, code string) bool {
 	}
 
 	return false
+}
+
+// ConsumeTOTPCodeForAction validates a 6-digit TOTP code and records it in an anti-replay cache
+// for the given action over the ±1 time-step window (RFC 6238 §5.2).
+func ConsumeTOTPCodeForAction(action, secret, code string) bool {
+	if !ValidateTOTPCode(secret, code) {
+		return false
+	}
+
+	cleanCode := strings.TrimSpace(code)
+	digest := sha256.Sum256([]byte(action + ":" + strings.ToUpper(strings.TrimSpace(secret)) + ":" + cleanCode))
+	key := hex.EncodeToString(digest[:])
+
+	totpReplayMu.Lock()
+	defer totpReplayMu.Unlock()
+
+	now := time.Now()
+	for k, exp := range totpReplayCache {
+		if now.After(exp) {
+			delete(totpReplayCache, k)
+		}
+	}
+
+	if exp, exists := totpReplayCache[key]; exists && now.Before(exp) {
+		return false
+	}
+
+	totpReplayCache[key] = now.Add(3 * TOTPPeriod * time.Second)
+	return true
 }

@@ -54,4 +54,14 @@ func TestIPRateLimiter(t *testing.T) {
 	if recOther.Code != http.StatusOK {
 		t.Errorf("expected 200 for different IP, got %d", recOther.Code)
 	}
+
+	// Spoofed X-Forwarded-For from untrusted peer (192.0.2.1) must NOT bypass rate limit
+	reqSpoof := httptest.NewRequest("POST", "/api/auth/login", nil)
+	reqSpoof.RemoteAddr = "192.0.2.1:1234"
+	reqSpoof.Header.Set("X-Forwarded-For", "203.0.113.99")
+	recSpoof := httptest.NewRecorder()
+	handler.ServeHTTP(recSpoof, reqSpoof)
+	if recSpoof.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 when spoofing X-Forwarded-For from untrusted peer, got %d", recSpoof.Code)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -75,14 +76,15 @@ func validateHostURLSafety(hostURL string, sshUser string) error {
 
 // DockerService manages interactions with local or remote Docker daemons
 type DockerService struct {
-	db          *gorm.DB
-	defaultHost string
-	defaultCli  *client.Client
-	connected   bool
-	errMsg      string
-	mu          sync.RWMutex
-	clients     map[uint]*client.Client
-	clientLocks sync.Map // uint -> *sync.Mutex
+	db                 *gorm.DB
+	defaultHost        string
+	defaultCli         *client.Client
+	connected          bool
+	errMsg             string
+	mu                 sync.RWMutex
+	clients            map[uint]*client.Client
+	clientLocks        sync.Map // uint -> *sync.Mutex
+	credentialResolver CredentialResolver
 }
 
 // NewDockerService creates and initializes a multi-host Docker service with default fallback
@@ -198,23 +200,225 @@ func (s *DockerService) SetDB(db *gorm.DB) {
 	s.db = db
 }
 
-// GetClient retrieves the Docker client for a specific serverID (or default if 0)
-func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.Client, error) {
-	// If serverID is 0, find default server in DB or fallback
-	if serverID == 0 {
-		if s.db != nil {
-			var defaultServer models.DockerServer
-			if err := s.db.Where("is_default = ?", true).First(&defaultServer).Error; err == nil {
-				return s.GetClient(ctx, defaultServer.ID)
+// SetCredentialResolver configures the dynamic secret/credential provider (e.g. plugins or Key Vault)
+func (s *DockerService) SetCredentialResolver(resolver CredentialResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentialResolver = resolver
+}
+
+// GetCredentialResolver returns the active credential resolver
+func (s *DockerService) GetCredentialResolver() CredentialResolver {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.credentialResolver
+}
+
+// ResolveServerCredentials dynamically obtains credentials for a server
+// either via an external Key Vault plugin or via local AES-GCM decryption.
+func (s *DockerService) ResolveServerCredentials(ctx context.Context, server *models.DockerServer, purpose string) (*models.ResolvedCredentials, error) {
+	if server == nil {
+		return nil, errors.New("server is nil")
+	}
+
+	pluginID := strings.TrimSpace(server.CredentialPluginID)
+	usePlugin := server.CredentialSource == models.CredentialSourcePlugin ||
+		server.CredentialSource == models.CredentialSourceVault ||
+		strings.TrimSpace(server.SecretReference) != ""
+	if usePlugin && pluginID == "" {
+		pluginID = "com.kraken.azure-keyvault"
+	}
+
+	if usePlugin && pluginID != "" {
+		s.mu.RLock()
+		resolver := s.credentialResolver
+		s.mu.RUnlock()
+
+		if resolver == nil {
+			return nil, fmt.Errorf("credential resolver not configured to handle plugin '%s'", pluginID)
+		}
+
+		var vaultCfg map[string]interface{}
+		if strings.TrimSpace(server.VaultConfig) != "" {
+			_ = json.Unmarshal([]byte(server.VaultConfig), &vaultCfg)
+		}
+
+		req := models.ResolveSecretRequest{
+			ServerID:           server.ID,
+			ServerName:         server.Name,
+			HostURL:            server.HostURL,
+			SSHUser:            server.SSHUser,
+			CredentialPluginID: pluginID,
+			SecretReference:    server.SecretReference,
+			SecretVersion:      server.SecretVersion,
+			VaultConfig:        vaultCfg,
+			Purpose:            purpose,
+		}
+
+		resolved, err := resolver.ResolveCredentials(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve secret from plugin '%s': %w", pluginID, err)
+		}
+
+		// Ensure defaults from server model if not overridden by plugin
+		if resolved.SSHUser == "" {
+			resolved.SSHUser = server.SSHUser
+		}
+		if resolved.SSHAuthMethod == "" {
+			if resolved.SSHPrivateKey != "" {
+				resolved.SSHAuthMethod = "key"
+			} else if resolved.SSHPassword != "" {
+				resolved.SSHAuthMethod = "password"
+			} else {
+				resolved.SSHAuthMethod = server.SSHAuthMethod
 			}
 		}
-		if s.defaultCli != nil && s.connected {
+		if resolved.TLSCACert == "" {
+			resolved.TLSCACert = server.TLSCACert
+		}
+		if resolved.TLSCert == "" {
+			resolved.TLSCert = server.TLSCert
+		}
+
+		return resolved, nil
+	}
+
+	// Local fallback: decrypt locally stored credentials
+	tlsKey, _ := krakencrypto.Decrypt(server.TLSKey)
+	sshPassword, _ := krakencrypto.Decrypt(server.SSHPassword)
+	sshPrivateKey, _ := krakencrypto.Decrypt(server.SSHPrivateKey)
+	sshPassphrase, _ := krakencrypto.Decrypt(server.SSHKeyPassphrase)
+	sudoPassword, _ := krakencrypto.Decrypt(server.SudoPassword)
+
+	// If local SSH server has no stored password/key, attempt JIT resolution via Azure Key Vault plugin if bound
+	if strings.HasPrefix(server.HostURL, "ssh://") && sshPassword == "" && sshPrivateKey == "" {
+		s.mu.RLock()
+		resolver := s.credentialResolver
+		s.mu.RUnlock()
+		if resolver != nil {
+			req := models.ResolveSecretRequest{
+				ServerID:           server.ID,
+				ServerName:         server.Name,
+				HostURL:            server.HostURL,
+				SSHUser:            server.SSHUser,
+				CredentialPluginID: "com.kraken.azure-keyvault",
+				SecretReference:    server.SecretReference,
+				Purpose:            purpose,
+			}
+			if resolved, err := resolver.ResolveCredentials(ctx, req); err == nil && (resolved.SSHPassword != "" || resolved.SSHPrivateKey != "") {
+				if resolved.SSHUser == "" {
+					resolved.SSHUser = server.SSHUser
+				}
+				return resolved, nil
+			}
+		}
+	}
+
+	return &models.ResolvedCredentials{
+		SSHUser:          server.SSHUser,
+		SSHAuthMethod:    server.SSHAuthMethod,
+		SSHPassword:      sshPassword,
+		SSHPrivateKey:    sshPrivateKey,
+		SSHKeyPassphrase: sshPassphrase,
+		TLSKey:           tlsKey,
+		TLSCACert:        server.TLSCACert,
+		TLSCert:          server.TLSCert,
+		SudoPassword:     sudoPassword,
+	}, nil
+}
+
+// PrepareTestServerRequest resolves dynamic credentials into the TestServerRequest if configured
+func (s *DockerService) PrepareTestServerRequest(ctx context.Context, req *models.TestServerRequest) error {
+	if req == nil {
+		return nil
+	}
+
+	if (req.CredentialSource == models.CredentialSourcePlugin || req.CredentialSource == models.CredentialSourceVault) && strings.TrimSpace(req.CredentialPluginID) == "" {
+		req.CredentialPluginID = "com.kraken.azure-keyvault"
+	}
+
+	if (req.CredentialSource == models.CredentialSourcePlugin || req.CredentialSource == models.CredentialSourceVault) && req.CredentialPluginID != "" {
+		s.mu.RLock()
+		resolver := s.credentialResolver
+		s.mu.RUnlock()
+
+		if resolver == nil {
+			return fmt.Errorf("credential resolver not configured to handle plugin '%s'", req.CredentialPluginID)
+		}
+
+		var vaultCfg map[string]interface{}
+		if strings.TrimSpace(req.VaultConfig) != "" {
+			_ = json.Unmarshal([]byte(req.VaultConfig), &vaultCfg)
+		}
+
+		hostURL := strings.TrimSpace(req.HostURL)
+		if hostURL == "" && strings.TrimSpace(req.ServerHost) != "" {
+			port := strings.TrimSpace(req.ServerPort)
+			if port == "" {
+				port = "22"
+			}
+			user := strings.TrimSpace(req.SSHUser)
+			if user == "" {
+				user = "root"
+			}
+			hostURL = fmt.Sprintf("ssh://%s@%s:%s", user, strings.TrimSpace(req.ServerHost), port)
+		}
+
+		resolved, err := resolver.ResolveCredentials(ctx, models.ResolveSecretRequest{
+			HostURL:            hostURL,
+			SSHUser:            req.SSHUser,
+			CredentialPluginID: req.CredentialPluginID,
+			SecretReference:    req.SecretReference,
+			SecretVersion:      req.SecretVersion,
+			VaultConfig:        vaultCfg,
+			Purpose:            "ssh_connect",
+		})
+		if err != nil {
+			return fmt.Errorf("failed to resolve secret from plugin '%s': %w", req.CredentialPluginID, err)
+		}
+
+		if resolved.SSHPassword != "" {
+			req.SSHPassword = resolved.SSHPassword
+		}
+		if resolved.SSHPrivateKey != "" {
+			req.SSHPrivateKey = resolved.SSHPrivateKey
+		}
+		if resolved.SSHKeyPassphrase != "" {
+			req.SSHKeyPassphrase = resolved.SSHKeyPassphrase
+		}
+		if resolved.TLSKey != "" {
+			req.TLSKey = resolved.TLSKey
+		}
+		if resolved.SSHAuthMethod != "" {
+			req.SSHAuthMethod = resolved.SSHAuthMethod
+		}
+		if resolved.SSHUser != "" && req.SSHUser == "" {
+			req.SSHUser = resolved.SSHUser
+		}
+	}
+
+	return nil
+}
+
+// GetSystemClient returns the underlying system Docker client (used for plugin runners and internal builders)
+func (s *DockerService) GetSystemClient() (*client.Client, error) {
+	if s.defaultCli != nil && s.connected {
+		return s.defaultCli, nil
+	}
+	if s.defaultCli != nil {
+		return s.defaultCli, nil
+	}
+	return nil, errors.New("system docker daemon is currently unavailable")
+}
+
+// GetClient retrieves the Docker client for a specific serverID.
+// For strict multi-tenant isolation, a serverID of 0 does not fall back to the host daemon when a DB is attached.
+func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.Client, error) {
+	if serverID == 0 {
+		if s.db == nil && s.defaultCli != nil {
 			return s.defaultCli, nil
 		}
-		if s.defaultCli != nil {
-			return s.defaultCli, nil
-		}
-		return nil, errors.New("docker daemon is currently unavailable")
+		return nil, errors.New("no docker server specified")
 	}
 
 	// Check cached client first
@@ -251,24 +455,24 @@ func (s *DockerService) GetClient(ctx context.Context, serverID uint) (*client.C
 		return nil, fmt.Errorf("server %d not found: %w", serverID, err)
 	}
 
-	tlsKey, _ := krakencrypto.Decrypt(server.TLSKey)
-	sshPassword, _ := krakencrypto.Decrypt(server.SSHPassword)
-	sshPrivateKey, _ := krakencrypto.Decrypt(server.SSHPrivateKey)
-	sshPassphrase, _ := krakencrypto.Decrypt(server.SSHKeyPassphrase)
+	resolved, err := s.ResolveServerCredentials(ctx, &server, "docker_connect")
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve server credentials for %s: %w", server.Name, err)
+	}
 
 	newCli, err := createDockerClientWithSSH(
 		server.HostURL,
 		server.TLSVerify,
-		server.TLSCACert,
-		server.TLSCert,
-		tlsKey,
+		resolved.TLSCACert,
+		resolved.TLSCert,
+		resolved.TLSKey,
 		SSHConfig{
 			HostURL:       server.HostURL,
-			User:          server.SSHUser,
-			AuthMethod:    server.SSHAuthMethod,
-			Password:      sshPassword,
-			PrivateKey:    sshPrivateKey,
-			KeyPassphrase: sshPassphrase,
+			User:          resolved.SSHUser,
+			AuthMethod:    resolved.SSHAuthMethod,
+			Password:      resolved.SSHPassword,
+			PrivateKey:    resolved.SSHPrivateKey,
+			KeyPassphrase: resolved.SSHKeyPassphrase,
 		},
 	)
 	if err != nil {
@@ -346,9 +550,20 @@ func (s *DockerService) GetSSHClient(ctx context.Context, serverID uint, overrid
 		return nil, server, fmt.Errorf("invalid SSH host url: %w", err)
 	}
 
-	sshPassword, _ := krakencrypto.Decrypt(server.SSHPassword)
-	sshPrivateKey, _ := krakencrypto.Decrypt(server.SSHPrivateKey)
-	sshPassphrase, _ := krakencrypto.Decrypt(server.SSHKeyPassphrase)
+	resolved, err := s.ResolveServerCredentials(ctx, server, "ssh_connect")
+	if err != nil {
+		return nil, server, fmt.Errorf("failed to resolve server credentials: %w", err)
+	}
+
+	sshPassword := resolved.SSHPassword
+	sshPrivateKey := resolved.SSHPrivateKey
+	sshPassphrase := resolved.SSHKeyPassphrase
+	if resolved.SSHAuthMethod != "" {
+		server.SSHAuthMethod = resolved.SSHAuthMethod
+	}
+	if resolved.SSHUser != "" {
+		parsed.User = resolved.SSHUser
+	}
 
 	if len(overrides) > 0 {
 		if overrides[0].Password != "" {
@@ -475,21 +690,21 @@ func (s *DockerService) ProbeServer(ctx context.Context, serverID uint) ServerSt
 // If probe is true, it verifies connectivity and counts concurrently in parallel.
 // If probe is false or omitted, it returns the database records immediately without blocking.
 func (s *DockerService) ListServers(ctx context.Context, probe ...bool) ([]models.DockerServer, error) {
-	if s.db == nil {
-		// Return single default server mock if no DB
-		return []models.DockerServer{
-			{
-				ID:        1,
-				Name:      "Local Daemon",
-				HostURL:   s.defaultHost,
-				IsDefault: true,
-				Status:    map[bool]string{true: "CONNECTED", false: "UNREACHABLE"}[s.connected],
-			},
-		}, nil
+	return s.ListServersForUser(ctx, 0, probe...)
+}
+
+// ListServersForUser returns Docker servers accessible by a specific user.
+// Servers are strictly isolated: a user only sees hosts they explicitly own (user_id = userID).
+// The system host is never shown automatically unless the user explicitly owns it.
+// If userID is 0, an empty slice is returned.
+func (s *DockerService) ListServersForUser(ctx context.Context, userID uint, probe ...bool) ([]models.DockerServer, error) {
+	if userID == 0 || s.db == nil {
+		return []models.DockerServer{}, nil
 	}
 
 	var servers []models.DockerServer
-	if err := s.db.Order("is_default desc, id asc").Find(&servers).Error; err != nil {
+	query := s.db.Order("is_default desc, id asc").Where("user_id = ?", userID)
+	if err := query.Find(&servers).Error; err != nil {
 		return nil, err
 	}
 
@@ -525,9 +740,14 @@ func (s *DockerService) ListServers(ctx context.Context, probe ...bool) ([]model
 }
 
 // CreateServer registers a new Docker host
-func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServerRequest) (*models.DockerServer, error) {
+func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServerRequest, userIDs ...uint) (*models.DockerServer, error) {
 	if s.db == nil {
 		return nil, errors.New("database unavailable")
+	}
+
+	var userID uint
+	if len(userIDs) > 0 {
+		userID = userIDs[0]
 	}
 
 	name := strings.TrimSpace(req.Name)
@@ -562,21 +782,31 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 		}
 	}
 
+	credSource := strings.ToLower(strings.TrimSpace(req.CredentialSource))
+	if credSource == "" {
+		credSource = models.CredentialSourceLocal
+	}
+
 	// Test connection
 	status := "CONNECTED"
 	errMsg := ""
 	version := ""
 	testVer, testErr := s.TestServer(ctx, models.TestServerRequest{
-		HostURL:          hostURL,
-		TLSVerify:        req.TLSVerify,
-		TLSCACert:        req.TLSCACert,
-		TLSCert:          req.TLSCert,
-		TLSKey:           req.TLSKey,
-		SSHUser:          sshUser,
-		SSHAuthMethod:    sshAuthMethod,
-		SSHPassword:      req.SSHPassword,
-		SSHPrivateKey:    req.SSHPrivateKey,
-		SSHKeyPassphrase: req.SSHKeyPassphrase,
+		HostURL:            hostURL,
+		TLSVerify:          req.TLSVerify,
+		TLSCACert:          req.TLSCACert,
+		TLSCert:            req.TLSCert,
+		TLSKey:             req.TLSKey,
+		SSHUser:            sshUser,
+		SSHAuthMethod:      sshAuthMethod,
+		SSHPassword:        req.SSHPassword,
+		SSHPrivateKey:      req.SSHPrivateKey,
+		SSHKeyPassphrase:   req.SSHKeyPassphrase,
+		CredentialSource:   credSource,
+		CredentialPluginID: strings.TrimSpace(req.CredentialPluginID),
+		SecretReference:    strings.TrimSpace(req.SecretReference),
+		SecretVersion:      strings.TrimSpace(req.SecretVersion),
+		VaultConfig:        strings.TrimSpace(req.VaultConfig),
 	})
 	if testErr != nil {
 		status = "UNREACHABLE"
@@ -615,25 +845,31 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 	}
 
 	server := models.DockerServer{
-		Name:             name,
-		HostURL:          hostURL,
-		TLSVerify:        req.TLSVerify,
-		TLSCACert:        req.TLSCACert,
-		TLSCert:          req.TLSCert,
-		TLSKey:           encTLSKey,
-		SSHUser:          sshUser,
-		SSHAuthMethod:    sshAuthMethod,
-		SSHPassword:      encSSHPassword,
-		SSHPrivateKey:    encSSHPrivateKey,
-		SSHKeyPassphrase: encSSHKeyPassphrase,
-		CredentialPolicy: credPolicy,
-		SudoPolicy:       sudoPolicy,
-		SudoPassword:     encSudoPassword,
-		PackageManager:   strings.ToLower(strings.TrimSpace(req.PackageManager)),
-		IsDefault:        req.IsDefault,
-		Status:           status,
-		ErrMsg:           errMsg,
-		Version:          version,
+		UserID:             userID,
+		Name:               name,
+		HostURL:            hostURL,
+		TLSVerify:          req.TLSVerify,
+		TLSCACert:          req.TLSCACert,
+		TLSCert:            req.TLSCert,
+		TLSKey:             encTLSKey,
+		SSHUser:            sshUser,
+		SSHAuthMethod:      sshAuthMethod,
+		SSHPassword:        encSSHPassword,
+		SSHPrivateKey:      encSSHPrivateKey,
+		SSHKeyPassphrase:   encSSHKeyPassphrase,
+		CredentialPolicy:   credPolicy,
+		CredentialSource:   credSource,
+		CredentialPluginID: strings.TrimSpace(req.CredentialPluginID),
+		SecretReference:    strings.TrimSpace(req.SecretReference),
+		SecretVersion:      strings.TrimSpace(req.SecretVersion),
+		VaultConfig:        strings.TrimSpace(req.VaultConfig),
+		SudoPolicy:         sudoPolicy,
+		SudoPassword:       encSudoPassword,
+		PackageManager:     strings.ToLower(strings.TrimSpace(req.PackageManager)),
+		IsDefault:          req.IsDefault,
+		Status:             status,
+		ErrMsg:             errMsg,
+		Version:            version,
 	}
 
 	if err := s.db.Create(&server).Error; err != nil {
@@ -730,6 +966,14 @@ func (s *DockerService) UpdateServer(ctx context.Context, id uint, req models.Up
 		server.SudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
 	}
 
+	if req.CredentialSource != "" {
+		server.CredentialSource = strings.ToLower(strings.TrimSpace(req.CredentialSource))
+		server.CredentialPluginID = strings.TrimSpace(req.CredentialPluginID)
+		server.SecretReference = strings.TrimSpace(req.SecretReference)
+		server.SecretVersion = strings.TrimSpace(req.SecretVersion)
+		server.VaultConfig = strings.TrimSpace(req.VaultConfig)
+	}
+
 	if req.PackageManager != "" {
 		server.PackageManager = strings.ToLower(strings.TrimSpace(req.PackageManager))
 	}
@@ -739,18 +983,28 @@ func (s *DockerService) UpdateServer(ctx context.Context, id uint, req models.Up
 		server.IsDefault = true
 	}
 
-	// Test connection
+	// Test connection (decrypt stored local secrets first if not using plugin)
+	decTLSKey, _ := krakencrypto.Decrypt(server.TLSKey)
+	decSSHPassword, _ := krakencrypto.Decrypt(server.SSHPassword)
+	decSSHPrivateKey, _ := krakencrypto.Decrypt(server.SSHPrivateKey)
+	decSSHPassphrase, _ := krakencrypto.Decrypt(server.SSHKeyPassphrase)
+
 	testVer, testErr := s.TestServer(ctx, models.TestServerRequest{
-		HostURL:          server.HostURL,
-		TLSVerify:        server.TLSVerify,
-		TLSCACert:        server.TLSCACert,
-		TLSCert:          server.TLSCert,
-		TLSKey:           server.TLSKey,
-		SSHUser:          server.SSHUser,
-		SSHAuthMethod:    server.SSHAuthMethod,
-		SSHPassword:      server.SSHPassword,
-		SSHPrivateKey:    server.SSHPrivateKey,
-		SSHKeyPassphrase: server.SSHKeyPassphrase,
+		HostURL:            server.HostURL,
+		TLSVerify:          server.TLSVerify,
+		TLSCACert:          server.TLSCACert,
+		TLSCert:            server.TLSCert,
+		TLSKey:             decTLSKey,
+		SSHUser:            server.SSHUser,
+		SSHAuthMethod:      server.SSHAuthMethod,
+		SSHPassword:        decSSHPassword,
+		SSHPrivateKey:      decSSHPrivateKey,
+		SSHKeyPassphrase:   decSSHPassphrase,
+		CredentialSource:   server.CredentialSource,
+		CredentialPluginID: server.CredentialPluginID,
+		SecretReference:    server.SecretReference,
+		SecretVersion:      server.SecretVersion,
+		VaultConfig:        server.VaultConfig,
 	})
 	if testErr != nil {
 		server.Status = "UNREACHABLE"
@@ -816,6 +1070,10 @@ func (s *DockerService) SetDefaultServer(ctx context.Context, id uint) error {
 func (s *DockerService) TestServer(ctx context.Context, req models.TestServerRequest) (string, error) {
 	testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+
+	if err := s.PrepareTestServerRequest(testCtx, &req); err != nil {
+		return "", err
+	}
 
 	res, err := RunServerDiagnostics(testCtx, req, nil)
 	if err != nil {

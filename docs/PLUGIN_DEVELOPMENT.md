@@ -130,6 +130,8 @@ O arquivo `plugin.json` na raiz define a identidade, pontos de extensão e permi
 | `k8s:write` | Reinicia ou escala workloads Kubernetes |
 | `storage:kv` | Armazena chaves e valores isolados no banco de dados do Kraken |
 | `http:outbound` | Permite chamadas HTTP externas para os domínios em `allowed_hosts` |
+| `credentials:resolve` | Resolve segredos e credenciais de logon para servidores (Key Vault) |
+| `credentials:manage` | Cria, lista e vincula segredos em cofres externos (Key Vault) |
 
 ---
 
@@ -164,13 +166,49 @@ A árvore emitida para `kraken.render()` aceita os seguintes nós:
 1. **`Page`**: Contêiner raiz com título e descrição.
 2. **`Grid`**: Grade responsiva (1 a 4 colunas).
 3. **`Section` / `Card`**: Cartão com título, descrição e lista de filhos.
-4. **`StatCard`**: Cartão de métrica com valor destacado, rótulo e badge (`running`, `stopped`, `error`, `pending`, `docker`, `k8s`, `outline`).
-5. **`Table`**: Tabela de dados com colunas `{ key, label }` e linhas `{ ... }`.
-6. **`Button`**: Botão de ação com `actionId` ou `id` capturável em `kraken.on()`.
-7. **`Badge`**: Etiqueta colorida de status.
-8. **`Alert`**: Caixa de alerta destacada (`info`, `warning`, `destructive`).
-9. **`Terminal`**: Bloco de saída monoespaçado simulando terminal de logs.
-10. **`CustomShadowHtml`**: HTML/CSS renderizado em Shadow DOM fechado.
+4. **`FieldGroup` / `FormRow`**: Agrupamento horizontal para alinhar campos e botões.
+5. **`Form`**: Contêiner de formulário que dispara evento `submit`.
+6. **`Input` / `TextInput`**: Campo de entrada com sincronização automática em formulários (`payload.formData`).
+7. **`Textarea`**: Área de texto multilinha com preservação de foco e cursor.
+8. **`Select`**: Menu suspenso de seleção.
+9. **`Checkbox`**: Caixa de seleção booleana.
+10. **`Button`**: Botão de ação com `actionId` ou `id` capturável em `kraken.on()`.
+11. **`StatCard`**: Cartão de métrica com valor destacado, rótulo e badge (`running`, `stopped`, `error`, `pending`, `docker`, `k8s`, `outline`).
+12. **`Table`**: Tabela de dados com colunas `{ key, label }` e linhas `{ ... }`.
+13. **`Badge`**: Etiqueta colorida de status.
+14. **`Alert`**: Caixa de alerta destacada (`info`, `warning`, `destructive`).
+15. **`Terminal` / `CodeBlock`**: Bloco de saída monoespaçado para logs e terminal.
+16. **`CustomShadowHtml`**: HTML/CSS renderizado em Shadow DOM isolado (somente visualização).
+17. **`CodeEditor`**: Editor de código Monaco nativo completo (estilo VS Code) com realce de sintaxe em tempo real, suporte a Ctrl+S/Cmd+S, debounce de digitação e integração imediata com formulários.
+
+### Componente `CodeEditor` (Monaco Editor)
+
+O componente `CodeEditor` permite que plugins criem editores de código completos e modernos:
+
+```json
+{
+  "type": "CodeEditor",
+  "id": "editor_content",
+  "value": "const greeting = 'Hello Kraken!';",
+  "language": "javascript",
+  "theme": "dark",
+  "readOnly": false,
+  "lineNumbers": true,
+  "minimap": false,
+  "wordWrap": "off",
+  "tabSize": 4,
+  "insertSpaces": true,
+  "automaticLayout": true,
+  "height": 500,
+  "saveActionId": "btn-save"
+}
+```
+
+- **Linguagens Suportadas**: `plaintext`, `javascript`, `typescript`, `json`, `html`, `xml`, `css`, `scss`, `less`, `markdown`, `yaml`, `ini`, `python`, `go`, `rust`, `java`, `kotlin`, `csharp`, `c`, `cpp`, `php`, `ruby`, `perl`, `lua`, `shell`, `powershell`, `sql`, `dockerfile` e `hcl`.
+- **Eventos**:
+  - `change` (debounced ~250ms): `kraken.on("editor_content", (payload, eventType) => ...)`
+  - `save` (imediato via Ctrl+S / Cmd+S): `kraken.on("btn-save", (payload, eventType) => ...)`
+- **Formulários**: O valor atual participa de `payload.formData` e `payload.editor_content` imediatamente em qualquer clique de botão, sem aguardar o debounce de alteração.
 
 ### Exemplo Completo de `worker.js`
 
@@ -385,5 +423,10 @@ Os administradores têm 3 opções fáceis para instalar plugins:
    - O Kraken baixará o pacote temporariamente, verificará a assinatura digital e apresentará a lista de permissões solicitadas antes de confirmar a instalação.
 
 3. **Upload de Arquivo Local**:
-   - Na aba **Instalar por URL / Arquivo**, arraste ou selecione o arquivo `.zip` ou `.tar.gz` do seu computador.
+   - Na aba **Instalação Direta**, arraste ou selecione o arquivo `.zip` ou `.tar.gz` do seu computador.
    - Revise o manifesto e confirme a instalação com um clique.
+
+4. **Instalação a partir de Pasta Descompactada (Diretório no Host)**:
+   - Na aba **Instalação Direta**, aponte para o caminho da pasta contendo o `plugin.json` no sistema de arquivos do servidor (ex: `/opt/meu-plugin` ou `./examples/plugins/azure-keyvault`).
+   - O Kraken inspeciona os metadados, detecta fontes Go/WASM e Dockerfile, compila sob demanda e instala o plugin sem necessidade de compactação prévia.
+   - Também disponível via API REST: `POST /api/plugins/inspect-directory` e `POST /api/plugins/install-directory`.

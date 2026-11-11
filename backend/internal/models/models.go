@@ -19,6 +19,23 @@ type User struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+// UserDashboardPreference persists custom dashboard layouts per user
+type UserDashboardPreference struct {
+	UserID     uint      `gorm:"primaryKey" json:"user_id"`
+	LayoutJSON string    `gorm:"type:text" json:"layout_json"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// UserPluginState tracks per-user enablement status and errors for installed plugins
+type UserPluginState struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	UserID    uint      `gorm:"not null;uniqueIndex:idx_user_plugin" json:"user_id"`
+	PluginID  string    `gorm:"size:128;not null;uniqueIndex:idx_user_plugin" json:"plugin_id"`
+	Status    string    `gorm:"size:32;not null;default:'disabled'" json:"status"` // "enabled" | "disabled" | "error"
+	LastError string    `gorm:"type:text" json:"last_error,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // PasswordResetRequest represents a request submitted by a user to recover their password via an admin
 type PasswordResetRequest struct {
 	ID         uint       `gorm:"primaryKey" json:"id"`
@@ -64,14 +81,24 @@ type ChangePasswordRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
+type MicrosoftSessionAccount struct {
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	TenantID string `json:"tenant_id"`
+	Source   string `json:"source"` // "kraken_session"
+}
+
 type UserResponse struct {
-	ID         uint      `json:"id"`
-	Username   string    `json:"username"`
-	Email      string    `json:"email"`
-	Role       string    `json:"role"`
-	Status     string    `json:"status"`
-	OTPEnabled bool      `json:"otp_enabled"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID               uint                     `json:"id"`
+	Username         string                   `json:"username"`
+	Email            string                   `json:"email"`
+	Role             string                   `json:"role"`
+	Status           string                   `json:"status"`
+	OTPEnabled       bool                     `json:"otp_enabled"`
+	CreatedAt        time.Time                `json:"created_at"`
+	AuthProvider     string                   `json:"auth_provider,omitempty"`
+	MicrosoftAccount *MicrosoftSessionAccount `json:"microsoft_account,omitempty"`
 }
 
 type OTPSetupResponse struct {
@@ -122,6 +149,34 @@ type AuthResponse struct {
 	User  UserResponse `json:"user"`
 }
 
+type MicrosoftDeviceCodeRequest struct {
+	TenantID string `json:"tenant_id,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
+}
+
+type MicrosoftDeviceCodeResponse struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+	Message         string `json:"message"`
+}
+
+type MicrosoftPollRequest struct {
+	DeviceCode string `json:"device_code"`
+	TenantID   string `json:"tenant_id,omitempty"`
+	ClientID   string `json:"client_id,omitempty"`
+}
+
+type MicrosoftPollResponse struct {
+	Status   string        `json:"status"`
+	Token    string        `json:"token,omitempty"`
+	User     *UserResponse `json:"user,omitempty"`
+	Interval int           `json:"interval,omitempty"`
+	Error    string        `json:"error,omitempty"`
+}
+
 // DTOs for Docker
 type PortSummary struct {
 	IP          string `json:"ip,omitempty"`
@@ -161,6 +216,7 @@ type ImageSearchResult struct {
 
 type DockerServer struct {
 	ID                   uint      `gorm:"primaryKey" json:"id"`
+	UserID               uint      `gorm:"default:0;index" json:"user_id"`
 	Name                 string    `gorm:"size:128;not null" json:"name"`
 	HostURL              string    `gorm:"size:255;not null" json:"host_url"`
 	TLSVerify            bool      `gorm:"default:false" json:"tls_verify"`
@@ -173,6 +229,11 @@ type DockerServer struct {
 	SSHPrivateKey        string    `gorm:"type:text" json:"-"`
 	SSHKeyPassphrase     string    `gorm:"type:text" json:"-"`
 	CredentialPolicy     string    `gorm:"size:32;default:'save_securely'" json:"credential_policy"` // "save_securely" | "always_prompt"
+	CredentialSource     string    `gorm:"size:32;default:'local'" json:"credential_source"`         // "local" | "plugin" | "vault"
+	CredentialPluginID   string    `gorm:"size:128" json:"credential_plugin_id,omitempty"`
+	SecretReference      string    `gorm:"size:255" json:"secret_reference,omitempty"`
+	SecretVersion        string    `gorm:"size:128" json:"secret_version,omitempty"`
+	VaultConfig          string    `gorm:"type:text" json:"vault_config,omitempty"`
 	SudoPolicy           string    `gorm:"size:32;default:''" json:"sudo_policy"`                   // "save_securely" | "always_prompt" | ""
 	SudoPassword         string    `gorm:"type:text" json:"-"`
 	HasSavedSudoPassword bool      `gorm:"-" json:"has_saved_sudo_password"`
@@ -216,8 +277,13 @@ type CreateServerRequest struct {
 	SSHPassword      string `json:"ssh_password"`
 	SSHPrivateKey    string `json:"ssh_private_key"`
 	SSHKeyPassphrase string `json:"ssh_key_passphrase"`
-	CredentialPolicy string `json:"credential_policy,omitempty"` // "save_securely" | "always_prompt"
-	SudoPolicy       string `json:"sudo_policy,omitempty"`       // "save_securely" | "always_prompt"
+	CredentialPolicy   string `json:"credential_policy,omitempty"` // "save_securely" | "always_prompt"
+	CredentialSource   string `json:"credential_source,omitempty"`   // "local" | "plugin" | "vault"
+	CredentialPluginID string `json:"credential_plugin_id,omitempty"`
+	SecretReference    string `json:"secret_reference,omitempty"`
+	SecretVersion      string `json:"secret_version,omitempty"`
+	VaultConfig        string `json:"vault_config,omitempty"`
+	SudoPolicy         string `json:"sudo_policy,omitempty"`       // "save_securely" | "always_prompt"
 	SudoPassword     string `json:"sudo_password,omitempty"`
 	PackageManager   string `json:"package_manager,omitempty"`
 	IsDefault        bool   `json:"is_default"`
@@ -237,26 +303,36 @@ type UpdateServerRequest struct {
 	SSHPassword      string `json:"ssh_password"`
 	SSHPrivateKey    string `json:"ssh_private_key"`
 	SSHKeyPassphrase string `json:"ssh_key_passphrase"`
-	CredentialPolicy string `json:"credential_policy,omitempty"`
-	SudoPolicy       string `json:"sudo_policy,omitempty"`
-	SudoPassword     string `json:"sudo_password,omitempty"`
-	PackageManager   string `json:"package_manager,omitempty"`
-	IsDefault        bool   `json:"is_default"`
+	CredentialPolicy   string `json:"credential_policy,omitempty"`
+	CredentialSource   string `json:"credential_source,omitempty"`
+	CredentialPluginID string `json:"credential_plugin_id,omitempty"`
+	SecretReference    string `json:"secret_reference,omitempty"`
+	SecretVersion      string `json:"secret_version,omitempty"`
+	VaultConfig        string `json:"vault_config,omitempty"`
+	SudoPolicy         string `json:"sudo_policy,omitempty"`
+	SudoPassword       string `json:"sudo_password,omitempty"`
+	PackageManager     string `json:"package_manager,omitempty"`
+	IsDefault          bool   `json:"is_default"`
 }
 
 type TestServerRequest struct {
-	HostURL          string `json:"host_url"`
-	ServerHost       string `json:"server_host,omitempty"`
-	ServerPort       string `json:"server_port,omitempty"`
-	TLSVerify        bool   `json:"tls_verify"`
-	TLSCACert        string `json:"tls_ca_cert"`
-	TLSCert          string `json:"tls_cert"`
-	TLSKey           string `json:"tls_key"`
-	SSHUser          string `json:"ssh_user"`
-	SSHAuthMethod    string `json:"ssh_auth_method"`
-	SSHPassword      string `json:"ssh_password"`
-	SSHPrivateKey    string `json:"ssh_private_key"`
-	SSHKeyPassphrase string `json:"ssh_key_passphrase"`
+	HostURL            string `json:"host_url"`
+	ServerHost         string `json:"server_host,omitempty"`
+	ServerPort         string `json:"server_port,omitempty"`
+	TLSVerify          bool   `json:"tls_verify"`
+	TLSCACert          string `json:"tls_ca_cert"`
+	TLSCert            string `json:"tls_cert"`
+	TLSKey             string `json:"tls_key"`
+	SSHUser            string `json:"ssh_user"`
+	SSHAuthMethod      string `json:"ssh_auth_method"`
+	SSHPassword        string `json:"ssh_password"`
+	SSHPrivateKey      string `json:"ssh_private_key"`
+	SSHKeyPassphrase   string `json:"ssh_key_passphrase"`
+	CredentialSource   string `json:"credential_source,omitempty"`
+	CredentialPluginID string `json:"credential_plugin_id,omitempty"`
+	SecretReference    string `json:"secret_reference,omitempty"`
+	SecretVersion      string `json:"secret_version,omitempty"`
+	VaultConfig        string `json:"vault_config,omitempty"`
 }
 
 // Package Management DTOs
@@ -576,6 +652,7 @@ type InstalledPlugin struct {
 	InstallPath        string    `gorm:"type:text" json:"install_path"`
 	ContainerID        string    `gorm:"size:128" json:"container_id,omitempty"`
 	InstalledBy        string    `gorm:"size:64" json:"installed_by,omitempty"`
+	IconURL            string    `gorm:"-" json:"icon_url,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -583,9 +660,10 @@ type InstalledPlugin struct {
 // PluginKVStore provides isolated key-value storage for plugins
 type PluginKVStore struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
-	PluginID  string    `gorm:"size:128;index:idx_plugin_kv,unique;not null" json:"plugin_id"`
-	Key       string    `gorm:"size:255;index:idx_plugin_kv,unique;not null" json:"key"`
+	PluginID  string    `gorm:"size:128;index:idx_plugin_user_kv,unique;not null" json:"plugin_id"`
+	Key       string    `gorm:"size:255;index:idx_plugin_user_kv,unique;not null" json:"key"`
 	Value     string    `gorm:"type:text" json:"value"`
+	UserID    uint      `gorm:"default:0;index:idx_plugin_user_kv,unique;not null" json:"user_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -674,13 +752,19 @@ type PluginInspectResponse struct {
 	SizeBytes         int64          `json:"size_bytes"`
 	ReadmeMarkdown    string         `json:"readme_markdown,omitempty"`
 	IconSVG           string         `json:"icon_svg,omitempty"`
+	IconURL           string         `json:"icon_url,omitempty"`
 }
 
 type InstallPluginRequest struct {
 	URL                string   `json:"url,omitempty"`
+	Path               string   `json:"path,omitempty"`
 	ExpectedSHA256     string   `json:"expected_sha256,omitempty"`
 	GrantedPermissions []string `json:"granted_permissions,omitempty"`
 	EnableImmediately  bool     `json:"enable_immediately,omitempty"`
+}
+
+type InspectDirectoryRequest struct {
+	Path string `json:"path"`
 }
 
 type PluginCallRequest struct {

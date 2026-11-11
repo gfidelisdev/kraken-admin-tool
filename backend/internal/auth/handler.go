@@ -2,15 +2,20 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/kraken/admin-tool/backend/internal/audit"
+	"github.com/kraken/admin-tool/backend/internal/config"
 	krakencrypto "github.com/kraken/admin-tool/backend/internal/crypto"
 	"github.com/kraken/admin-tool/backend/internal/models"
 	"golang.org/x/crypto/bcrypt"
@@ -20,15 +25,36 @@ import (
 type Handler struct {
 	DB                *gorm.DB
 	JWTSecret         string
+	AdminRecoveryKey  string
 	AllowRegistration bool
+	MSBroker          *MicrosoftSessionBroker
+	MicrosoftClientID string
+	MicrosoftTenantID string
 }
 
 func NewHandler(db *gorm.DB, secret string, allowRegistration bool) *Handler {
 	return &Handler{
 		DB:                db,
 		JWTSecret:         secret,
+		AdminRecoveryKey:  strings.TrimSpace(os.Getenv("ADMIN_RECOVERY_KEY")),
 		AllowRegistration: allowRegistration,
+		MSBroker:          NewMicrosoftSessionBroker(),
+		MicrosoftClientID: DefaultMicrosoftClientID,
+		MicrosoftTenantID: DefaultMicrosoftTenantID,
 	}
+}
+
+func (h *Handler) SetMicrosoftConfig(clientID, tenantID string) {
+	if strings.TrimSpace(clientID) != "" {
+		h.MicrosoftClientID = strings.TrimSpace(clientID)
+	}
+	if strings.TrimSpace(tenantID) != "" {
+		h.MicrosoftTenantID = strings.TrimSpace(tenantID)
+	}
+}
+
+func (h *Handler) SetAdminRecoveryKey(key string) {
+	h.AdminRecoveryKey = strings.TrimSpace(key)
 }
 
 func generateRandomPassword(length int) (string, error) {
@@ -329,15 +355,411 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	authProvider := claims.AuthProvider
+	if authProvider == "" {
+		authProvider = "local"
+	}
+
+	var msAccount *models.MicrosoftSessionAccount
+	if h.MSBroker != nil && claims.ID != "" {
+		msAccount = h.MSBroker.GetAccountMetadata(claims.ID)
+	}
+
+	// If token claimed to be microsoft SSO but in-memory session was lost (e.g. backend restart), downgrade provider to local
+	if authProvider == "microsoft" && msAccount == nil {
+		authProvider = "local"
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.UserResponse{
-		ID:         user.ID,
-		Username:   user.Username,
-		Email:      user.Email,
-		Role:       user.Role,
-		Status:     user.Status,
-		OTPEnabled: user.OTPEnabled,
-		CreatedAt:  user.CreatedAt,
+		ID:               user.ID,
+		Username:         user.Username,
+		Email:            user.Email,
+		Role:             user.Role,
+		Status:           user.Status,
+		OTPEnabled:       user.OTPEnabled,
+		CreatedAt:        user.CreatedAt,
+		AuthProvider:     authProvider,
+		MicrosoftAccount: msAccount,
+	})
+}
+
+// StartMicrosoftDeviceLogin initiates the Microsoft OAuth2 Device Code login flow
+func (h *Handler) StartMicrosoftDeviceLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+		return
+	}
+
+	var req models.MicrosoftDeviceCodeRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	clientID := req.ClientID
+	if clientID == "" {
+		clientID = h.MicrosoftClientID
+	}
+	tenantID := req.TenantID
+	if tenantID == "" {
+		tenantID = h.MicrosoftTenantID
+	}
+
+	res, err := h.MSBroker.StartDeviceCodeFlow(r.Context(), tenantID, clientID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Failed to initiate Microsoft login: %v", err)})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+// PollMicrosoftDeviceLogin polls Microsoft token endpoint and completes authentication / provision
+func (h *Handler) PollMicrosoftDeviceLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+		return
+	}
+
+	var req models.MicrosoftPollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.DeviceCode) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "device_code is required"})
+		return
+	}
+
+	clientID := req.ClientID
+	if clientID == "" {
+		clientID = h.MicrosoftClientID
+	}
+	tenantID := req.TenantID
+	if tenantID == "" {
+		tenantID = h.MicrosoftTenantID
+	}
+
+	tokenPayload, status, interval, err := h.MSBroker.PollDeviceCodeToken(r.Context(), tenantID, clientID, req.DeviceCode)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "error",
+			Error:  err.Error(),
+		})
+		return
+	}
+
+	if status == "pending_authorization" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "pending_authorization",
+		})
+		return
+	}
+
+	if status == "slow_down" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status:   "slow_down",
+			Interval: interval,
+		})
+		return
+	}
+
+	// Token issued: Extract identity claims deterministically
+	_, email, name, extractedTenant, err := ExtractMicrosoftIdentity(tokenPayload, tenantID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "error",
+			Error:  fmt.Sprintf("Failed to extract Microsoft identity: %v", err),
+		})
+		return
+	}
+
+	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+
+	// Match or provision local account
+	var user models.User
+	queryErr := h.DB.Where("LOWER(email) = ?", normalizedEmail).First(&user).Error
+
+	if errors.Is(queryErr, gorm.ErrRecordNotFound) {
+		// Provision pending account
+		baseUsername := strings.Split(normalizedEmail, "@")[0]
+		candidateUsername := baseUsername
+		suffix := 1
+		for {
+			var existing models.User
+			if err := h.DB.Where("username = ?", candidateUsername).First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+				break
+			}
+			candidateUsername = fmt.Sprintf("%s%d", baseUsername, suffix)
+			suffix++
+		}
+
+		randPwd, _ := generateRandomPassword(32)
+		hashedBytes, _ := bcrypt.GenerateFromPassword([]byte(randPwd), bcrypt.DefaultCost)
+
+		newUser := models.User{
+			Username:     candidateUsername,
+			Email:        normalizedEmail,
+			PasswordHash: string(hashedBytes),
+			Role:         "pending",
+			Status:       "pending",
+		}
+		if err := h.DB.Create(&newUser).Error; err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+				Status: "error",
+				Error:  "Failed to provision user record",
+			})
+			return
+		}
+
+		audit.Log(h.DB, 0, candidateUsername, "LOGIN_MICROSOFT_PENDING", "auth", "New Microsoft account registered; awaiting admin approval", r.RemoteAddr, "PENDING")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "pending",
+			Error:  "Your Microsoft account has been registered and is pending administrator approval. Please contact an administrator to approve your account and assign your role before signing in.",
+		})
+		return
+	} else if queryErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "error",
+			Error:  "Database query error",
+		})
+		return
+	}
+
+	// Existing user checks
+	if user.Status == "pending" {
+		audit.Log(h.DB, user.ID, user.Username, "LOGIN_MICROSOFT_PENDING", "auth", "Microsoft login attempt while pending approval", r.RemoteAddr, "PENDING")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "pending",
+			Error:  "Your account is pending administrator approval.",
+		})
+		return
+	}
+
+	if user.Status == "rejected" {
+		audit.Log(h.DB, user.ID, user.Username, "LOGIN_MICROSOFT_REJECTED", "auth", "Microsoft login attempt by rejected user", r.RemoteAddr, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "rejected",
+			Error:  "Your account has been rejected. Please contact an administrator.",
+		})
+		return
+	}
+
+	if user.Status != "active" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "inactive",
+			Error:  "Account is inactive.",
+		})
+		return
+	}
+
+	// Active user: create in-memory broker session
+	sessionID := h.MSBroker.CreateSession(
+		user.ID,
+		normalizedEmail,
+		name,
+		extractedTenant,
+		clientID,
+		tokenPayload.RefreshToken,
+		"https://vault.azure.net/.default",
+		tokenPayload.AccessToken,
+		tokenPayload.ExpiresIn,
+		24*time.Hour,
+	)
+
+	jwtToken, err := GenerateTokenWithSession(&user, h.JWTSecret, 24*time.Hour, "microsoft", sessionID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+			Status: "error",
+			Error:  "Failed to generate JWT",
+		})
+		return
+	}
+
+	audit.Log(h.DB, user.ID, user.Username, "LOGIN_MICROSOFT", "auth", "Microsoft device code login successful", r.RemoteAddr, "SUCCESS")
+
+	// Clear user_disconnected flag in Azure Key Vault plugin KV store when logging in with Microsoft SSO
+	if h.DB != nil && user.ID > 0 {
+		var kvs []models.PluginKVStore
+		if err := h.DB.Where("plugin_id = ? AND user_id = ? AND key IN ?", "com.kraken.azure-keyvault", user.ID, []string{"azure_kv_config", "com.kraken.azure-keyvault:azure_kv_config"}).Find(&kvs).Error; err == nil {
+			for _, kv := range kvs {
+				var cfgMap map[string]interface{}
+				if json.Unmarshal([]byte(kv.Value), &cfgMap) == nil && cfgMap != nil {
+					cfgMap["user_disconnected"] = false
+					if updatedBytes, err := json.Marshal(cfgMap); err == nil {
+						h.DB.Model(&kv).Updates(map[string]interface{}{
+							"value":      string(updatedBytes),
+							"updated_at": time.Now(),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	userResp := models.UserResponse{
+		ID:               user.ID,
+		Username:         user.Username,
+		Email:            user.Email,
+		Role:             user.Role,
+		Status:           user.Status,
+		OTPEnabled:       user.OTPEnabled,
+		CreatedAt:        user.CreatedAt,
+		AuthProvider:     "microsoft",
+		MicrosoftAccount: h.MSBroker.GetAccountMetadata(sessionID),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(models.MicrosoftPollResponse{
+		Status: "authenticated",
+		Token:  jwtToken,
+		User:   &userResp,
+	})
+}
+
+// Logout invalidates session, clears in-memory Microsoft broker state, and wipes per-user Microsoft tokens in plugin KV storage
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	claims := GetUserFromContext(r.Context())
+	if claims != nil {
+		if h.MSBroker != nil {
+			if claims.ID != "" {
+				h.MSBroker.DeleteSession(claims.ID)
+			}
+			if claims.UserID > 0 {
+				h.MSBroker.DeleteUserSessions(claims.UserID)
+			}
+		}
+		if h.DB != nil && claims.UserID > 0 {
+			// Purge any legacy user_id = 0 entries
+			h.DB.Where("plugin_id = ? AND user_id = 0", "com.kraken.azure-keyvault").Delete(&models.PluginKVStore{})
+
+			// Strip active Microsoft accounts and tokens from user's Azure KV config on system logout
+			var kvs []models.PluginKVStore
+			if err := h.DB.Where("plugin_id = ? AND user_id = ? AND key IN ?", "com.kraken.azure-keyvault", claims.UserID, []string{"azure_kv_config", "com.kraken.azure-keyvault:azure_kv_config"}).Find(&kvs).Error; err == nil {
+				for _, kv := range kvs {
+					var cfgMap map[string]interface{}
+					if json.Unmarshal([]byte(kv.Value), &cfgMap) == nil && cfgMap != nil {
+						cfgMap["accounts"] = []interface{}{}
+						cfgMap["active_account_id"] = ""
+						cfgMap["user_disconnected"] = true
+						if updatedBytes, err := json.Marshal(cfgMap); err == nil {
+							h.DB.Model(&kv).Updates(map[string]interface{}{
+								"value":      string(updatedBytes),
+								"updated_at": time.Now(),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// GetDashboardLayout retrieves the custom dashboard layout for the authenticated user
+func (h *Handler) GetDashboardLayout(w http.ResponseWriter, r *http.Request) {
+	claims := GetUserFromContext(r.Context())
+	if claims == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	var pref models.UserDashboardPreference
+	err := h.DB.Where("user_id = ?", claims.UserID).First(&pref).Error
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"user_id":     claims.UserID,
+			"layout_json": "",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"user_id":     pref.UserID,
+		"layout_json": pref.LayoutJSON,
+		"updated_at":  pref.UpdatedAt,
+	})
+}
+
+// SaveDashboardLayout updates or creates the custom dashboard layout for the authenticated user
+func (h *Handler) SaveDashboardLayout(w http.ResponseWriter, r *http.Request) {
+	claims := GetUserFromContext(r.Context())
+	if claims == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	var req struct {
+		LayoutJSON string `json:"layout_json"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid payload"})
+		return
+	}
+
+	var pref models.UserDashboardPreference
+	err := h.DB.Where("user_id = ?", claims.UserID).First(&pref).Error
+	if err != nil {
+		pref = models.UserDashboardPreference{
+			UserID:     claims.UserID,
+			LayoutJSON: req.LayoutJSON,
+			UpdatedAt:  time.Now(),
+		}
+		if err := h.DB.Create(&pref).Error; err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save dashboard layout"})
+			return
+		}
+	} else {
+		pref.LayoutJSON = req.LayoutJSON
+		pref.UpdatedAt = time.Now()
+		if err := h.DB.Save(&pref).Error; err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update dashboard layout"})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "ok",
+		"layout_json": pref.LayoutJSON,
 	})
 }
 
@@ -1003,10 +1425,25 @@ func (h *Handler) RejectPasswordRecoveryRequest(w http.ResponseWriter, r *http.R
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Password recovery request rejected"})
 }
 
-// MasterAdminRecovery allows recovering an admin password using the server master key (JWTSecret)
+// MasterAdminRecovery allows recovering an admin password using a dedicated ADMIN_RECOVERY_KEY
+// configured via .env. Disabled by default when ADMIN_RECOVERY_KEY is unset or insecure.
 func (h *Handler) MasterAdminRecovery(w http.ResponseWriter, r *http.Request) {
+	expectedKey := strings.TrimSpace(h.AdminRecoveryKey)
+	if expectedKey == "" {
+		expectedKey = strings.TrimSpace(os.Getenv("ADMIN_RECOVERY_KEY"))
+	}
+	if config.IsInsecureSecret(expectedKey) || expectedKey == h.JWTSecret {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "HTTP master admin recovery is disabled. Set a strong, dedicated ADMIN_RECOVERY_KEY (at least 32 characters) in .env or use the server CLI --reset-admin-password flag.",
+		})
+		return
+	}
+
 	providedKey := strings.TrimSpace(r.Header.Get("X-Master-Key"))
-	if providedKey == "" || (providedKey != h.JWTSecret && providedKey != "kraken-admin-master-recovery") {
+	if providedKey == "" || subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
+		audit.Log(h.DB, 0, "anonymous", "MASTER_RECOVERY", "auth", r.RemoteAddr, "Invalid X-Master-Key attempt on admin-recovery", "FAILED")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing master recovery key in X-Master-Key header"})
@@ -1288,27 +1725,20 @@ func (h *Handler) RecoverPasswordViaOTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	const uniformOTPRecoveryError = "Invalid account credentials or 6-digit authenticator code. Please check your app or request administrator assistance."
+
 	var user models.User
 	if err := h.DB.Where("username = ? OR email = ?", identifier, strings.ToLower(identifier)).First(&user).Error; err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Account not found or inactive"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": uniformOTPRecoveryError})
 		return
 	}
 
-	if user.Status != "active" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Account is not active. Please contact an administrator."})
-		return
-	}
-
-	if !user.OTPEnabled || user.OTPSecret == "" {
+	if user.Status != "active" || !user.OTPEnabled || user.OTPSecret == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "Authenticator OTP is not configured for this account. Please submit a request to an administrator instead.",
-		})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": uniformOTPRecoveryError})
 		return
 	}
 
@@ -1320,10 +1750,11 @@ func (h *Handler) RecoverPasswordViaOTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if !ValidateTOTPCode(decryptedSecret, code) {
+	if !ConsumeTOTPCodeForAction("recover_password", decryptedSecret, code) {
+		audit.Log(h.DB, user.ID, user.Username, "RECOVER_PASSWORD_OTP", "auth", user.Username, "Invalid or replayed OTP recovery attempt", "FAILED")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid 6-digit authenticator code. Please check your app and try again."})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": uniformOTPRecoveryError})
 		return
 	}
 

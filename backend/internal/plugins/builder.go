@@ -348,7 +348,7 @@ func BuildContainerPluginImage(ctx context.Context, dockerService *docker.Docker
 	// Strategy A: Direct Docker Engine API via dockerService
 	var apiErr error
 	if dockerService != nil {
-		cli, err := dockerService.GetClient(buildCtx, 0)
+		cli, err := dockerService.GetSystemClient()
 		if err == nil && cli != nil {
 			tarBuf, tarErr := tarDirectoryToBuffer(contextDir)
 			if tarErr == nil {

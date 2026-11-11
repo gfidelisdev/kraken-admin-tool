@@ -373,9 +373,9 @@ func BuildUpgradeCommand(pkgManager string, packages []string) (string, error) {
 	switch pkgManager {
 	case "apt":
 		if len(packages) > 0 {
-			return fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade -- %s", pkgList), nil
+			return fmt.Sprintf("env DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade -- %s", pkgList), nil
 		}
-		return "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y", nil
+		return "env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y", nil
 	case "dnf":
 		if len(packages) > 0 {
 			return fmt.Sprintf("dnf upgrade -y -- %s", pkgList), nil

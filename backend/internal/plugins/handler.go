@@ -32,13 +32,19 @@ func NewHandler(mgr *Manager) *Handler {
 
 // ListPluginsHandler returns installed plugins and active UI extensions
 func (h *Handler) ListPluginsHandler(w http.ResponseWriter, r *http.Request) {
-	plugins, err := h.mgr.ListPlugins()
+	claims := auth.GetUserFromContext(r.Context())
+	var userID uint = 0
+	if claims != nil {
+		userID = claims.UserID
+	}
+
+	plugins, err := h.mgr.ListPluginsForUser(userID)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	uiExt, _ := h.mgr.GetActiveUIExtensions()
+	uiExt, _ := h.mgr.GetActiveUIExtensions(userID)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"plugins":       plugins,
@@ -107,6 +113,23 @@ func (h *Handler) InspectURLHandler(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, insp)
 }
 
+// InspectDirectoryHandler inspects an uncompressed plugin directory on disk
+func (h *Handler) InspectDirectoryHandler(w http.ResponseWriter, r *http.Request) {
+	var req models.InspectDirectoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Path) == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Valid 'path' is required"})
+		return
+	}
+
+	insp, err := h.mgr.InspectDirectory(strings.TrimSpace(req.Path))
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, insp)
+}
+
 // InstallUploadHandler extracts, verifies and installs a plugin from an uploaded file
 func (h *Handler) InstallUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(MaxArchiveSizeBytes); err != nil {
@@ -156,8 +179,31 @@ func (h *Handler) InstallUploadHandler(w http.ResponseWriter, r *http.Request) {
 // InstallURLHandler downloads and installs a plugin from a direct URL
 func (h *Handler) InstallURLHandler(w http.ResponseWriter, r *http.Request) {
 	var req models.InstallPluginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.URL) == "" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Valid 'url' is required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+		return
+	}
+
+	claims := auth.GetUserFromContext(r.Context())
+	username := "system"
+	userID := uint(0)
+	if claims != nil {
+		username = claims.Username
+		userID = claims.UserID
+	}
+
+	if strings.TrimSpace(req.Path) != "" {
+		p, err := h.mgr.InstallFromDirectory(r.Context(), strings.TrimSpace(req.Path), req.ExpectedSHA256, req.GrantedPermissions, req.EnableImmediately, username, userID)
+		if err != nil {
+			respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		respondJSON(w, http.StatusCreated, p)
+		return
+	}
+
+	if strings.TrimSpace(req.URL) == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Valid 'url' or 'path' is required"})
 		return
 	}
 
@@ -169,6 +215,24 @@ func (h *Handler) InstallURLHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filename := ExtractFilenameFromURL(cleanURL)
+
+	p, err := h.mgr.InstallFromArchive(r.Context(), filename, data, req.ExpectedSHA256, req.GrantedPermissions, req.EnableImmediately, username, cleanURL, userID)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	respondJSON(w, http.StatusCreated, p)
+}
+
+// InstallDirectoryHandler installs a plugin from an uncompressed directory on disk
+func (h *Handler) InstallDirectoryHandler(w http.ResponseWriter, r *http.Request) {
+	var req models.InstallPluginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Path) == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Valid 'path' is required"})
+		return
+	}
+
 	claims := auth.GetUserFromContext(r.Context())
 	username := "system"
 	userID := uint(0)
@@ -177,7 +241,7 @@ func (h *Handler) InstallURLHandler(w http.ResponseWriter, r *http.Request) {
 		userID = claims.UserID
 	}
 
-	p, err := h.mgr.InstallFromArchive(r.Context(), filename, data, req.ExpectedSHA256, req.GrantedPermissions, req.EnableImmediately, username, cleanURL, userID)
+	p, err := h.mgr.InstallFromDirectory(r.Context(), strings.TrimSpace(req.Path), req.ExpectedSHA256, req.GrantedPermissions, req.EnableImmediately, username, userID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -311,14 +375,29 @@ func (h *Handler) CallPluginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := auth.GetUserFromContext(r.Context())
-	username := "guest"
-	userRole := "viewer"
-	if claims != nil {
-		username = claims.Username
-		userRole = claims.Role
+	if claims == nil {
+		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
+		return
+	}
+	if claims.Role != "admin" && claims.Role != "operator" {
+		respondJSON(w, http.StatusForbidden, map[string]string{"error": "Forbidden: insufficient permissions"})
+		return
 	}
 
-	res, err := h.mgr.CallPlugin(r.Context(), pluginID, strings.TrimSpace(req.Action), req.Payload, username, userRole)
+	actionClean := strings.TrimSpace(req.Action)
+	// Internal secret resolution should NOT be directly callable via external CallPluginHandler HTTP endpoint
+	if actionClean == models.PluginActionVaultResolveSecret || actionClean == "credentials.resolve" {
+		if claims.Role != "admin" {
+			respondJSON(w, http.StatusForbidden, map[string]string{"error": "Forbidden: direct secret resolution requires admin role"})
+			return
+		}
+	}
+
+	username := claims.Username
+	userRole := claims.Role
+	userID := claims.UserID
+
+	res, err := h.mgr.CallPlugin(r.Context(), pluginID, actionClean, req.Payload, username, userRole, userID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, models.PluginCallResponse{
 			Success: false,
@@ -479,6 +558,109 @@ func (h *Handler) DeleteTrustedKeyHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"message": "Trusted key deleted"})
+}
+
+// ListVaultSecretsHandler queries available secrets from the specified Key Vault plugin
+func (h *Handler) ListVaultSecretsHandler(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetUserFromContext(r.Context())
+	if claims == nil {
+		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
+		return
+	}
+	if claims.Role != "admin" && claims.Role != "operator" {
+		respondJSON(w, http.StatusForbidden, map[string]string{"error": "Forbidden: insufficient permissions"})
+		return
+	}
+
+	pluginID := chi.URLParam(r, "id")
+	if strings.TrimSpace(pluginID) == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Plugin ID is required"})
+		return
+	}
+
+	var req models.ListVaultSecretsRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	req.CredentialPluginID = pluginID
+
+	resp, err := h.mgr.ListSecrets(r.Context(), req)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// PutVaultSecretHandler creates or updates a secret in the Key Vault via plugin
+func (h *Handler) PutVaultSecretHandler(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetUserFromContext(r.Context())
+	if claims == nil {
+		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
+		return
+	}
+	if claims.Role != "admin" && claims.Role != "operator" {
+		respondJSON(w, http.StatusForbidden, map[string]string{"error": "Forbidden: insufficient permissions"})
+		return
+	}
+
+	pluginID := chi.URLParam(r, "id")
+	if strings.TrimSpace(pluginID) == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Plugin ID is required"})
+		return
+	}
+
+	var req models.PutVaultSecretRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+	req.CredentialPluginID = pluginID
+
+	item, err := h.mgr.PutSecret(r.Context(), req)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	respondJSON(w, http.StatusCreated, item)
+}
+
+// TestVaultConnectionHandler tests authentication and connectivity to the Key Vault
+func (h *Handler) TestVaultConnectionHandler(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetUserFromContext(r.Context())
+	if claims == nil {
+		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
+		return
+	}
+	if claims.Role != "admin" && claims.Role != "operator" {
+		respondJSON(w, http.StatusForbidden, map[string]string{"error": "Forbidden: insufficient permissions"})
+		return
+	}
+
+	pluginID := chi.URLParam(r, "id")
+	if strings.TrimSpace(pluginID) == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Plugin ID is required"})
+		return
+	}
+
+	var req models.TestVaultConnectionRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	req.CredentialPluginID = pluginID
+
+	resp, err := h.mgr.TestVaultConnection(r.Context(), req)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func respondJSON(w http.ResponseWriter, statusCode int, data interface{}) {

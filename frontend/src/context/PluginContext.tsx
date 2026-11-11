@@ -42,7 +42,7 @@ const PluginContext = createContext<PluginContextType>({
 });
 
 export function PluginProvider({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
   const [uiExtensions, setUiExtensions] = useState<PluginUIExtensions>({});
   const [isLoading, setIsLoading] = useState(false);
@@ -59,7 +59,7 @@ export function PluginProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, user?.id]);
 
   useEffect(() => {
     refreshPlugins();

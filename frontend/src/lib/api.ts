@@ -35,10 +35,16 @@ import {
   PluginCatalogSource,
   PluginTrustedKey,
   PluginCallResponse,
+  ListVaultSecretsRequest,
+  ListVaultSecretsResponse,
+  PutVaultSecretRequest,
+  VaultSecretItem,
+  TestVaultConnectionRequest,
+  TestVaultConnectionResponse,
 } from "@/types";
 
-const TOKEN_KEY = "kraken_auth_token";
-const ACTIVE_SERVER_KEY = "kraken_active_server_id";
+const TOKEN_KEY = process.env.NEXT_PUBLIC_AUTH_TOKEN_STORAGE_KEY || "kraken_auth_token";
+const ACTIVE_SERVER_KEY = process.env.NEXT_PUBLIC_ACTIVE_SERVER_STORAGE_KEY || "kraken_active_server_id";
 
 export class ApiError extends Error {
   status: number;
@@ -917,6 +923,10 @@ export async function inspectPluginURL(url: string): Promise<PluginInspectRespon
   return api.post<PluginInspectResponse>("/api/plugins/inspect-url", { url });
 }
 
+export async function inspectPluginDirectory(path: string): Promise<PluginInspectResponse> {
+  return api.post<PluginInspectResponse>("/api/plugins/inspect-directory", { path });
+}
+
 export async function installPluginUpload(
   file: File,
   expectedSHA256?: string,
@@ -980,6 +990,20 @@ export async function installPluginURL(
 ): Promise<InstalledPlugin> {
   return api.post<InstalledPlugin>("/api/plugins/install-url", {
     url,
+    expected_sha256: expectedSHA256,
+    granted_permissions: grantedPermissions,
+    enable_immediately: enableImmediately,
+  });
+}
+
+export async function installPluginDirectory(
+  path: string,
+  expectedSHA256?: string,
+  grantedPermissions?: string[],
+  enableImmediately?: boolean
+): Promise<InstalledPlugin> {
+  return api.post<InstalledPlugin>("/api/plugins/install-directory", {
+    path,
     expected_sha256: expectedSHA256,
     granted_permissions: grantedPermissions,
     enable_immediately: enableImmediately,
@@ -1118,4 +1142,44 @@ export async function streamServersStatus(
       }
     }
   }
+}
+
+// Key Vault Plugin operations
+export async function listPluginVaultSecrets(
+  pluginId: string,
+  payload?: ListVaultSecretsRequest
+): Promise<ListVaultSecretsResponse> {
+  return api.post<ListVaultSecretsResponse>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/vault/secrets/list`,
+    payload || {}
+  );
+}
+
+export async function putPluginVaultSecret(
+  pluginId: string,
+  payload: PutVaultSecretRequest
+): Promise<VaultSecretItem> {
+  return api.post<VaultSecretItem>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/vault/secrets`,
+    payload
+  );
+}
+
+export async function testPluginVaultConnection(
+  pluginId: string,
+  payload?: TestVaultConnectionRequest
+): Promise<TestVaultConnectionResponse> {
+  return api.post<TestVaultConnectionResponse>(
+    `/api/plugins/${encodeURIComponent(pluginId)}/vault/test`,
+    payload || {}
+  );
+}
+
+// User Dashboard Persistence
+export async function getDashboardLayout(): Promise<{ user_id: number; layout_json?: string }> {
+  return api.get<{ user_id: number; layout_json?: string }>("/api/users/me/dashboard");
+}
+
+export async function saveDashboardLayout(layoutJson: string): Promise<{ status: string; layout_json: string }> {
+  return api.put<{ status: string; layout_json: string }>("/api/users/me/dashboard", { layout_json: layoutJson });
 }

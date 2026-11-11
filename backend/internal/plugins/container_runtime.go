@@ -41,7 +41,7 @@ func (m *ContainerRuntimeManager) getClient(ctx context.Context) (*dockerclient.
 	if m.dockerService == nil {
 		return nil, errors.New("docker service unavailable")
 	}
-	cli, err := m.dockerService.GetClient(ctx, 0)
+	cli, err := m.dockerService.GetSystemClient()
 	if err != nil || cli == nil {
 		return nil, errors.New("docker client unavailable on default host")
 	}

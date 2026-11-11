@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
@@ -286,7 +287,15 @@ func (h *Handler) GetSourceContentHandler(w http.ResponseWriter, r *http.Request
 
 	content, err := h.Service.GetSourceFileContent(r.Context(), serverID, filePath)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "access denied") || strings.Contains(err.Error(), "disallowed") {
+			status = http.StatusForbidden
+		} else if strings.Contains(err.Error(), "must be a valid") {
+			status = http.StatusBadRequest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 

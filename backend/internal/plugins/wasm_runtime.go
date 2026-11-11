@@ -3,6 +3,7 @@ package plugins
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -21,10 +22,13 @@ import (
 
 // WasmHostBridge provides the services and permission checks available to a WASM plugin instance
 type WasmHostBridge struct {
-	PluginID     string
-	Permissions  map[string]bool
-	DB           *gorm.DB
-	ServiceProxy func(ctx context.Context, action string, params json.RawMessage) (interface{}, error)
+	PluginID          string
+	UserID            uint
+	Permissions       map[string]bool
+	DB                *gorm.DB
+	ServiceProxy      func(ctx context.Context, action string, params json.RawMessage) (interface{}, error)
+	OnKVSet           func(key, val string)
+	GetMicrosoftToken func(ctx context.Context, scope string) (string, *models.MicrosoftSessionAccount, error)
 }
 
 // WasmRuntimeManager compiles and executes wasm binaries securely
@@ -40,9 +44,133 @@ type wasmCompiledEntry struct {
 	size    int64
 }
 
+type wasmBridgeContextKey struct{}
+
+func getBridgeFromContext(ctx context.Context) *WasmHostBridge {
+	if b, ok := ctx.Value(wasmBridgeContextKey{}).(*WasmHostBridge); ok {
+		return b
+	}
+	return nil
+}
+
 func NewWasmRuntimeManager(ctx context.Context) *WasmRuntimeManager {
 	r := wazero.NewRuntime(ctx)
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
+
+	_, _ = r.NewHostModuleBuilder("kraken").
+		NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, mod api.Module, ptr, size uint32) {
+			bridge := getBridgeFromContext(ctx)
+			if bridge == nil {
+				return
+			}
+			msgBytes, ok := mod.Memory().Read(ptr, size)
+			if ok {
+				log.Printf("[PLUGIN:%s] %s", bridge.PluginID, string(msgBytes))
+			}
+		}).
+		Export("kraken_log").
+		NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, mod api.Module, keyPtr, keyLen, outPtr, maxOutLen uint32) uint32 {
+			bridge := getBridgeFromContext(ctx)
+			if bridge == nil || !bridge.Permissions["storage:kv"] || bridge.DB == nil {
+				return 0
+			}
+			keyBytes, ok := mod.Memory().Read(keyPtr, keyLen)
+			if !ok {
+				return 0
+			}
+			var kv models.PluginKVStore
+			q := bridge.DB.Where("plugin_id = ? AND key = ? AND user_id = ?", bridge.PluginID, string(keyBytes), bridge.UserID)
+			if err := q.First(&kv).Error; err != nil {
+				return 0
+			}
+			valBytes := []byte(kv.Value)
+			if uint32(len(valBytes)) > maxOutLen {
+				valBytes = valBytes[:maxOutLen]
+			}
+			mod.Memory().Write(outPtr, valBytes)
+			return uint32(len(valBytes))
+		}).
+		Export("kraken_kv_get").
+		NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, mod api.Module, keyPtr, keyLen, valPtr, valLen uint32) uint32 {
+			bridge := getBridgeFromContext(ctx)
+			if bridge == nil || !bridge.Permissions["storage:kv"] || bridge.DB == nil {
+				return 1 // error: permission denied
+			}
+			kBytes, ok1 := mod.Memory().Read(keyPtr, keyLen)
+			vBytes, ok2 := mod.Memory().Read(valPtr, valLen)
+			if !ok1 || !ok2 {
+				return 2 // memory read error
+			}
+			key := string(kBytes)
+			val := string(vBytes)
+
+			var kv models.PluginKVStore
+			q := bridge.DB.Where("plugin_id = ? AND key = ?", bridge.PluginID, key)
+			if bridge.UserID > 0 {
+				q = q.Where("user_id = ?", bridge.UserID)
+			} else {
+				q = q.Where("user_id = 0")
+			}
+			err := q.First(&kv).Error
+			if err != nil {
+				kv = models.PluginKVStore{
+					PluginID:  bridge.PluginID,
+					Key:       key,
+					Value:     val,
+					UserID:    bridge.UserID,
+					UpdatedAt: time.Now(),
+				}
+				bridge.DB.Create(&kv)
+			} else {
+				bridge.DB.Model(&kv).Updates(map[string]interface{}{
+					"value":      val,
+					"updated_at": time.Now(),
+				})
+			}
+			if bridge.OnKVSet != nil {
+				bridge.OnKVSet(key, val)
+			}
+			return 0 // success
+		}).
+		Export("kraken_kv_set").
+		NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, mod api.Module, scopePtr, scopeLen, outPtr, maxOutLen uint32) uint32 {
+			bridge := getBridgeFromContext(ctx)
+			if bridge == nil || bridge.GetMicrosoftToken == nil {
+				return 0
+			}
+			if !bridge.Permissions["credentials:resolve"] && !bridge.Permissions["credentials:manage"] {
+				return 0
+			}
+			sBytes, ok := mod.Memory().Read(scopePtr, scopeLen)
+			if !ok {
+				return 0
+			}
+			scope := string(sBytes)
+
+			token, account, err := bridge.GetMicrosoftToken(ctx, scope)
+			if err != nil || token == "" {
+				return 0
+			}
+
+			respData, err := json.Marshal(map[string]interface{}{
+				"access_token": token,
+				"account":      account,
+			})
+			if err != nil || uint32(len(respData)) > maxOutLen {
+				return 0
+			}
+
+			if !mod.Memory().Write(outPtr, respData) {
+				return 0
+			}
+			return uint32(len(respData))
+		}).
+		Export("kraken_auth_get_token").
+		Instantiate(ctx)
 
 	return &WasmRuntimeManager{
 		compiledMod: make(map[string]wasmCompiledEntry),
@@ -74,7 +202,7 @@ func (m *WasmRuntimeManager) Execute(
 		return nil, fmt.Errorf("failed to read wasm binary: %w", err)
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	execCtx, cancel := context.WithTimeout(context.WithValue(ctx, wasmBridgeContextKey{}, bridge), 15*time.Second)
 	defer cancel()
 
 	// Compile or get cached module (auto-recompiles if file on disk was modified)
@@ -114,73 +242,11 @@ func (m *WasmRuntimeManager) Execute(
 	var stdoutBuf bytes.Buffer
 	var stderrBuf bytes.Buffer
 
-	// Build Host Functions module if not yet created
-	_, _ = m.runtime.NewHostModuleBuilder("kraken").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, ptr, size uint32) {
-			msgBytes, ok := mod.Memory().Read(ptr, size)
-			if ok {
-				log.Printf("[PLUGIN:%s] %s", bridge.PluginID, string(msgBytes))
-			}
-		}).
-		Export("kraken_log").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, keyPtr, keyLen, outPtr, maxOutLen uint32) uint32 {
-			if !bridge.Permissions["storage:kv"] || bridge.DB == nil {
-				return 0
-			}
-			keyBytes, ok := mod.Memory().Read(keyPtr, keyLen)
-			if !ok {
-				return 0
-			}
-			var kv models.PluginKVStore
-			if err := bridge.DB.Where("plugin_id = ? AND key = ?", bridge.PluginID, string(keyBytes)).First(&kv).Error; err != nil {
-				return 0
-			}
-			valBytes := []byte(kv.Value)
-			if uint32(len(valBytes)) > maxOutLen {
-				valBytes = valBytes[:maxOutLen]
-			}
-			mod.Memory().Write(outPtr, valBytes)
-			return uint32(len(valBytes))
-		}).
-		Export("kraken_kv_get").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, mod api.Module, keyPtr, keyLen, valPtr, valLen uint32) uint32 {
-			if !bridge.Permissions["storage:kv"] || bridge.DB == nil {
-				return 1 // error: permission denied
-			}
-			kBytes, ok1 := mod.Memory().Read(keyPtr, keyLen)
-			vBytes, ok2 := mod.Memory().Read(valPtr, valLen)
-			if !ok1 || !ok2 {
-				return 2 // memory read error
-			}
-			key := string(kBytes)
-			val := string(vBytes)
-
-			var kv models.PluginKVStore
-			err := bridge.DB.Where("plugin_id = ? AND key = ?", bridge.PluginID, key).First(&kv).Error
-			if err != nil {
-				kv = models.PluginKVStore{
-					PluginID:  bridge.PluginID,
-					Key:       key,
-					Value:     val,
-					UpdatedAt: time.Now(),
-				}
-				bridge.DB.Create(&kv)
-			} else {
-				bridge.DB.Model(&kv).Updates(map[string]interface{}{
-					"value":      val,
-					"updated_at": time.Now(),
-				})
-			}
-			return 0 // success
-		}).
-		Export("kraken_kv_set").
-		Instantiate(execCtx)
-
 	modConfig := wazero.NewModuleConfig().
 		WithName(fmt.Sprintf("%s-%d", bridge.PluginID, time.Now().UnixNano())).
+		WithSysWalltime().
+		WithSysNanotime().
+		WithRandSource(rand.Reader).
 		WithStdin(bytes.NewReader(reqData)).
 		WithStdout(&stdoutBuf).
 		WithStderr(&stderrBuf).

@@ -9,6 +9,8 @@ import (
 )
 
 func TestInitDBSQLiteFallbackAndSeed(t *testing.T) {
+	t.Setenv("INITIAL_ADMIN_PASSWORD", "test-initial-admin-password-123")
+
 	// Point to unreachable postgres port to ensure fallback works cleanly
 	cfg := &config.Config{
 		DBHost:     "127.0.0.1",

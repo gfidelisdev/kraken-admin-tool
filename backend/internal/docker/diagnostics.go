@@ -246,18 +246,21 @@ func runSSHDiagnostics(
 
 	pingReq, _ := http.NewRequestWithContext(ctx, "GET", "http://api.moby.localhost/_ping", nil)
 	pingResp, pingErr := httpClient.Do(pingReq)
-	if pingErr != nil {
-		errDesc := fmt.Sprintf("Não foi possível conectar ao daemon Docker via socket SSH: %v", pingErr)
-		emit("error", errDesc, fmt.Sprintf("Certifique-se de que o Docker está em execução (sudo systemctl status docker) e que o usuário '%s' pertence ao grupo 'docker': sudo usermod -aG docker %s", parsed.User, parsed.User), nil)
-		return &ServerDiagnosticResult{Status: "UNREACHABLE", Message: errDesc, Logs: logs}, pingErr
+	if pingErr != nil || (pingResp != nil && pingResp.StatusCode != http.StatusOK) {
+		if pingResp != nil {
+			_ = pingResp.Body.Close()
+		}
+		emit("info", "Daemon Docker não detectado no socket remoto. Host validado com sucesso como Servidor / Host SSH genérico.", "", nil)
+		return &ServerDiagnosticResult{
+			Status:     "CONNECTED",
+			Version:    "SSH Host",
+			APIVersion: "-",
+			OSArch:     "Linux/SSH",
+			Message:    "Host SSH conectado com sucesso (daemon Docker não ativo)",
+			Logs:       logs,
+		}, nil
 	}
 	_ = pingResp.Body.Close()
-
-	if pingResp.StatusCode != http.StatusOK {
-		errDesc := fmt.Sprintf("Docker daemon respondeu com status HTTP inesperado: %d", pingResp.StatusCode)
-		emit("error", errDesc, "", nil)
-		return &ServerDiagnosticResult{Status: "UNREACHABLE", Message: errDesc, Logs: logs}, errors.New(errDesc)
-	}
 
 	emit("success", "Socket do Docker respondeu com sucesso ao comando Ping!", "", nil)
 

@@ -27,7 +27,7 @@ const navigation = [
   { name: "Containers", href: "/containers", icon: Box, badge: "Docker" },
   { name: "Stacks", href: "/stacks", icon: Layers, badge: "Compose" },
   { name: "Images", href: "/images", icon: Disc, badge: "Docker" },
-  { name: "Docker Hosts", href: "/servers", icon: Server, badge: "Multi" },
+  { name: "Hosts", href: "/servers", icon: Server, badge: "Multi" },
   { name: "Pods", href: "/pods", icon: Cpu, badge: "K8s" },
   { name: "Deployments", href: "/deployments", icon: Activity, badge: "K8s" },
   { name: "Live Logs", href: "/logs", icon: FileText, pulse: true },
@@ -143,7 +143,15 @@ export function Sidebar({ className }: { className?: string }) {
                   )}
                 >
                   <div className="flex items-center space-x-3 truncate">
-                    <Puzzle className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+                    {item.plugin.icon_url ? (
+                      <img
+                        src={item.plugin.icon_url}
+                        alt=""
+                        className="h-4 w-4 object-contain shrink-0 rounded-sm"
+                      />
+                    ) : (
+                      <Puzzle className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+                    )}
                     <span className="truncate">{item.ext.title}</span>
                   </div>
                   {item.ext.badge && (

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kraken/admin-tool/backend/internal/models"
@@ -211,4 +212,39 @@ func TestInspectArchive_Ed25519Signature(t *testing.T) {
 	}
 
 	_ = zipWithSig
+}
+
+func TestInspectArchive_CustomIcons(t *testing.T) {
+	cases := []struct {
+		iconFile string
+		wantMime string
+		wantSVG  bool
+	}{
+		{"ico.svg", "data:image/svg+xml;base64,", true},
+		{"ico.png", "data:image/png;base64,", false},
+		{"ico.jpg", "data:image/jpeg;base64,", false},
+		{"ico.jpeg", "data:image/jpeg;base64,", false},
+		{"icon.svg", "data:image/svg+xml;base64,", true},
+		{"icon.png", "data:image/png;base64,", false},
+		{"icon.jpg", "data:image/jpeg;base64,", false},
+		{"icon.jpeg", "data:image/jpeg;base64,", false},
+	}
+
+	for _, tc := range cases {
+		files := map[string]string{
+			"plugin.json": `{"id": "com.icon.test", "name": "Icon Test", "version": "1.0.0"}`,
+			tc.iconFile:   "<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+		}
+		zipBytes := createTestZip(t, files)
+		insp, err := InspectArchive("plugin.zip", zipBytes, nil)
+		if err != nil {
+			t.Fatalf("[%s] unexpected error: %v", tc.iconFile, err)
+		}
+		if !strings.HasPrefix(insp.IconURL, tc.wantMime) {
+			t.Errorf("[%s] expected IconURL prefix %q, got %q", tc.iconFile, tc.wantMime, insp.IconURL)
+		}
+		if tc.wantSVG && insp.IconSVG == "" {
+			t.Errorf("[%s] expected IconSVG to be populated", tc.iconFile)
+		}
+	}
 }

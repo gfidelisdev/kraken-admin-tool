@@ -112,8 +112,16 @@ func InitDB(cfg *config.Config) (*Handle, error) {
 		_ = gormDB.Migrator().RenameColumn(&models.SourceLink{}, "file_m_time", "file_mtime")
 	}
 
+	// Drop legacy 2-column unique index idx_plugin_kv (plugin_id, key) so GORM creates 3-column idx_plugin_user_kv (plugin_id, key, user_id)
+	if gormDB.Migrator().HasIndex(&models.PluginKVStore{}, "idx_plugin_kv") {
+		_ = gormDB.Migrator().DropIndex(&models.PluginKVStore{}, "idx_plugin_kv")
+	}
+	_ = gormDB.Exec("DROP INDEX IF EXISTS idx_plugin_kv").Error
+
 	if err := gormDB.AutoMigrate(
 		&models.User{},
+		&models.UserDashboardPreference{},
+		&models.UserPluginState{},
 		&models.AuditLog{},
 		&models.DockerServer{},
 		&models.HostPackageUpdate{},
@@ -129,6 +137,9 @@ func InitDB(cfg *config.Config) (*Handle, error) {
 	); err != nil {
 		return nil, err
 	}
+
+	// Security cleanup: purge any legacy global (user_id = 0) KV rows for Azure Key Vault so credentials are never shared across users
+	gormDB.Where("user_id = 0 AND plugin_id = ?", "com.kraken.azure-keyvault").Delete(&models.PluginKVStore{})
 
 	// Backfill any empty user status to 'active'
 	gormDB.Model(&models.User{}).Where("status = '' OR status IS NULL").Update("status", "active")
@@ -166,15 +177,10 @@ func seedAdmin(db *gorm.DB) {
 	var count int64
 	db.Model(&models.User{}).Where("username = ?", "admin").Count(&count)
 	if count == 0 {
-		initialPass := os.Getenv("INITIAL_ADMIN_PASSWORD")
+		initialPass := strings.TrimSpace(os.Getenv("INITIAL_ADMIN_PASSWORD"))
 		if initialPass == "" {
-			env := strings.ToLower(os.Getenv("ENVIRONMENT"))
-			if env == "production" {
-				log.Printf("[SECURITY] Production notice: No default admin account seeded. First user can register securely via setup wizard or configure INITIAL_ADMIN_PASSWORD.")
-				return
-			}
-			initialPass = "admin123"
-			log.Printf("[SECURITY] WARNING: Seeded default admin credentials in development environment (admin / admin123). Never use default credentials in production!")
+			log.Printf("[SECURITY] Notice: INITIAL_ADMIN_PASSWORD is not set in .env; no default admin account was seeded. Register the first admin via the setup screen or set INITIAL_ADMIN_PASSWORD in .env.")
+			return
 		}
 
 		hash, err := bcrypt.GenerateFromPassword([]byte(initialPass), bcrypt.DefaultCost)
@@ -235,25 +241,8 @@ func checkEnvAdminPasswordReset(db *gorm.DB) {
 }
 
 func seedDefaultServer(db *gorm.DB, defaultHost string) {
-	var count int64
-	db.Model(&models.DockerServer{}).Count(&count)
-	if count == 0 {
-		host := defaultHost
-		if host == "" {
-			host = "unix:///var/run/docker.sock"
-		}
-		server := models.DockerServer{
-			Name:      "Local Daemon",
-			HostURL:   host,
-			IsDefault: true,
-			Status:    "CONNECTED",
-		}
-		if err := db.Create(&server).Error; err != nil {
-			log.Printf("[DB] Error seeding default docker server: %v", err)
-		} else {
-			log.Printf("[DB] Successfully seeded default docker server (%s).", host)
-		}
-	}
+	// Hosts are not seeded globally or automatically without user ownership.
+	// Users must explicitly register hosts or be granted access.
 }
 
 // CheckHealth checks if the database is responding

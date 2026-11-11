@@ -31,19 +31,59 @@ func NewHandler(service *DockerService, db *gorm.DB) *Handler {
 	}
 }
 
-// getServerID extracts the target docker server from the X-Server-ID header or serverId query param
-func (h *Handler) getServerID(r *http.Request) uint {
+// getAuthorizedServerID verifies user access to the requested server.
+// If an explicit server ID is provided (via X-Server-ID header or serverId query param),
+// it ensures that the server exists and belongs to the authenticated user (user_id = claims.UserID).
+// If no server was explicitly requested (serverID == 0), it automatically picks the user's default/first server.
+// If the user does not own the requested server, or has no servers at all, it returns an error.
+func (h *Handler) getAuthorizedServerID(r *http.Request) (uint, error) {
+	var requestedID uint
 	if headerVal := r.Header.Get("X-Server-ID"); headerVal != "" {
 		if id, err := strconv.ParseUint(headerVal, 10, 32); err == nil {
-			return uint(id)
+			requestedID = uint(id)
 		}
 	}
-	if queryVal := r.URL.Query().Get("serverId"); queryVal != "" {
+	if queryVal := r.URL.Query().Get("serverId"); queryVal != "" && requestedID == 0 {
 		if id, err := strconv.ParseUint(queryVal, 10, 32); err == nil {
-			return uint(id)
+			requestedID = uint(id)
 		}
 	}
-	return 0
+
+	claims := auth.GetUserFromContext(r.Context())
+	if claims == nil || claims.UserID == 0 {
+		if h.DB == nil {
+			return requestedID, nil
+		}
+		return 0, errors.New("unauthorized: missing user context")
+	}
+
+	if h.DB == nil {
+		return requestedID, nil
+	}
+
+	if requestedID > 0 {
+		var srv models.DockerServer
+		if err := h.DB.Where("id = ? AND user_id = ?", requestedID, claims.UserID).First(&srv).Error; err != nil {
+			return 0, fmt.Errorf("server %d not found or not accessible", requestedID)
+		}
+		return srv.ID, nil
+	}
+
+	// requestedID is 0: find a server owned by this user
+	var userSrv models.DockerServer
+	if err := h.DB.Where("user_id = ?", claims.UserID).Order("is_default desc, id asc").First(&userSrv).Error; err != nil {
+		return 0, errors.New("no server configured for user")
+	}
+	return userSrv.ID, nil
+}
+
+// getServerID extracts and authorizes the target docker server for the requesting user
+func (h *Handler) getServerID(r *http.Request) uint {
+	id, err := h.getAuthorizedServerID(r)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 // --- Server Management Handlers ---
@@ -51,7 +91,13 @@ func (h *Handler) getServerID(r *http.Request) uint {
 // ListServersHandler handles GET /api/docker/servers
 func (h *Handler) ListServersHandler(w http.ResponseWriter, r *http.Request) {
 	probe := r.URL.Query().Get("probe") == "true"
-	servers, err := h.Service.ListServers(r.Context(), probe)
+	claims := auth.GetUserFromContext(r.Context())
+	var userID uint = 0
+	if claims != nil {
+		userID = claims.UserID
+	}
+
+	servers, err := h.Service.ListServersForUser(r.Context(), userID, probe)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -82,7 +128,13 @@ func (h *Handler) StreamServersStatusHandler(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	servers, err := h.Service.ListServers(r.Context(), false)
+	claims := auth.GetUserFromContext(r.Context())
+	var userID uint = 0
+	if claims != nil {
+		userID = claims.UserID
+	}
+
+	servers, err := h.Service.ListServersForUser(r.Context(), userID, false)
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -150,7 +202,7 @@ func (h *Handler) CreateServerHandler(w http.ResponseWriter, r *http.Request) {
 		userID = user.UserID
 	}
 
-	server, err := h.Service.CreateServer(r.Context(), req)
+	server, err := h.Service.CreateServer(r.Context(), req, userID)
 	if err != nil {
 		audit.Log(h.DB, userID, username, "CREATE_DOCKER_SERVER", "docker_server", req.Name, err.Error(), "FAILED")
 		w.Header().Set("Content-Type", "application/json")
@@ -176,20 +228,44 @@ func (h *Handler) UpdateServerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req models.UpdateServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var existing models.DockerServer
+	if err := h.DB.First(&existing, id).Error; err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Server not found"})
 		return
 	}
 
 	user := auth.GetUserFromContext(r.Context())
 	username := "system"
 	var userID uint = 0
+	userRole := ""
 	if user != nil {
 		username = user.Username
 		userID = user.UserID
+		userRole = user.Role
+	}
+
+	if existing.IsDefault && userRole != "admin" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Only admins can modify the default server"})
+		return
+	}
+
+	if !existing.IsDefault && userRole != "admin" && existing.UserID != userID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Permission denied: you can only modify servers you own"})
+		return
+	}
+
+	var req models.UpdateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
 	}
 
 	server, err := h.Service.UpdateServer(r.Context(), uint(id), req)
@@ -217,12 +293,36 @@ func (h *Handler) DeleteServerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var existing models.DockerServer
+	if err := h.DB.First(&existing, id).Error; err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Server not found"})
+		return
+	}
+
+	if existing.IsDefault {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "The default server cannot be deleted"})
+		return
+	}
+
 	user := auth.GetUserFromContext(r.Context())
 	username := "system"
 	var userID uint = 0
+	userRole := ""
 	if user != nil {
 		username = user.Username
 		userID = user.UserID
+		userRole = user.Role
+	}
+
+	if userRole != "admin" && existing.UserID != userID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Permission denied: you can only delete servers you own"})
+		return
 	}
 
 	if err := h.Service.DeleteServer(r.Context(), uint(id)); err != nil {
@@ -272,6 +372,18 @@ func (h *Handler) TestServerHandler(w http.ResponseWriter, r *http.Request) {
 
 	testCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
+
+	if err := h.Service.PrepareTestServerRequest(testCtx, &req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "UNREACHABLE",
+			"error":   err.Error(),
+			"message": err.Error(),
+			"logs":    []interface{}{},
+		})
+		return
+	}
 
 	res, err := RunServerDiagnostics(testCtx, req, nil)
 	w.Header().Set("Content-Type", "application/json")
@@ -330,6 +442,27 @@ func (h *Handler) TestServerStreamHandler(w http.ResponseWriter, r *http.Request
 	testCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 
+	if err := h.Service.PrepareTestServerRequest(testCtx, &req); err != nil {
+		errLog := ServerDiagnosticLog{
+			Level:     "error",
+			Message:   fmt.Sprintf("Failed to resolve dynamic credentials: %v", err),
+			Timestamp: time.Now().Format("15:04:05"),
+		}
+		line, _ := json.Marshal(errLog)
+		_, _ = w.Write(line)
+		_, _ = w.Write([]byte("\n"))
+		resLine, _ := json.Marshal(map[string]interface{}{
+			"type":    "result",
+			"status":  "UNREACHABLE",
+			"message": err.Error(),
+			"error":   err.Error(),
+		})
+		_, _ = w.Write(resLine)
+		_, _ = w.Write([]byte("\n"))
+		flusher.Flush()
+		return
+	}
+
 	onLog := func(log ServerDiagnosticLog) {
 		line, _ := json.Marshal(log)
 		_, _ = w.Write(line)
@@ -359,6 +492,13 @@ func (h *Handler) TestServerStreamHandler(w http.ResponseWriter, r *http.Request
 func (h *Handler) ListContainersHandler(w http.ResponseWriter, r *http.Request) {
 	all := r.URL.Query().Get("all") == "true"
 	serverID := h.getServerID(r)
+	if serverID == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []models.ContainerSummary{},
+		})
+		return
+	}
 
 	containers, err := h.Service.ListContainersOnServer(r.Context(), serverID, all)
 	if err != nil {
@@ -487,6 +627,13 @@ func (h *Handler) RemoveContainerHandler(w http.ResponseWriter, r *http.Request)
 // ListImagesHandler handles GET /api/docker/images
 func (h *Handler) ListImagesHandler(w http.ResponseWriter, r *http.Request) {
 	serverID := h.getServerID(r)
+	if serverID == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []models.ImageSummary{},
+		})
+		return
+	}
 	images, err := h.Service.ListImagesOnServer(r.Context(), serverID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -783,6 +930,13 @@ func (h *Handler) UpdateImageHandler(w http.ResponseWriter, r *http.Request) {
 // ListComposeStacksHandler handles GET /api/docker/stacks
 func (h *Handler) ListComposeStacksHandler(w http.ResponseWriter, r *http.Request) {
 	serverID := h.getServerID(r)
+	if serverID == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []models.ComposeStack{},
+		})
+		return
+	}
 	stacks, err := h.Service.ListComposeStacks(r.Context(), serverID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")

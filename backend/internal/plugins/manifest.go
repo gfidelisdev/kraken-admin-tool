@@ -20,15 +20,18 @@ var (
 var AllowedPermissions = map[string]string{
 	"ui:sidebar":          "Adicionar entrada na barra lateral de navegação",
 	"ui:dashboard_widget": "Renderizar widget no painel de visão geral (Overview)",
-	"ui:server_tab":       "Adicionar aba ou ação de host na lista de Docker Hosts",
+	"ui:server_tab":       "Adicionar aba ou ação de host na lista de Hosts",
 	"docker:read":         "Consultar containers, imagens, volumes e stacks Docker",
 	"docker:write":        "Operar containers, iniciar/parar stacks e gerenciar imagens",
 	"hosts:read":          "Consultar pacotes e inventário de hosts remotos",
 	"hosts:exec":          "Executar comandos administrativos no host via SSH",
+	"hosts:create":        "Cadastrar e vincular novos hosts monitorados no Kraken",
 	"k8s:read":            "Consultar Pods e Deployments de clusters Kubernetes",
 	"k8s:write":           "Reiniciar ou escalar cargas de trabalho Kubernetes",
 	"storage:kv":          "Armazenamento de dados chave-valor isolado para o plugin",
 	"http:outbound":       "Realizar chamadas HTTP externas para hosts autorizados",
+	"credentials:resolve": "Resolver credenciais e segredos de logon para servidores (Key Vault)",
+	"credentials:manage":  "Criar, listar e vincular segredos em cofres de chaves externos (Key Vault)",
 }
 
 // ParseAndValidateManifest parses raw plugin.json bytes and validates security & schema constraints
@@ -64,6 +67,14 @@ func ParseAndValidateManifest(data []byte) (*models.PluginManifest, error) {
 	}
 	if !versionRegex.MatchString(m.Version) {
 		return nil, fmt.Errorf("invalid version '%s': must follow SemVer format (e.g. '1.0.0')", m.Version)
+	}
+
+	m.Homepage = strings.TrimSpace(m.Homepage)
+	if m.Homepage != "" {
+		lowerHome := strings.ToLower(m.Homepage)
+		if !strings.HasPrefix(lowerHome, "https://") && !strings.HasPrefix(lowerHome, "http://") {
+			return nil, fmt.Errorf("invalid homepage URL '%s': must start with http:// or https://", m.Homepage)
+		}
 	}
 
 	// Validate runtime

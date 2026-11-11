@@ -40,10 +40,11 @@ func LaunchDetachedUpgrade(ctx context.Context, exec Executor, serverID uint, pk
 	// 1. Sets up directory and log file with read permissions for the SSH user.
 	// 2. Marks status as RUNNING.
 	// 3. Spawns nohup subshell with </dev/null >/dev/null 2>&1 & so it survives SSH termination.
-	// 4. Writes PID to pid file and prints it to stdout.
+	// 4. Writes PID to pid file and prints it to stdout immediately without blocking.
 	launchScript := fmt.Sprintf(
-		`umask 022 && DIR="%s" && rm -rf "$DIR" && mkdir -p "$DIR" && touch "$DIR/output.log" && chmod 777 "$DIR" 2>/dev/null && chmod 666 "$DIR/output.log" 2>/dev/null && echo "RUNNING" > "$DIR/status" && nohup sh -c '( %s ) >> "'"$DIR"'/output.log" 2>&1; EC=$?; echo "$EC" > "'"$DIR"'/exit_code"; if [ "$EC" -eq 0 ]; then echo "SUCCESS" > "'"$DIR"'/status"; else echo "FAILED" > "'"$DIR"'/status"; fi; chmod 666 "'"$DIR"'/exit_code" "'"$DIR"'/status" 2>/dev/null; echo "===KRAKEN_UPGRADE_FINISHED:$EC===" >> "'"$DIR"'/output.log"' </dev/null >/dev/null 2>&1 & echo $! > "$DIR/pid" && chmod 666 "$DIR/pid" 2>/dev/null && cat "$DIR/pid"`,
+		`umask 022; DIR="%s"; rm -rf "$DIR"; mkdir -p "$DIR"; touch "$DIR/output.log"; chmod 777 "$DIR" 2>/dev/null; chmod 666 "$DIR/output.log" 2>/dev/null; echo "RUNNING" > "$DIR/status"; chmod 666 "$DIR/status" 2>/dev/null; nohup sh -c 'export PYTHONUNBUFFERED=1; export DEBIAN_FRONTEND=noninteractive; if command -v stdbuf >/dev/null 2>&1; then ( stdbuf -oL -eL %s ) >> "'"$DIR"'/output.log" 2>&1; else ( %s ) >> "'"$DIR"'/output.log" 2>&1; fi; EC=$?; echo "$EC" > "'"$DIR"'/exit_code"; if [ "$EC" -eq 0 ]; then echo "SUCCESS" > "'"$DIR"'/status"; else echo "FAILED" > "'"$DIR"'/status"; fi; chmod 666 "'"$DIR"'/exit_code" "'"$DIR"'/status" 2>/dev/null; echo "===KRAKEN_UPGRADE_FINISHED:$EC===" >> "'"$DIR"'/output.log"' </dev/null >/dev/null 2>&1 & echo $! > "$DIR/pid"; chmod 666 "$DIR/pid" 2>/dev/null; echo $!`,
 		dir,
+		innerCmd,
 		innerCmd,
 	)
 
@@ -115,8 +116,9 @@ func StreamDetachedLogs(ctx context.Context, exec Executor, serverID uint, start
 			return false
 		}
 		scanner := bufio.NewScanner(strings.NewReader(stdout))
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			line := scanner.Text()
+			line := strings.TrimRight(scanner.Text(), "\r")
 			if strings.HasPrefix(line, SentinelFinishedPrefix) {
 				ecStr := strings.TrimSuffix(strings.TrimPrefix(line, SentinelFinishedPrefix), "===")
 				if ec, err := strconv.Atoi(ecStr); err == nil {

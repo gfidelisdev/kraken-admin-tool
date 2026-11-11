@@ -1,13 +1,16 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { zipSync } from "fflate";
 import {
   getPlugins,
   getStorePlugins,
   inspectPluginUpload,
   inspectPluginURL,
+  inspectPluginDirectory,
   installPluginUpload,
   installPluginURL,
+  installPluginDirectory,
   enablePlugin,
   disablePlugin,
   deletePlugin,
@@ -33,6 +36,7 @@ import { usePlugins } from "@/context/PluginContext";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
+import { MarkdownViewer } from "@/components/ui/MarkdownViewer";
 import { SortControl } from "@/components/ui/SortControl";
 import { sortItems, SortDirection } from "@/lib/sort";
 import {
@@ -65,6 +69,7 @@ import {
   Sparkles,
   Hammer,
   Zap,
+  Folder,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -94,6 +99,7 @@ export default function PluginsPage() {
 
   // Direct Install state
   const [installURL, setInstallURL] = useState("");
+  const [installDir, setInstallDir] = useState("");
   const [expectedSHA, setExpectedSHA] = useState("");
   const [isInspecting, setIsInspecting] = useState(false);
   const [inspectResult, setInspectResult] = useState<PluginInspectResponse | null>(null);
@@ -102,6 +108,7 @@ export default function PluginsPage() {
   const [installSuccessMessage, setInstallSuccessMessage] = useState<string | null>(null);
   const [installErrorMessage, setInstallErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   // AI Guide state
   const [aiGuideMarkdown, setAiGuideMarkdown] = useState<string>("");
@@ -135,6 +142,7 @@ export default function PluginsPage() {
       const res = await getAIGuide();
       if (res && res.content) {
         setAiGuideMarkdown(res.content);
+        setIsLoadingGuide(false);
         return;
       }
     } catch {
@@ -307,15 +315,73 @@ export default function PluginsPage() {
     }
   };
 
-  // Direct Install: inspect file or URL
+  // Process selected folder by creating a ZIP in memory using fflate
+  const handleSelectFolder = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+
+    try {
+      setIsInspecting(true);
+      setInstallErrorMessage(null);
+      setInstallSuccessMessage(null);
+      setInspectResult(null);
+
+      // Collect relative paths
+      const zipData: Record<string, Uint8Array> = {};
+      let manifestFound = false;
+      let rootFolderName = "";
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        // webkitRelativePath is like "folderName/sub/file.txt" or "folderName/plugin.json"
+        const relPath = file.webkitRelativePath || file.name;
+        const normalized = relPath.replace(/\\/g, "/");
+
+        const parts = normalized.split("/");
+        if (!rootFolderName && parts.length > 0) {
+          rootFolderName = parts[0];
+        }
+
+        if (normalized.endsWith("plugin.json") || normalized === "plugin.json") {
+          manifestFound = true;
+        }
+
+        const buf = await file.arrayBuffer();
+        zipData[normalized] = new Uint8Array(buf);
+      }
+
+      if (!manifestFound) {
+        setInstallErrorMessage("A pasta selecionada não contém o arquivo 'plugin.json'. Verifique a estrutura do plugin.");
+        return;
+      }
+
+      // Zip the files
+      const zipped = zipSync(zipData, { level: 6 });
+      const zipFileName = `${rootFolderName || "plugin"}.zip`;
+      const zippedFile = new File([zipped], zipFileName, { type: "application/zip" });
+
+      setSelectedFile(zippedFile);
+      setInstallURL("");
+      setInstallDir("");
+
+      // Automatically inspect the zipped package
+      const insp = await inspectPluginUpload(zippedFile);
+      setInspectResult(insp);
+    } catch (err: any) {
+      setInstallErrorMessage(err?.message || "Erro ao processar a pasta selecionada.");
+    } finally {
+      setIsInspecting(false);
+    }
+  };
+
+  // Direct Install: inspect file, directory or URL
   const handleInspect = async (e: React.FormEvent) => {
     e.preventDefault();
     setInstallErrorMessage(null);
     setInstallSuccessMessage(null);
     setInspectResult(null);
 
-    if (!selectedFile && !installURL.trim()) {
-      setInstallErrorMessage("Selecione um arquivo .zip/.tar.gz ou digite uma URL direta para download.");
+    if (!selectedFile && !installURL.trim() && !installDir.trim()) {
+      setInstallErrorMessage("Selecione um arquivo .zip/.tar.gz, digite uma URL direta ou informe o caminho de uma pasta local descompactada.");
       return;
     }
 
@@ -323,6 +389,9 @@ export default function PluginsPage() {
       setIsInspecting(true);
       if (selectedFile) {
         const insp = await inspectPluginUpload(selectedFile);
+        setInspectResult(insp);
+      } else if (installDir.trim()) {
+        const insp = await inspectPluginDirectory(installDir.trim());
         setInspectResult(insp);
       } else {
         const insp = await inspectPluginURL(installURL.trim());
@@ -352,6 +421,13 @@ export default function PluginsPage() {
           permissions,
           true
         );
+      } else if (installDir.trim()) {
+        await installPluginDirectory(
+          installDir.trim(),
+          expectedSHA.trim() || undefined,
+          permissions,
+          true
+        );
       } else {
         await installPluginURL(
           installURL.trim(),
@@ -365,6 +441,7 @@ export default function PluginsPage() {
       setInspectResult(null);
       setSelectedFile(null);
       setInstallURL("");
+      setInstallDir("");
       setExpectedSHA("");
       await fetchInstalledPlugins();
       await notifyContextRefresh();
@@ -497,7 +574,7 @@ export default function PluginsPage() {
             Central de Plugins & Extensões
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Gerencie extensões da plataforma, instale pacotes (.zip / .tar.gz) ou explore a Loja Online.
+            Gerencie extensões da plataforma, instale pacotes (.zip / .tar.gz / pasta) ou explore a Loja Online.
           </p>
         </div>
 
@@ -675,8 +752,16 @@ export default function PluginsPage() {
                     <div>
                       <div className="flex items-start justify-between gap-3 mb-2">
                         <div className="flex items-center gap-2.5">
-                          <div className="p-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
-                            <Puzzle className="h-5 w-5" />
+                          <div className="p-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 flex items-center justify-center shrink-0">
+                            {p.icon_url ? (
+                              <img
+                                src={p.icon_url}
+                                alt={p.name}
+                                className="h-5 w-5 object-contain rounded-sm"
+                              />
+                            ) : (
+                              <Puzzle className="h-5 w-5" />
+                            )}
                           </div>
                           <div>
                             <h3 className="text-sm font-bold text-white tracking-tight leading-snug">
@@ -757,75 +842,77 @@ export default function PluginsPage() {
                         </Button>
                       </div>
 
-                      {isAdmin && (
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <Button
-                            size="sm"
-                            variant={p.status === "enabled" ? "outline" : "default"}
-                            onClick={() => handleTogglePlugin(p)}
-                            disabled={actionLoadingId === p.plugin_id}
-                            className="text-xs h-7 px-2 shrink-0"
-                          >
-                            {actionLoadingId === p.plugin_id ? (
-                              <RefreshCw className="h-3 w-3 animate-spin" />
-                            ) : p.status === "enabled" ? (
-                              <>
-                                <Square className="h-3 w-3 mr-1" />
-                                Desativar
-                              </>
-                            ) : (
-                              <>
-                                <Play className="h-3 w-3 mr-1" />
-                                Ativar
-                              </>
-                            )}
-                          </Button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Button
+                          size="sm"
+                          variant={p.status === "enabled" ? "outline" : "default"}
+                          onClick={() => handleTogglePlugin(p)}
+                          disabled={actionLoadingId === p.plugin_id}
+                          className="text-xs h-7 px-2 shrink-0"
+                        >
+                          {actionLoadingId === p.plugin_id ? (
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                          ) : p.status === "enabled" ? (
+                            <>
+                              <Square className="h-3 w-3 mr-1" />
+                              Desativar
+                            </>
+                          ) : (
+                            <>
+                              <Play className="h-3 w-3 mr-1" />
+                              Ativar
+                            </>
+                          )}
+                        </Button>
 
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                              setUpdateTargetPlugin(p);
-                              setEnableAfterUpdate(p.status === "enabled");
-                              setUpdateFile(null);
-                              setUpdateError(null);
-                              setUpdateSuccess(null);
-                              setUpdateInspect(null);
-                            }}
-                            disabled={actionLoadingId === p.plugin_id}
-                            className="text-xs h-7 px-2 text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/10 border-slate-800 shrink-0"
-                            title="Atualizar plugin enviando um novo arquivo .zip / .tar.gz (mesmo com a mesma versão)"
-                          >
-                            <Upload className="h-3 w-3 mr-1" />
-                            Atualizar
-                          </Button>
-
-                          {(p.runtime_type === "wasm" || p.runtime_type === "container") && (
+                        {isAdmin && (
+                          <>
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => handleRebuildPlugin(p)}
+                              onClick={() => {
+                                setUpdateTargetPlugin(p);
+                                setEnableAfterUpdate(p.status === "enabled");
+                                setUpdateFile(null);
+                                setUpdateError(null);
+                                setUpdateSuccess(null);
+                                setUpdateInspect(null);
+                              }}
                               disabled={actionLoadingId === p.plugin_id}
-                              className="text-xs h-7 px-2 text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 border-slate-800 shrink-0"
-                              title={p.runtime_type === "container" ? "Reconstruir imagem Docker a partir do Dockerfile do plugin" : "Recompilar WASM a partir dos códigos-fonte Go"}
+                              className="text-xs h-7 px-2 text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/10 border-slate-800 shrink-0"
+                              title="Atualizar plugin enviando um novo arquivo .zip / .tar.gz (mesmo com a mesma versão)"
                             >
-                              <Hammer className="h-3 w-3 mr-1" />
-                              {p.runtime_type === "container" ? "Reconstruir Imagem" : "Recompilar"}
+                              <Upload className="h-3 w-3 mr-1" />
+                              Atualizar
                             </Button>
-                          )}
 
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleDeletePlugin(p)}
-                            disabled={actionLoadingId === p.plugin_id}
-                            className="text-xs h-7 px-2 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 shrink-0"
-                            title="Desinstalar plugin"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      )}
+                            {(p.runtime_type === "wasm" || p.runtime_type === "container") && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleRebuildPlugin(p)}
+                                disabled={actionLoadingId === p.plugin_id}
+                                className="text-xs h-7 px-2 text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 border-slate-800 shrink-0"
+                                title={p.runtime_type === "container" ? "Reconstruir imagem Docker a partir do Dockerfile do plugin" : "Recompilar WASM a partir dos códigos-fonte Go"}
+                              >
+                                <Hammer className="h-3 w-3 mr-1" />
+                                {p.runtime_type === "container" ? "Reconstruir Imagem" : "Recompilar"}
+                              </Button>
+                            )}
+
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleDeletePlugin(p)}
+                              disabled={actionLoadingId === p.plugin_id}
+                              className="text-xs h-7 px-2 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 shrink-0"
+                              title="Desinstalar plugin"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -945,8 +1032,16 @@ export default function PluginsPage() {
                   <div>
                     <div className="flex items-start justify-between gap-3 mb-2">
                       <div className="flex items-center gap-2.5">
-                        <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
-                          <ShoppingBag className="h-5 w-5" />
+                        <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0">
+                          {item.icon_url ? (
+                            <img
+                              src={item.icon_url}
+                              alt={item.name}
+                              className="h-5 w-5 object-contain rounded-sm"
+                            />
+                          ) : (
+                            <ShoppingBag className="h-5 w-5" />
+                          )}
                         </div>
                         <div>
                           <h3 className="text-sm font-bold text-white tracking-tight">{item.name}</h3>
@@ -1027,10 +1122,10 @@ export default function PluginsPage() {
             <div>
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Upload className="h-5 w-5 text-sky-400" />
-                Instalar Pacote de Plugin (.zip ou .tar.gz)
+                Instalar Plugin (.zip, .tar.gz ou Pasta Descompactada)
               </h3>
               <p className="text-xs text-slate-400 mt-1">
-                Forneça a URL de download direto do arquivo compactado ou envie um arquivo do seu computador.
+                Envie um arquivo compactado, forneça uma URL de download ou aponte para uma pasta descompactada no host.
               </p>
             </div>
 
@@ -1074,49 +1169,143 @@ export default function PluginsPage() {
                 <span className="flex-1 border-t border-slate-800"></span>
               </div>
 
-              {/* Option B: Local File Upload */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                  <FileCode className="h-3.5 w-3.5 text-sky-400" />
-                  Opção 2: Enviar Arquivo Local
-                </label>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  accept=".zip,.tar.gz,.tgz"
-                  onChange={(e) => {
-                    if (e.target.files?.[0]) {
-                      setSelectedFile(e.target.files[0]);
-                      setInstallURL("");
-                    }
-                  }}
-                  className="hidden"
-                />
-                <div
-                  onClick={() => fileInputRef.current?.click()}
-                  className={`p-6 border-2 border-dashed rounded-xl text-center cursor-pointer transition ${
-                    selectedFile
-                      ? "border-sky-500/60 bg-sky-500/10"
-                      : "border-slate-800 hover:border-slate-700 bg-slate-950/40"
-                  }`}
-                >
-                  <Upload className="h-6 w-6 text-slate-400 mx-auto mb-2" />
-                  {selectedFile ? (
-                    <div>
-                      <span className="text-xs font-semibold text-sky-300 block">{selectedFile.name}</span>
-                      <span className="text-[11px] text-slate-400 font-mono">
-                        {(selectedFile.size / 1024).toFixed(1)} KB
+              {/* Option B: Local File / Folder Upload */}
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <FileCode className="h-3.5 w-3.5 text-sky-400" />
+                    Opção 2: Enviar Arquivo Local (.zip / .tar.gz) ou Selecionar Pasta
+                  </label>
+                  
+                  {/* Hidden inputs for file and directory selection */}
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept=".zip,.tar.gz,.tgz"
+                    onChange={(e) => {
+                      if (e.target.files?.[0]) {
+                        setSelectedFile(e.target.files[0]);
+                        setInstallURL("");
+                        setInstallDir("");
+                      }
+                    }}
+                    className="hidden"
+                  />
+                  <input
+                    type="file"
+                    ref={folderInputRef}
+                    // @ts-expect-error webkitdirectory is standard in browsers but not fully typed in React HTML input
+                    webkitdirectory=""
+                    directory=""
+                    multiple
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files.length > 0) {
+                        handleSelectFolder(e.target.files);
+                      }
+                    }}
+                    className="hidden"
+                  />
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* File Box */}
+                    <div
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`p-5 border-2 border-dashed rounded-xl text-center cursor-pointer transition flex flex-col items-center justify-center ${
+                        selectedFile && !selectedFile.name.endsWith(".zip")
+                          ? "border-sky-500/60 bg-sky-500/10"
+                          : selectedFile
+                          ? "border-slate-800 bg-slate-950/20 opacity-70"
+                          : "border-slate-800 hover:border-slate-700 bg-slate-950/40"
+                      }`}
+                    >
+                      <Upload className="h-5 w-5 text-slate-400 mb-2" />
+                      <span className="text-xs text-slate-200 font-medium block">
+                        Selecionar Arquivo .zip / .tar.gz
                       </span>
+                      <span className="text-[10px] text-slate-500 mt-0.5">Pacote compactado</span>
                     </div>
-                  ) : (
-                    <div>
-                      <span className="text-xs text-slate-300 font-medium block">
-                        Clique para selecionar um arquivo .zip ou .tar.gz
+
+                    {/* Folder Box */}
+                    <div
+                      onClick={() => folderInputRef.current?.click()}
+                      className={`p-5 border-2 border-dashed rounded-xl text-center cursor-pointer transition flex flex-col items-center justify-center ${
+                        selectedFile && selectedFile.name.endsWith(".zip")
+                          ? "border-emerald-500/60 bg-emerald-500/10"
+                          : "border-slate-800 hover:border-slate-700 bg-slate-950/40"
+                      }`}
+                    >
+                      <Folder className="h-5 w-5 text-emerald-400 mb-2" />
+                      <span className="text-xs text-emerald-200 font-medium block">
+                        Selecionar Pasta do seu Computador
                       </span>
-                      <span className="text-[10px] text-slate-500">Até 50 MB</span>
+                      <span className="text-[10px] text-emerald-500/80 mt-0.5">Lê a pasta e compacta no navegador</span>
+                    </div>
+                  </div>
+
+                  {selectedFile && (
+                    <div className="p-2.5 rounded-lg border border-slate-800 bg-slate-900/60 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {selectedFile.name.endsWith(".zip") ? (
+                          <Folder className="h-4 w-4 text-emerald-400 shrink-0" />
+                        ) : (
+                          <FileCode className="h-4 w-4 text-sky-400 shrink-0" />
+                        )}
+                        <div>
+                          <span className="text-xs font-semibold text-slate-200 block truncate max-w-xs sm:max-w-md">
+                            {selectedFile.name}
+                          </span>
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            {(selectedFile.size / 1024).toFixed(1)} KB
+                          </span>
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedFile(null);
+                          setInspectResult(null);
+                        }}
+                        className="text-xs text-slate-400 hover:text-rose-400 h-7 px-2"
+                      >
+                        Remover
+                      </Button>
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="flex items-center gap-4 text-xs text-slate-500">
+                <span className="flex-1 border-t border-slate-800"></span>
+                <span>OU</span>
+                <span className="flex-1 border-t border-slate-800"></span>
+              </div>
+
+              {/* Option C: Server Filesystem Path */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Folder className="h-3.5 w-3.5 text-slate-400" />
+                  Opção 3: Caminho no Sistema do Servidor / Container
+                </label>
+                <input
+                  type="text"
+                  placeholder="/caminho/no/servidor ou ./examples/plugins/azure-keyvault"
+                  value={installDir}
+                  onChange={(e) => {
+                    setInstallDir(e.target.value);
+                    if (e.target.value) {
+                      setInstallURL("");
+                      setSelectedFile(null);
+                    }
+                  }}
+                  disabled={Boolean(selectedFile) || Boolean(installURL.trim())}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"
+                />
+                <p className="text-[11px] text-slate-500">
+                  Útil quando os arquivos do plugin já residem no volume ou container do servidor.
+                </p>
               </div>
 
               {/* Optional expected SHA-256 */}
@@ -1134,7 +1323,7 @@ export default function PluginsPage() {
               </div>
 
               <div className="pt-2 flex justify-end">
-                <Button type="submit" disabled={isInspecting || (!selectedFile && !installURL.trim())}>
+                <Button type="submit" disabled={isInspecting || (!selectedFile && !installURL.trim() && !installDir.trim())}>
                   {isInspecting ? (
                     <>
                       <RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />
@@ -1165,18 +1354,32 @@ export default function PluginsPage() {
             const pluginDesc = manifest.description || manifest.Description || "";
             const pluginID = manifest.id || manifest.ID || "";
             const runtimeType = manifest.runtime?.type || manifest.Runtime?.Type || "none";
+            const iconURL = inspectResult.icon_url || (inspectResult as any).IconURL || "";
 
             return (
               <div className="p-6 rounded-2xl bg-slate-900 border border-sky-500/40 shadow-2xl space-y-5 animate-in fade-in">
                 <div className="flex items-start justify-between">
-                  <div>
-                    <h4 className="text-base font-bold text-white flex items-center gap-2">
-                      {pluginName}
-                      <span className="text-xs font-mono text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded">
-                        v{pluginVersion}
-                      </span>
-                    </h4>
-                    <p className="text-xs text-slate-400 mt-1">{pluginDesc}</p>
+                  <div className="flex items-start gap-3">
+                    <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 flex items-center justify-center shrink-0">
+                      {iconURL ? (
+                        <img
+                          src={iconURL}
+                          alt={pluginName}
+                          className="h-6 w-6 object-contain rounded-sm"
+                        />
+                      ) : (
+                        <Puzzle className="h-6 w-6" />
+                      )}
+                    </div>
+                    <div>
+                      <h4 className="text-base font-bold text-white flex items-center gap-2">
+                        {pluginName}
+                        <span className="text-xs font-mono text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded">
+                          v{pluginVersion}
+                        </span>
+                      </h4>
+                      <p className="text-xs text-slate-400 mt-1">{pluginDesc}</p>
+                    </div>
                   </div>
 
                   {signatureVerified ? (
@@ -1475,9 +1678,10 @@ export default function PluginsPage() {
                 Carregando guia orientador de IAs...
               </div>
             ) : (
-              <div className="max-h-[600px] overflow-y-auto p-4 rounded-xl bg-slate-950 border border-slate-800/80 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed select-text">
-                {aiGuideMarkdown || "Guia não carregado. Clique em atualizar."}
-              </div>
+              <MarkdownViewer
+                content={aiGuideMarkdown || "Guia não carregado. Clique em atualizar."}
+                maxHeight="650px"
+              />
             )}
           </div>
         </div>
@@ -1492,7 +1696,18 @@ export default function PluginsPage() {
           description={`ID: ${detailsModalPlugin.id || (detailsModalPlugin as any).plugin_id} • v${detailsModalPlugin.version}`}
         >
           <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
-            <p className="text-xs text-slate-300">{detailsModalPlugin.description}</p>
+            <div className="flex items-start gap-3">
+              {detailsModalPlugin.icon_url && (
+                <div className="p-2 rounded-xl bg-slate-950 border border-slate-800 shrink-0">
+                  <img
+                    src={detailsModalPlugin.icon_url}
+                    alt={detailsModalPlugin.name}
+                    className="h-8 w-8 object-contain rounded-sm"
+                  />
+                </div>
+              )}
+              <p className="text-xs text-slate-300 leading-relaxed">{detailsModalPlugin.description}</p>
+            </div>
 
             <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs grid grid-cols-2 gap-2">
               <div>
@@ -1503,13 +1718,13 @@ export default function PluginsPage() {
                 <span className="text-slate-500 text-[10px] block">Licença:</span>
                 <span className="text-white">{detailsModalPlugin.license || "Não informada"}</span>
               </div>
-              {detailsModalPlugin.homepage && (
+              {detailsModalPlugin.homepage && /^https?:\/\//i.test(detailsModalPlugin.homepage) && (
                 <div className="col-span-2">
                   <span className="text-slate-500 text-[10px] block">Website / Repositório:</span>
                   <a
                     href={detailsModalPlugin.homepage}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                     className="text-sky-400 hover:underline flex items-center gap-1 font-mono text-xs"
                   >
                     {detailsModalPlugin.homepage}
@@ -1525,9 +1740,10 @@ export default function PluginsPage() {
                   <BookOpen className="h-3.5 w-3.5 text-sky-400" />
                   Documentação (README):
                 </span>
-                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 font-mono whitespace-pre-wrap">
-                  {detailsModalPlugin.readme_markdown}
-                </div>
+                <MarkdownViewer
+                  content={detailsModalPlugin.readme_markdown}
+                  maxHeight="350px"
+                />
               </div>
             )}
 

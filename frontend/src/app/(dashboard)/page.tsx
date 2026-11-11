@@ -28,7 +28,8 @@ import {
   SlidersHorizontal,
   LayoutGrid,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, getDashboardLayout, saveDashboardLayout } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import {
   SystemStatus,
   DockerContainer,
@@ -88,6 +89,7 @@ const DEFAULT_COLLAPSED: Record<string, boolean> = {
 };
 
 export default function DashboardOverviewPage() {
+  const { user } = useAuth();
   const { activeServer } = useServer();
   const { dashboardWidgets } = usePlugins();
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -102,59 +104,142 @@ export default function DashboardOverviewPage() {
   const [auditSortKey, setAuditSortKey] = useState<string>("timestamp");
   const [auditSortDir, setAuditSortDir] = useState<SortDirection>("desc");
 
+  const userStorageKey = user?.id ? `${STORAGE_KEY}_u${user.id}` : STORAGE_KEY;
+
   // Dashboard Layout State (Order, Visibility, Collapsed/Compact view)
   const [order, setOrder] = useState<string[]>(DEFAULT_ORDER);
   const [visibility, setVisibility] = useState<Record<string, boolean>>(DEFAULT_VISIBILITY);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(DEFAULT_COLLAPSED);
 
-  // Drag-and-drop state
+  // Independent Plugin Widgets State (Order, Visibility, Collapsed)
+  const [widgetOrder, setWidgetOrder] = useState<string[]>([]);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetCollapsed, setWidgetCollapsed] = useState<Record<string, boolean>>({});
+
+  // Drag-and-drop state for main blocks and plugin widgets
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [draggedWidgetId, setDraggedWidgetId] = useState<string | null>(null);
+  const [dragOverWidgetId, setDragOverWidgetId] = useState<string | null>(null);
 
-  // Load saved preferences on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed.order)) {
-          // Ensure all default items exist even if new ones are added
-          const mergedOrder = [
-            ...parsed.order.filter((id: string) => DEFAULT_ORDER.includes(id)),
-            ...DEFAULT_ORDER.filter((id) => !parsed.order.includes(id)),
-          ];
-          setOrder(mergedOrder);
-        }
-        if (parsed.visibility && typeof parsed.visibility === "object") {
-          setVisibility({ ...DEFAULT_VISIBILITY, ...parsed.visibility });
-        }
-        if (parsed.collapsed && typeof parsed.collapsed === "object") {
-          setCollapsed({ ...DEFAULT_COLLAPSED, ...parsed.collapsed });
-        }
-      }
-    } catch (e) {
-      console.warn("Failed to load dashboard layout from localStorage:", e);
+  const getWidgetKey = useCallback(
+    (item: { plugin: { plugin_id: string }; ext: { id: string } }) =>
+      `${item.plugin.plugin_id}::${item.ext.id}`,
+    []
+  );
+
+  const applyLayoutObject = useCallback((parsed: any) => {
+    if (!parsed) return;
+    if (Array.isArray(parsed.order)) {
+      const mergedOrder = [
+        ...parsed.order.filter((id: string) => DEFAULT_ORDER.includes(id)),
+        ...DEFAULT_ORDER.filter((id) => !parsed.order.includes(id)),
+      ];
+      setOrder(mergedOrder);
+    }
+    if (parsed.visibility && typeof parsed.visibility === "object") {
+      setVisibility({ ...DEFAULT_VISIBILITY, ...parsed.visibility });
+    }
+    if (parsed.collapsed && typeof parsed.collapsed === "object") {
+      setCollapsed({ ...DEFAULT_COLLAPSED, ...parsed.collapsed });
+    }
+    if (Array.isArray(parsed.widgetOrder)) {
+      setWidgetOrder(parsed.widgetOrder);
+    }
+    if (parsed.widgetVisibility && typeof parsed.widgetVisibility === "object") {
+      setWidgetVisibility(parsed.widgetVisibility);
+    }
+    if (parsed.widgetCollapsed && typeof parsed.widgetCollapsed === "object") {
+      setWidgetCollapsed(parsed.widgetCollapsed);
     }
   }, []);
 
-  // Save preferences to localStorage
-  const saveLayout = useCallback(
-    (newOrder: string[], newVisibility: Record<string, boolean>, newCollapsed: Record<string, boolean>) => {
+  // Load preferences from backend API (with user-scoped localStorage fallback)
+  useEffect(() => {
+    let isMounted = true;
+    const load = async () => {
+      // 1. Try backend API
       try {
-        localStorage.setItem(
-          STORAGE_KEY,
-          JSON.stringify({
-            order: newOrder,
-            visibility: newVisibility,
-            collapsed: newCollapsed,
-          })
-        );
-      } catch (e) {
-        console.warn("Failed to persist dashboard layout:", e);
+        const res = await getDashboardLayout();
+        if (res?.layout_json && isMounted) {
+          try {
+            const parsed = JSON.parse(res.layout_json);
+            applyLayoutObject(parsed);
+            localStorage.setItem(userStorageKey, res.layout_json);
+            return;
+          } catch {
+            // invalid JSON, ignore
+          }
+        }
+      } catch {
+        // network or offline
       }
+
+      // 2. Fallback to localStorage
+      try {
+        const saved = localStorage.getItem(userStorageKey) || localStorage.getItem(STORAGE_KEY);
+        if (saved && isMounted) {
+          const parsed = JSON.parse(saved);
+          applyLayoutObject(parsed);
+        }
+      } catch (e) {
+        console.warn("Failed to load dashboard layout:", e);
+      }
+    };
+
+    load();
+    return () => {
+      isMounted = false;
+    };
+  }, [userStorageKey, applyLayoutObject]);
+
+  // Save preferences to backend and localStorage
+  const saveLayout = useCallback(
+    (
+      newOrder: string[],
+      newVisibility: Record<string, boolean>,
+      newCollapsed: Record<string, boolean>,
+      newWidgetOrder: string[] = widgetOrder,
+      newWidgetVisibility: Record<string, boolean> = widgetVisibility,
+      newWidgetCollapsed: Record<string, boolean> = widgetCollapsed
+    ) => {
+      const payload = {
+        order: newOrder,
+        visibility: newVisibility,
+        collapsed: newCollapsed,
+        widgetOrder: newWidgetOrder,
+        widgetVisibility: newWidgetVisibility,
+        widgetCollapsed: newWidgetCollapsed,
+      };
+      const jsonStr = JSON.stringify(payload);
+
+      try {
+        localStorage.setItem(userStorageKey, jsonStr);
+      } catch (e) {
+        console.warn("Failed to persist dashboard layout locally:", e);
+      }
+
+      saveDashboardLayout(jsonStr).catch((err) => {
+        console.warn("Failed to persist dashboard layout to backend:", err);
+      });
     },
-    []
+    [userStorageKey, widgetOrder, widgetVisibility, widgetCollapsed]
   );
+
+  // Synchronize available plugin widgets with saved widgetOrder
+  useEffect(() => {
+    if (!dashboardWidgets.length) return;
+    const currentKeys = dashboardWidgets.map(getWidgetKey);
+    setWidgetOrder((prev) => {
+      const validExisting = prev.filter((k) => currentKeys.includes(k));
+      const added = currentKeys.filter((k) => !validExisting.includes(k));
+      const merged = [...validExisting, ...added];
+      if (merged.length === prev.length && merged.every((v, i) => v === prev[i])) {
+        return prev;
+      }
+      return merged;
+    });
+  }, [dashboardWidgets, getWidgetKey]);
 
   const handleAuditSort = (key: string) => {
     if (auditSortKey === key) {
@@ -285,11 +370,116 @@ export default function DashboardOverviewPage() {
 
   // Reset to default
   const handleResetLayout = () => {
+    const defaultWidgetKeys = dashboardWidgets.map(getWidgetKey);
     setOrder(DEFAULT_ORDER);
     setVisibility(DEFAULT_VISIBILITY);
     setCollapsed(DEFAULT_COLLAPSED);
-    saveLayout(DEFAULT_ORDER, DEFAULT_VISIBILITY, DEFAULT_COLLAPSED);
+    setWidgetOrder(defaultWidgetKeys);
+    setWidgetVisibility({});
+    setWidgetCollapsed({});
+    saveLayout(DEFAULT_ORDER, DEFAULT_VISIBILITY, DEFAULT_COLLAPSED, defaultWidgetKeys, {}, {});
   };
+
+  // Independent Plugin Widget Handlers
+  const handleReorderWidgets = (newWidgetOrder: string[]) => {
+    setWidgetOrder(newWidgetOrder);
+    saveLayout(order, visibility, collapsed, newWidgetOrder, widgetVisibility, widgetCollapsed);
+  };
+
+  const handleMoveWidget = (wId: string, direction: "up" | "down") => {
+    const currentIndex = widgetOrder.indexOf(wId);
+    if (currentIndex === -1) return;
+    const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= widgetOrder.length) return;
+
+    const newWidgetOrder = [...widgetOrder];
+    const [moved] = newWidgetOrder.splice(currentIndex, 1);
+    newWidgetOrder.splice(targetIndex, 0, moved);
+    setWidgetOrder(newWidgetOrder);
+    saveLayout(order, visibility, collapsed, newWidgetOrder, widgetVisibility, widgetCollapsed);
+  };
+
+  const handleToggleWidgetVisibility = (wId: string) => {
+    const isCurrentlyVisible = widgetVisibility[wId] !== false;
+    const next = { ...widgetVisibility, [wId]: !isCurrentlyVisible };
+    setWidgetVisibility(next);
+    saveLayout(order, visibility, collapsed, widgetOrder, next, widgetCollapsed);
+  };
+
+  const handleToggleWidgetCollapse = (wId: string) => {
+    const next = { ...widgetCollapsed, [wId]: !widgetCollapsed[wId] };
+    setWidgetCollapsed(next);
+    saveLayout(order, visibility, collapsed, widgetOrder, widgetVisibility, next);
+  };
+
+  const handleSetAllWidgetVisibility = (visible: boolean) => {
+    const next: Record<string, boolean> = {};
+    dashboardWidgets.forEach((item) => {
+      next[getWidgetKey(item)] = visible;
+    });
+    setWidgetVisibility(next);
+    saveLayout(order, visibility, collapsed, widgetOrder, next, widgetCollapsed);
+  };
+
+  // Plugin Widget Drag-and-drop handlers
+  const handleWidgetDragStart = (e: React.DragEvent, wId: string) => {
+    e.stopPropagation();
+    e.dataTransfer.setData("application/x-kraken-widget", wId);
+    e.dataTransfer.effectAllowed = "move";
+    setDraggedWidgetId(wId);
+  };
+
+  const handleWidgetDragOver = (e: React.DragEvent, wId: string) => {
+    if (!draggedWidgetId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (draggedWidgetId !== wId) {
+      setDragOverWidgetId(wId);
+    }
+  };
+
+  const handleWidgetDragLeave = (e: React.DragEvent) => {
+    if (!draggedWidgetId) return;
+    e.stopPropagation();
+    setDragOverWidgetId(null);
+  };
+
+  const handleWidgetDrop = (e: React.DragEvent, targetWId: string) => {
+    if (!draggedWidgetId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sourceWId = e.dataTransfer.getData("application/x-kraken-widget") || draggedWidgetId;
+    setDragOverWidgetId(null);
+    setDraggedWidgetId(null);
+    if (!sourceWId || sourceWId === targetWId) return;
+
+    const fromIndex = widgetOrder.indexOf(sourceWId);
+    const toIndex = widgetOrder.indexOf(targetWId);
+    if (fromIndex === -1 || toIndex === -1) return;
+
+    const newWidgetOrder = [...widgetOrder];
+    const [moved] = newWidgetOrder.splice(fromIndex, 1);
+    newWidgetOrder.splice(toIndex, 0, moved);
+    setWidgetOrder(newWidgetOrder);
+    saveLayout(order, visibility, collapsed, newWidgetOrder, widgetVisibility, widgetCollapsed);
+  };
+
+  const handleWidgetDragEnd = (e: React.DragEvent) => {
+    e.stopPropagation();
+    setDraggedWidgetId(null);
+    setDragOverWidgetId(null);
+  };
+
+  const pluginWidgetDefinitions: DashboardItemDefinition[] = useMemo(
+    () =>
+      dashboardWidgets.map((item) => ({
+        id: getWidgetKey(item),
+        title: item.ext.title,
+        description: `Plugin: ${item.plugin.name} (${item.plugin.plugin_id})`,
+        icon: <Puzzle className="h-4 w-4" />,
+      })),
+    [dashboardWidgets, getWidgetKey]
+  );
 
   // Drag and drop handlers
   const handleDragStart = (e: React.DragEvent, id: string) => {
@@ -497,52 +687,219 @@ export default function DashboardOverviewPage() {
       );
     }
 
+    const widgetMap = new Map(dashboardWidgets.map((item) => [getWidgetKey(item), item]));
+    const orderedKeys = [
+      ...widgetOrder.filter((k) => widgetMap.has(k)),
+      ...dashboardWidgets.map(getWidgetKey).filter((k) => !widgetOrder.includes(k)),
+    ];
+    const visibleWidgetKeys = orderedKeys.filter((k) => widgetVisibility[k] !== false);
+    const hiddenWidgetsCount = orderedKeys.length - visibleWidgetKeys.length;
+
     if (isCompact) {
       return (
         <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
           <div className="flex items-center gap-2 text-slate-300">
             <Puzzle className="h-4 w-4 text-sky-400" />
             <span>
-              <strong className="text-white">{dashboardWidgets.length}</strong> widget(s) de plugins ativos (
-              {dashboardWidgets.map((w) => w.ext.title).join(", ")})
+              <strong className="text-white">{visibleWidgetKeys.length}</strong> de {orderedKeys.length} widget(s) de
+              plugins visíveis (
+              {visibleWidgetKeys
+                .map((k) => widgetMap.get(k)?.ext.title)
+                .filter(Boolean)
+                .join(", ") || "Nenhum visível"}
+              )
             </span>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => handleToggleCollapse("plugin_widgets")}
-            className="text-xs text-sky-400 hover:text-sky-300 h-7"
-          >
-            Expandir
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCustomizeModalOpen(true)}
+              className="text-xs h-7 px-2"
+            >
+              Escolher / Reordenar
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => handleToggleCollapse("plugin_widgets")}
+              className="text-xs text-sky-400 hover:text-sky-300 h-7"
+            >
+              Expandir
+            </Button>
+          </div>
         </div>
       );
     }
 
     return (
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {dashboardWidgets.map((item) => (
-          <Card key={`${item.plugin.plugin_id}-${item.ext.id}`} className="border-slate-800 bg-slate-900/60 shadow-lg">
-            <CardHeader className="pb-3 border-b border-slate-800/60 flex flex-row items-center justify-between">
-              <div>
-                <CardTitle className="text-sm font-semibold text-white">{item.ext.title}</CardTitle>
-                <CardDescription className="text-[11px] text-slate-400">
-                  Plugin: {item.plugin.name}
-                </CardDescription>
-              </div>
-              <Badge variant="outline" className="text-[10px]">
-                Extensão
-              </Badge>
-            </CardHeader>
-            <CardContent className="pt-4">
-              <PluginSurfaceRenderer
-                pluginId={item.plugin.plugin_id}
-                surface="widget"
-                contextParams={{ widgetId: item.ext.id }}
-              />
-            </CardContent>
-          </Card>
-        ))}
+      <div className="space-y-3">
+        {/* Sub-toolbar for managing individual plugin widgets */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-900/50 border border-slate-800/70 text-xs">
+          <span className="text-slate-400">
+            Exibindo <strong className="text-slate-200">{visibleWidgetKeys.length}</strong> de{" "}
+            <strong className="text-slate-200">{orderedKeys.length}</strong> widget(s) de plugins
+            {hiddenWidgetsCount > 0 && (
+              <span className="ml-1.5 text-amber-400">
+                ({hiddenWidgetsCount} oculto{hiddenWidgetsCount > 1 ? "s" : ""})
+              </span>
+            )}
+          </span>
+          <div className="flex items-center gap-1.5">
+            {hiddenWidgetsCount > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleSetAllWidgetVisibility(true)}
+                className="text-[11px] h-7 px-2.5"
+              >
+                Exibir Todos os Widgets
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCustomizeModalOpen(true)}
+              className="text-[11px] h-7 px-2.5"
+            >
+              <SlidersHorizontal className="mr-1.5 h-3 w-3 text-sky-400" />
+              Escolher / Reordenar Widgets
+            </Button>
+          </div>
+        </div>
+
+        {visibleWidgetKeys.length === 0 ? (
+          <div className="p-6 rounded-xl border border-dashed border-slate-800 text-center space-y-3 bg-slate-950/30">
+            <p className="text-xs text-slate-400">
+              Todos os widgets de plugins foram ocultados individualmente.
+            </p>
+            <div className="flex items-center justify-center gap-2">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setCustomizeModalOpen(true)}
+                className="text-xs"
+              >
+                Escolher Widgets para Exibir
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleSetAllWidgetVisibility(true)}
+                className="text-xs"
+              >
+                Exibir Todos
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {visibleWidgetKeys.map((wKey, idx) => {
+              const item = widgetMap.get(wKey);
+              if (!item) return null;
+
+              const isWCompact = Boolean(widgetCollapsed[wKey]);
+              const isWDragging = draggedWidgetId === wKey;
+              const isWDragOver = dragOverWidgetId === wKey;
+              const orderIdx = orderedKeys.indexOf(wKey);
+
+              return (
+                <div
+                  key={wKey}
+                  draggable
+                  onDragStart={(e) => handleWidgetDragStart(e, wKey)}
+                  onDragOver={(e) => handleWidgetDragOver(e, wKey)}
+                  onDragLeave={handleWidgetDragLeave}
+                  onDrop={(e) => handleWidgetDrop(e, wKey)}
+                  onDragEnd={handleWidgetDragEnd}
+                  className={`transition-all duration-200 rounded-xl ${
+                    isWDragging
+                      ? "opacity-40 ring-2 ring-dashed ring-sky-500 scale-[0.99]"
+                      : isWDragOver
+                      ? "ring-2 ring-sky-500/70 scale-[1.005]"
+                      : ""
+                  }`}
+                >
+                  <Card className="border-slate-800 bg-slate-900/60 shadow-lg h-full">
+                    <CardHeader className="pb-3 border-b border-slate-800/60 flex flex-row items-center justify-between gap-2 select-none">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <button
+                          type="button"
+                          aria-label="Arrastar widget"
+                          className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 p-1 rounded hover:bg-slate-800/60 transition shrink-0"
+                          title="Arrastar para reordenar este widget"
+                        >
+                          <GripVertical className="h-4 w-4" />
+                        </button>
+                        <div className="min-w-0">
+                          <CardTitle className="text-sm font-semibold text-white truncate">
+                            {item.ext.title}
+                          </CardTitle>
+                          <CardDescription className="text-[11px] text-slate-400 truncate">
+                            Plugin: {item.plugin.name}
+                          </CardDescription>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleMoveWidget(wKey, "up")}
+                          disabled={orderIdx <= 0}
+                          title="Mover widget para trás / cima"
+                          className="h-7 w-7 p-0 text-slate-400 hover:text-white disabled:opacity-20"
+                        >
+                          <ArrowUp className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleMoveWidget(wKey, "down")}
+                          disabled={orderIdx === -1 || orderIdx >= orderedKeys.length - 1}
+                          title="Mover widget para frente / baixo"
+                          className="h-7 w-7 p-0 text-slate-400 hover:text-white disabled:opacity-20"
+                        >
+                          <ArrowDown className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggleWidgetCollapse(wKey)}
+                          title={isWCompact ? "Expandir widget" : "Compactar widget"}
+                          className="h-7 w-7 p-0 text-slate-400 hover:text-sky-400"
+                        >
+                          {isWCompact ? (
+                            <Maximize2 className="h-3.5 w-3.5" />
+                          ) : (
+                            <Minimize2 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggleWidgetVisibility(wKey)}
+                          title="Ocultar este widget de plugin"
+                          className="h-7 w-7 p-0 text-slate-400 hover:text-rose-400"
+                        >
+                          <EyeOff className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    {!isWCompact && (
+                      <CardContent className="pt-4">
+                        <PluginSurfaceRenderer
+                          pluginId={item.plugin.plugin_id}
+                          surface="widget"
+                          contextParams={{ widgetId: item.ext.id }}
+                        />
+                      </CardContent>
+                    )}
+                  </Card>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   };
@@ -908,7 +1265,11 @@ export default function DashboardOverviewPage() {
     }
   };
 
-  const hiddenCount = order.filter((id) => visibility[id] === false).length;
+  const hiddenBlocksCount = order.filter((id) => visibility[id] === false).length;
+  const hiddenWidgetsCount = dashboardWidgets.filter(
+    (item) => widgetVisibility[getWidgetKey(item)] === false
+  ).length;
+  const hiddenCount = hiddenBlocksCount + hiddenWidgetsCount;
   const visibleItems = order.filter((id) => visibility[id] !== false);
 
   return (
@@ -1124,6 +1485,14 @@ export default function DashboardOverviewPage() {
         onSetAllVisibility={handleSetAllVisibility}
         onSetAllCollapse={handleSetAllCollapse}
         onReset={handleResetLayout}
+        pluginWidgets={pluginWidgetDefinitions}
+        widgetOrder={widgetOrder}
+        widgetVisibility={widgetVisibility}
+        widgetCollapsed={widgetCollapsed}
+        onReorderWidgets={handleReorderWidgets}
+        onToggleWidgetVisibility={handleToggleWidgetVisibility}
+        onToggleWidgetCollapse={handleToggleWidgetCollapse}
+        onSetAllWidgetVisibility={handleSetAllWidgetVisibility}
       />
     </div>
   );

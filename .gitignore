@@ -6,11 +6,13 @@
 # Environment Variables & Secrets
 # ------------------------------------------
 .env
+.env.*
 .env*.local
-.env.development
-.env.test
-.env.production
+**/.env
+**/.env.*
+**/.env*.local
 !.env.example
+!**/.env.example
 
 # Private Keys, Certificates & Credentials
 *.pem

@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -22,18 +25,117 @@ type StoreService struct {
 	httpClient *http.Client
 }
 
+// ValidateExternalPluginURL ensures that plugin archive and catalog URLs use http/https
+// and do not target loopback, link-local, metadata, or private internal network hosts
+// unless ALLOW_PRIVATE_PLUGIN_URLS=true is explicitly set.
+func ValidateExternalPluginURL(rawURL string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil, errors.New("URL cannot be empty")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL format: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("unsupported URL scheme '%s': only http and https are allowed", parsed.Scheme)
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return nil, errors.New("URL must include a valid host")
+	}
+
+	allowPrivate := strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_PRIVATE_PLUGIN_URLS")), "true")
+	if !allowPrivate {
+		lowerHost := strings.ToLower(host)
+		if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") || strings.HasSuffix(lowerHost, ".internal") {
+			return nil, fmt.Errorf("blocked internal host '%s' in plugin URL", host)
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if isBlockedPluginTargetIP(ip) {
+				return nil, fmt.Errorf("blocked internal or reserved IP address '%s' in plugin URL", ip.String())
+			}
+		}
+	}
+
+	return parsed, nil
+}
+
+func isBlockedPluginTargetIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast()
+}
+
+func newSafePluginHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          20,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			allowPrivate := strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_PRIVATE_PLUGIN_URLS")), "true")
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IP addresses resolved for host %s", host)
+			}
+			for _, ipAddr := range ips {
+				if !allowPrivate && isBlockedPluginTargetIP(ipAddr.IP) {
+					return nil, fmt.Errorf("SSRF protection blocked connection to non-public IP %s for host %s", ipAddr.IP.String(), host)
+				}
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		},
+	}
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("stopped after 5 redirects")
+			}
+			_, err := ValidateExternalPluginURL(req.URL.String())
+			return err
+		},
+	}
+}
+
 func NewStoreService(db *gorm.DB) *StoreService {
 	return &StoreService{
-		db: db,
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		db:         db,
+		httpClient: newSafePluginHTTPClient(20 * time.Second),
 	}
 }
 
 // DownloadArchive fetches archive bytes from a direct URL and verifies size
 func (s *StoreService) DownloadArchive(ctx context.Context, downloadURL string) ([]byte, string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
+	parsedURL, err := ValidateExternalPluginURL(downloadURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid download URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid download URL: %w", err)
 	}
@@ -70,7 +172,12 @@ func (s *StoreService) SyncCatalog(ctx context.Context, sourceID uint) (*models.
 		return nil, errors.New("catalog source not found")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", src.URL, nil)
+	parsedURL, err := ValidateExternalPluginURL(src.URL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid catalog URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
