@@ -123,8 +123,19 @@ func ExtractTokenClaims(r *http.Request, secret string) *Claims {
 
 // GetUserFromContext retrieves authenticated user claims from context
 func GetUserFromContext(ctx context.Context) *Claims {
+	if ctx == nil {
+		return nil
+	}
 	if claims, ok := ctx.Value(UserContextKey).(*Claims); ok {
 		return claims
 	}
 	return nil
+}
+
+// WithUserContext returns a new context with user claims attached
+func WithUserContext(ctx context.Context, claims *Claims) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, UserContextKey, claims)
 }

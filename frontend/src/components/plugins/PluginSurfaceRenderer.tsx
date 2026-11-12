@@ -985,9 +985,10 @@ function ShadowHost({ html }: { html: string }) {
 
     const sanitized = DOMPurify.sanitize(html, {
       ADD_TAGS: ["style"],
+      ADD_ATTR: ["target", "rel", "data-copy", "data-copy-text", "data-url", "data-action"],
       FORCE_BODY: true,
       FORBID_TAGS: ["script", "iframe", "object", "embed", "form"],
-      FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus", "onblur"],
+      FORBID_ATTR: ["onerror", "onload", "onmouseover", "onfocus", "onblur"],
     });
 
     shadow.innerHTML = `
@@ -996,6 +997,69 @@ function ShadowHost({ html }: { html: string }) {
       </style>
       <div>${sanitized}</div>
     `;
+
+    const handleClick = (e: Event) => {
+      const mouseEvent = e as MouseEvent;
+      const path = e.composedPath ? e.composedPath() : [e.target];
+      let anchor: HTMLAnchorElement | null = null;
+      let copyEl: HTMLElement | null = null;
+
+      for (const el of path) {
+        if (el instanceof HTMLElement) {
+          if (!copyEl && (el.hasAttribute("data-copy-text") || el.hasAttribute("data-copy"))) {
+            copyEl = el;
+          }
+          if (!anchor && el.tagName.toLowerCase() === "a") {
+            anchor = el as HTMLAnchorElement;
+          }
+        }
+      }
+
+      if (copyEl) {
+        const textToCopy = copyEl.getAttribute("data-copy-text") || copyEl.getAttribute("data-copy");
+        if (textToCopy && typeof navigator !== "undefined" && navigator?.clipboard?.writeText) {
+          navigator.clipboard.writeText(textToCopy).catch(console.error);
+        }
+      }
+
+      if (anchor) {
+        const href = anchor.getAttribute("href");
+        const copyText = anchor.getAttribute("data-copy-text") || anchor.getAttribute("data-copy");
+        if (copyText && typeof navigator !== "undefined" && navigator?.clipboard?.writeText) {
+          navigator.clipboard.writeText(copyText).catch(console.error);
+        }
+
+        const isExternal = href && (href.startsWith("http://") || href.startsWith("https://") || anchor.target === "_blank");
+        if (isExternal && href) {
+          mouseEvent.preventDefault();
+          mouseEvent.stopPropagation();
+
+          // Try opening in a centered popup window ("pequena janela") first
+          const width = 600;
+          const height = 750;
+          const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
+          const top = window.screenY + Math.max(0, (window.outerHeight - height) / 2);
+          const popupFeatures = `width=${width},height=${height},top=${top},left=${left},toolbar=no,menubar=no,scrollbars=yes,resizable=yes,location=yes,status=yes`;
+
+          let popup: Window | null = null;
+          try {
+            popup = window.open(href, "KrakenExternalAuthPopup", popupFeatures);
+          } catch (_) {}
+
+          if (!popup || popup.closed || typeof popup.closed === "undefined") {
+            // Popup blocked by browser policy: open in new tab
+            window.open(href, "_blank", "noopener,noreferrer");
+          } else {
+            popup.focus();
+          }
+        }
+      }
+    };
+
+    shadow.addEventListener("click", handleClick as EventListener);
+    return () => {
+      shadow?.removeEventListener("click", handleClick as EventListener);
+    };
   }, [html]);
 
   return <div ref={containerRef} className="w-full overflow-hidden" />;

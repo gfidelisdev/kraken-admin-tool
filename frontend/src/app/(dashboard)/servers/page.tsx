@@ -574,6 +574,9 @@ export default function ServersPage() {
       case "local-socket":
         setConnectionType("local");
         setLocalSocketPath("/var/run/docker.sock");
+        setSshUser("");
+        setSshPassword("");
+        setSudoPassword("");
         setTlsVerify(false);
         setShowCertFields(false);
         setIsManualUrl(false);
@@ -615,7 +618,12 @@ export default function ServersPage() {
 
   const handleTestConnection = async () => {
     const finalUrl = computedUrl;
-    if (connectionType !== "local" && !serverHost.trim() && !hostUrl.trim()) {
+    if (connectionType === "local" || finalUrl.startsWith("unix://")) {
+      if (!sshUser.trim() || !(sshPassword || sudoPassword).trim()) {
+        setFormError("Informe o usuário e senha do sistema operacional hospedeiro para autorizar o teste do host local.");
+        return;
+      }
+    } else if (!serverHost.trim() && !hostUrl.trim()) {
       setFormError("Informe o nome do servidor ou endereço IP para testar a conexão");
       return;
     }
@@ -666,6 +674,12 @@ export default function ServersPage() {
                   ? secretReference.trim() || undefined
                   : undefined,
             }
+          : connectionType === "local" || finalUrl.startsWith("unix://")
+          ? {
+              ssh_user: sshUser.trim() || undefined,
+              ssh_password: (sshPassword || sudoPassword).trim() || undefined,
+              sudo_password: (sudoPassword || sshPassword).trim() || undefined,
+            }
           : {}),
       };
 
@@ -713,6 +727,13 @@ export default function ServersPage() {
     if (!finalUrl.trim()) {
       setFormError("Endereço IP ou hostname do servidor é obrigatório");
       return;
+    }
+
+    if (connectionType === "local" || finalUrl.startsWith("unix://")) {
+      if (!sshUser.trim() || !(sshPassword || sudoPassword).trim()) {
+        setFormError("Informe o usuário e senha do sistema operacional hospedeiro para autorizar o host local.");
+        return;
+      }
     }
 
     setIsSaving(true);
@@ -767,6 +788,12 @@ export default function ServersPage() {
                 credentialSource === "plugin"
                   ? secretReference.trim() || undefined
                   : undefined,
+            }
+          : connectionType === "local" || finalUrl.startsWith("unix://")
+          ? {
+              ssh_user: sshUser.trim() || undefined,
+              ssh_password: (sshPassword || sudoPassword).trim() || undefined,
+              sudo_password: (sudoPassword || sshPassword).trim() || undefined,
             }
           : {}),
       };
@@ -1332,8 +1359,7 @@ export default function ServersPage() {
       </div>
 
       {/* Servers Table */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden shadow-sm">
-        <Table aria-label="Tabela de servidores Docker e hosts">
+      <Table aria-label="Tabela de servidores Docker e hosts">
           <TableHeader>
             <TableRow>
               <SortableTableHead
@@ -1415,8 +1441,11 @@ export default function ServersPage() {
                       </div>
                     </TableCell>
 
-                    <TableCell>
-                      <span className="font-mono text-xs text-slate-300 select-all">
+                    <TableCell className="max-w-[220px]">
+                      <span
+                        className="font-mono text-xs text-slate-300 truncate block select-all"
+                        title={server.host_url}
+                      >
                         {server.host_url}
                       </span>
                     </TableCell>
@@ -1561,7 +1590,7 @@ export default function ServersPage() {
                       </div>
                     </TableCell>
 
-                    <TableCell className="text-right">
+                    <TableCell className="text-right whitespace-nowrap">
                       <div className="flex items-center justify-end space-x-1.5">
                         <Button
                           variant={activeJobsMap[server.id] ? "default" : "outline"}
@@ -1667,7 +1696,6 @@ export default function ServersPage() {
             )}
           </TableBody>
         </Table>
-      </div>
 
       {/* Add / Edit Docker Server Modal */}
       <Modal
@@ -2130,22 +2158,72 @@ export default function ServersPage() {
             </div>
           )}
 
-          {/* Local Socket Field */}
+          {/* Local Socket Field & Mandatory Host Authentication */}
           {connectionType === "local" && (
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
-              <label className="text-xs font-medium text-slate-300">Caminho do Socket Unix</label>
-              <Input
-                placeholder="/var/run/docker.sock"
-                value={localSocketPath}
-                onChange={(e) => {
-                  setLocalSocketPath(e.target.value);
-                  setTestResult(null);
-                }}
-                required
-              />
-              <p className="text-[11px] text-slate-500 font-mono">
-                Padrão Linux: /var/run/docker.sock
-              </p>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+              <div>
+                <label className="text-xs font-medium text-slate-300">Caminho do Socket Unix</label>
+                <Input
+                  placeholder="/var/run/docker.sock"
+                  value={localSocketPath}
+                  onChange={(e) => {
+                    setLocalSocketPath(e.target.value);
+                    setTestResult(null);
+                  }}
+                  required
+                />
+                <p className="text-[11px] text-slate-500 font-mono mt-1">
+                  Padrão Linux: /var/run/docker.sock
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-800/80 space-y-2.5">
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-300 flex items-start gap-2">
+                  <ShieldCheck className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                  <div>
+                    <div className="font-semibold text-slate-200">Autenticação Obrigatória do Hospedeiro</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Para autorizar e gerenciar o host local, confirme sua identidade informando usuário e senha válidos do sistema operacional deste computador.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="text-[11px] font-medium text-slate-400 block mb-1">
+                      Usuário do Sistema (Host) <span className="text-rose-400">*</span>
+                    </label>
+                    <Input
+                      placeholder="ex: seu_usuario (com acesso sudo)"
+                      value={sshUser}
+                      onChange={(e) => {
+                        setSshUser(e.target.value);
+                        setTestResult(null);
+                      }}
+                      required
+                    />
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      Informe sua conta pessoal com sudo (a conta root costuma ser desativada sem senha direta).
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-medium text-slate-400 block mb-1">
+                      Senha do Usuário / Sudo <span className="text-rose-400">*</span>
+                    </label>
+                    <Input
+                      type="password"
+                      placeholder="Senha do sistema operacional"
+                      value={sshPassword || sudoPassword}
+                      onChange={(e) => {
+                        setSshPassword(e.target.value);
+                        setSudoPassword(e.target.value);
+                        setTestResult(null);
+                      }}
+                      required
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2340,9 +2418,9 @@ export default function ServersPage() {
                 <div className="rounded-lg border border-sky-500/20 bg-sky-500/10 p-3 text-xs text-sky-300 flex items-start gap-2">
                   <ShieldCheck className="h-4 w-4 shrink-0 text-sky-400 mt-0.5" />
                   <div>
-                    <div className="font-semibold text-slate-200">Acesso Administrativo Direto (Host Root)</div>
+                    <div className="font-semibold text-slate-200">Autenticação do Hospedeiro Vinculada</div>
                     <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                      Este servidor local utiliza integração direta via namespace do host (<code className="text-sky-300">nsenter</code>). As operações de verificação e atualização de pacotes são executadas nativamente com privilégios de root, sem necessidade de senha de sudo.
+                      As credenciais autenticadas acima serão armazenadas de forma criptografada para autorizar operações de pacotes e tarefas administrativas no hospedeiro.
                     </div>
                   </div>
                 </div>

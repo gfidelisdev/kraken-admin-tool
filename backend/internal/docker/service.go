@@ -787,6 +787,15 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 		credSource = models.CredentialSourceLocal
 	}
 
+	sudoPass := strings.TrimSpace(req.SudoPassword)
+	if sudoPass == "" && req.SSHPassword != "" {
+		sudoPass = strings.TrimSpace(req.SSHPassword)
+	}
+	sshPass := strings.TrimSpace(req.SSHPassword)
+	if sshPass == "" && req.SudoPassword != "" {
+		sshPass = strings.TrimSpace(req.SudoPassword)
+	}
+
 	// Test connection
 	status := "CONNECTED"
 	errMsg := ""
@@ -799,9 +808,10 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 		TLSKey:             req.TLSKey,
 		SSHUser:            sshUser,
 		SSHAuthMethod:      sshAuthMethod,
-		SSHPassword:        req.SSHPassword,
+		SSHPassword:        sshPass,
 		SSHPrivateKey:      req.SSHPrivateKey,
 		SSHKeyPassphrase:   req.SSHKeyPassphrase,
+		SudoPassword:       sudoPass,
 		CredentialSource:   credSource,
 		CredentialPluginID: strings.TrimSpace(req.CredentialPluginID),
 		SecretReference:    strings.TrimSpace(req.SecretReference),
@@ -809,6 +819,9 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 		VaultConfig:        strings.TrimSpace(req.VaultConfig),
 	})
 	if testErr != nil {
+		if IsLocalHost(hostURL) {
+			return nil, fmt.Errorf("falha ao autorizar host local: %w", testErr)
+		}
 		status = "UNREACHABLE"
 		errMsg = testErr.Error()
 	} else {
@@ -829,7 +842,7 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 	var encTLSKey, encSSHPassword, encSSHPrivateKey, encSSHKeyPassphrase string
 	if credPolicy == "save_securely" {
 		encTLSKey, _ = krakencrypto.Encrypt(req.TLSKey)
-		encSSHPassword, _ = krakencrypto.Encrypt(req.SSHPassword)
+		encSSHPassword, _ = krakencrypto.Encrypt(sshPass)
 		encSSHPrivateKey, _ = krakencrypto.Encrypt(req.SSHPrivateKey)
 		encSSHKeyPassphrase, _ = krakencrypto.Encrypt(req.SSHKeyPassphrase)
 	}
@@ -837,11 +850,11 @@ func (s *DockerService) CreateServer(ctx context.Context, req models.CreateServe
 	// Sudo Policy: "save_securely" or "always_prompt"
 	sudoPolicy := strings.ToLower(strings.TrimSpace(req.SudoPolicy))
 	var encSudoPassword string
-	if sudoPolicy == "save_securely" && req.SudoPassword != "" {
-		encSudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
-	} else if sudoPolicy != "always_prompt" && req.SudoPassword != "" {
+	if sudoPolicy == "save_securely" && sudoPass != "" {
+		encSudoPassword, _ = krakencrypto.Encrypt(sudoPass)
+	} else if sudoPolicy != "always_prompt" && sudoPass != "" {
 		sudoPolicy = "save_securely"
-		encSudoPassword, _ = krakencrypto.Encrypt(req.SudoPassword)
+		encSudoPassword, _ = krakencrypto.Encrypt(sudoPass)
 	}
 
 	server := models.DockerServer{

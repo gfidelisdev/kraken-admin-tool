@@ -193,6 +193,7 @@ export interface TestServerPayload {
   ssh_password?: string;
   ssh_private_key?: string;
   ssh_key_passphrase?: string;
+  sudo_password?: string;
   credential_source?: "local" | "plugin" | "vault" | string;
   credential_plugin_id?: string;
   secret_reference?: string;

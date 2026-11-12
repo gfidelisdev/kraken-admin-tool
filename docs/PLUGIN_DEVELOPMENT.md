@@ -132,6 +132,7 @@ O arquivo `plugin.json` na raiz define a identidade, pontos de extensão e permi
 | `http:outbound` | Permite chamadas HTTP externas para os domínios em `allowed_hosts` |
 | `credentials:resolve` | Resolve segredos e credenciais de logon para servidores (Key Vault) |
 | `credentials:manage` | Cria, lista e vincula segredos em cofres externos (Key Vault) |
+| `network:ldap` | Autoriza integração de diretório e autenticação LDAP / Active Directory (com permissões internas granulares: `ad:authenticate`, `ad:read`, `ad:create-collaborator`, `ad:session:close`, etc.) |
 
 ---
 
@@ -314,6 +315,64 @@ func main() {
 ```bash
 GOOS=wasip1 GOARCH=wasm go build -o backend/plugin.wasm backend/main.go
 ```
+
+---
+
+### 5.3 Desenvolvendo Plugins com Backend Container (Sidecar) e Contrato Criptográfico
+
+Para plugins que exigem Python, Node.js, binários de sistema ou serviços persistentes de longa duração (como conexões LDAP/AD), o Kraken suporta o runtime `"type": "container"`.
+
+#### 1. Auto-Build a partir de Dockerfile
+Não é necessário compilar antecipadamente ou enviar imagens para registries externos. Basta incluir um `Dockerfile` na raiz do plugin ou em `backend/Dockerfile`. O Kraken Admin Tool constrói e tagueia a imagem localmente de forma automática durante a instalação.
+
+#### 2. Contrato Criptográfico Seguro Kraken ↔ Sidecar
+A comunicação entre o Kraken e o container sidecar é estritamente autenticada, assinada e protegida contra repetição, substituindo qualquer confiança em cabeçalhos de texto plano (como os obsoletos `X-Kraken-User` e `X-Kraken-Role`, que são rejeitados se desacompanhados de assinatura válida):
+
+- **Cabeçalhos Obrigatórios em Toda Requisição**:
+  - `X-Kraken-Plugin-ID`: Identificador do plugin alvo (ex: `com.mpt.ad-collaborator`).
+  - `X-Kraken-Installation-ID`: Identificador único da instalação (UUID v4).
+  - `X-Kraken-Request-ID`: Identificador único da requisição (UUID v4).
+  - `X-Kraken-Timestamp`: Timestamp UTC ISO 8601 (janela máxima de skew permitida: **30 segundos**).
+  - `X-Kraken-Nonce`: Nonce aleatório de 16 bytes em `base64url`.
+  - `X-Kraken-User-Context`: JWT interno de curta duração assinado com HS256, com expiração máxima de **30 segundos**.
+  - `X-Kraken-Content-SHA256`: `BASE64URL(SHA256(request_body_bytes))`.
+  - `X-Kraken-Signature`: Assinatura HMAC-SHA256 no formato `v1=<base64url>`.
+  - `Content-Type`: `application/json`.
+
+- **Requisição Canônica (`KRKN1`)**:
+  ```text
+  KRKN1
+  POST
+  /call
+  plugin_id=<plugin_id>
+  installation_id=<installation_id>
+  request_id=<request_id>
+  timestamp=<timestamp>
+  nonce=<nonce>
+  content_sha256=<content_sha256>
+  context_sha256=<context_sha256>
+  ```
+
+- **JWT de Contexto (`X-Kraken-User-Context`)**:
+  Contém as claims autenticadas da operação:
+  - `aud`: `plugin:<plugin_id>`
+  - `installation_id`: correspondente à instância instalada
+  - `kraken_session_id`: `base64url(SHA256(pepper + session_id))` garantindo vínculo estrito com a sessão ativa do operador sem expor o token principal
+  - `roles` e `permissions`: lista de permissões específicas mapeadas para a ação
+
+- **Segredo Exclusivo da Instalação (`KRAKEN_PLUGIN_INSTANCE_SECRET`)**:
+  - Gerado com 32 bytes criptograficamente aleatórios no backend do Kraken.
+  - Injetado no container via variável de ambiente ou arquivo de secret.
+  - **Rotação Suave**: Ao rotacionar o segredo, a chave anterior permanece aceita por uma janela de carência de **60 segundos**.
+
+- **Proteção Anti-Replay**:
+  - O sidecar deve manter cache de `installation_id + request_id + nonce` por **60 segundos**.
+  - Qualquer repetição dentro do intervalo é sumariamente rejeitada com **HTTP 409 Conflict** (`REPLAY_DETECTED`).
+
+- **Callbacks de Ciclo de Vida (`POST /v1/internal/session-events`)**:
+  - `kraken.session.ended`: Encerra e invalida sessões ativas downstream (ex: unbind de sessões LDAP vinculadas).
+  - `kraken.user.disabled`: Invalida qualquer sessão associada ao usuário desativado.
+  - `plugin.installation.revoked`: Limpa dados temporários e finaliza o sidecar.
 
 ---
 

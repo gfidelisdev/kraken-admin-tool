@@ -17,6 +17,7 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"gorm.io/gorm"
 
+	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/models"
 )
 
@@ -83,8 +84,20 @@ func NewWasmRuntimeManager(ctx context.Context) *WasmRuntimeManager {
 			var kv models.PluginKVStore
 			q := bridge.DB.Where("plugin_id = ? AND key = ? AND user_id = ?", bridge.PluginID, string(keyBytes), bridge.UserID)
 			if err := q.First(&kv).Error; err != nil {
+				// Fallback: if not found under specific user_id, check user_id = 0 (global)
+				if bridge.UserID > 0 {
+					if errGlobal := bridge.DB.Where("plugin_id = ? AND key = ? AND user_id = 0", bridge.PluginID, string(keyBytes)).First(&kv).Error; errGlobal == nil {
+						goto writeVal
+					}
+				} else {
+					// If bridge.UserID == 0, search for any configured user instance of this key
+					if errUser := bridge.DB.Where("plugin_id = ? AND key = ?", bridge.PluginID, string(keyBytes)).Order("user_id asc").First(&kv).Error; errUser == nil {
+						goto writeVal
+					}
+				}
 				return 0
 			}
+writeVal:
 			valBytes := []byte(kv.Value)
 			if uint32(len(valBytes)) > maxOutLen {
 				valBytes = valBytes[:maxOutLen]
@@ -151,7 +164,14 @@ func NewWasmRuntimeManager(ctx context.Context) *WasmRuntimeManager {
 			}
 			scope := string(sBytes)
 
-			token, account, err := bridge.GetMicrosoftToken(ctx, scope)
+			callCtx := ctx
+			if auth.GetUserFromContext(callCtx) == nil && bridge.UserID > 0 {
+				callCtx = auth.WithUserContext(callCtx, &auth.Claims{
+					UserID: bridge.UserID,
+				})
+			}
+
+			token, account, err := bridge.GetMicrosoftToken(callCtx, scope)
 			if err != nil || token == "" {
 				return 0
 			}

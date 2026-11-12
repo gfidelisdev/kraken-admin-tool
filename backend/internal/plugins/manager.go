@@ -19,6 +19,7 @@ import (
 	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/docker"
 	"github.com/kraken/admin-tool/backend/internal/models"
+	"github.com/kraken/admin-tool/backend/internal/plugins/sidecarauth"
 )
 
 type Manager struct {
@@ -341,6 +342,8 @@ func (m *Manager) InstallFromArchive(
 			fmt.Sprintf("Updated plugin '%s' v%s (Runtime: %s)", manifest.Name, manifest.Version, manifest.Runtime.Type), "SUCCESS")
 	} else {
 		// Create new record
+		instID := sidecarauth.GenerateInstallationID()
+		instSecret, _ := sidecarauth.GenerateInstanceSecret()
 		plugin = models.InstalledPlugin{
 			PluginID:           manifest.ID,
 			Name:               manifest.Name,
@@ -358,6 +361,8 @@ func (m *Manager) InstallFromArchive(
 			SignerKeyID:        insp.SignerKeyID,
 			SourceURL:          sourceURL,
 			InstallPath:        targetDir,
+			InstallationID:     instID,
+			InstanceSecret:     instSecret,
 			InstalledBy:        installedBy,
 			CreatedAt:          now,
 			UpdatedAt:          now,
@@ -551,6 +556,8 @@ func (m *Manager) InstallFromDirectory(
 		audit.Log(m.db, userID, installedBy, "PLUGIN_UPDATE", "plugin", manifest.ID,
 			fmt.Sprintf("Updated plugin '%s' v%s from directory '%s'", manifest.Name, manifest.Version, cleanSrc), "SUCCESS")
 	} else {
+		instID := sidecarauth.GenerateInstallationID()
+		instSecret, _ := sidecarauth.GenerateInstanceSecret()
 		plugin = models.InstalledPlugin{
 			PluginID:           manifest.ID,
 			Name:               manifest.Name,
@@ -568,6 +575,8 @@ func (m *Manager) InstallFromDirectory(
 			SignerKeyID:        insp.SignerKeyID,
 			SourceURL:          "file://" + cleanSrc,
 			InstallPath:        targetDir,
+			InstallationID:     instID,
+			InstanceSecret:     instSecret,
 			InstalledBy:        installedBy,
 			CreatedAt:          now,
 			UpdatedAt:          now,
@@ -754,7 +763,12 @@ func (m *Manager) DeletePlugin(ctx context.Context, pluginID string, username st
 	}
 
 	if p.RuntimeType == "container" {
-		_ = m.container.StopContainer(ctx, &p)
+		var manifest models.PluginManifest
+		if err := json.Unmarshal([]byte(p.ManifestJSON), &manifest); err == nil {
+			_ = m.container.NotifyPluginRevoked(ctx, &p, &manifest)
+		} else {
+			_ = m.container.StopContainer(ctx, &p)
+		}
 	}
 
 	// Remove files
@@ -795,6 +809,13 @@ func (m *Manager) CallPlugin(
 		if claims := auth.GetUserFromContext(ctx); claims != nil {
 			userID = claims.UserID
 		}
+	}
+	if auth.GetUserFromContext(ctx) == nil && userID > 0 {
+		ctx = auth.WithUserContext(ctx, &auth.Claims{
+			UserID:   userID,
+			Username: username,
+			Role:     userRole,
+		})
 	}
 
 	m.mu.RLock()
@@ -837,6 +858,12 @@ func (m *Manager) CallPlugin(
 	}
 	if (action == models.PluginActionVaultListSecrets || action == models.PluginActionVaultPutSecret || action == models.PluginActionVaultTestConnection) && !permMap["credentials:manage"] {
 		return nil, errors.New("plugin lacks mandatory permission 'credentials:manage'")
+	}
+
+	// Security Check: LDAP & Active Directory network permissions
+	isLDAPAction := strings.HasPrefix(action, "ldap.") || strings.HasPrefix(action, "ad.") || action == "collaborators.create" || strings.HasPrefix(action, "network.ldap")
+	if isLDAPAction && !permMap["network:ldap"] {
+		return nil, fmt.Errorf("plugin '%s' lacks mandatory permission 'network:ldap'", pluginID)
 	}
 
 	// 1. Built-in action handling for plugins with KV storage (must precede WASM/container delegation)
@@ -941,7 +968,23 @@ func (m *Manager) CallPlugin(
 
 	// 3. Container Runtime
 	if manifest.Runtime.Type == "container" {
-		return m.container.ExecuteCall(ctx, &p, &manifest, action, payload, username, userRole)
+		if p.InstallationID == "" || p.InstanceSecret == "" {
+			if p.InstallationID == "" {
+				p.InstallationID = sidecarauth.GenerateInstallationID()
+			}
+			if p.InstanceSecret == "" {
+				p.InstanceSecret, _ = sidecarauth.GenerateInstanceSecret()
+			}
+			m.db.Model(&models.InstalledPlugin{}).Where("id = ?", p.ID).Updates(map[string]interface{}{
+				"installation_id": p.InstallationID,
+				"instance_secret": p.InstanceSecret,
+			})
+		}
+		var sessionID string
+		if claims := auth.GetUserFromContext(ctx); claims != nil {
+			sessionID = claims.ID
+		}
+		return m.container.ExecuteCall(ctx, &p, &manifest, action, payload, username, userRole, userID, sessionID, grantedPerms)
 	}
 
 	// 4. Built-in action handling for generic host primitives
@@ -1356,7 +1399,16 @@ func (m *Manager) ResolveCredentials(ctx context.Context, req models.ResolveSecr
 		}
 	}
 
-	res, err := m.CallPlugin(ctx, req.CredentialPluginID, models.PluginActionVaultResolveSecret, req, "system", "admin", userID)
+	callCtx := ctx
+	if auth.GetUserFromContext(callCtx) == nil && userID > 0 {
+		callCtx = auth.WithUserContext(callCtx, &auth.Claims{
+			UserID:   userID,
+			Username: "system",
+			Role:     "admin",
+		})
+	}
+
+	res, err := m.CallPlugin(callCtx, req.CredentialPluginID, models.PluginActionVaultResolveSecret, req, "system", "admin", userID)
 	if err != nil {
 		return nil, fmt.Errorf("plugin '%s' failed to resolve secret: %w", req.CredentialPluginID, err)
 	}
@@ -1766,5 +1818,73 @@ func (m *Manager) executeKVVaultPut(pluginID string, payload interface{}, userID
 		Enabled:     true,
 		UpdatedAt:   time.Now().Format(time.RFC3339),
 	}, nil
+}
+
+// RotatePluginSecret generates a new instance secret for a container plugin, preserving previous secret for 60s
+func (m *Manager) RotatePluginSecret(ctx context.Context, pluginID string) (*models.InstalledPlugin, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var p models.InstalledPlugin
+	if err := m.db.Where("plugin_id = ?", pluginID).First(&p).Error; err != nil {
+		return nil, errors.New("plugin not found")
+	}
+
+	newSec, prevSec, rotAt, err := sidecarauth.RotateSecret(p.InstanceSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	p.InstanceSecret = newSec
+	p.PreviousSecret = prevSec
+	p.SecretRotatedAt = &rotAt
+	p.UpdatedAt = rotAt
+
+	if err := m.db.Model(&p).Updates(map[string]interface{}{
+		"instance_secret":   p.InstanceSecret,
+		"previous_secret":   p.PreviousSecret,
+		"secret_rotated_at": p.SecretRotatedAt,
+		"updated_at":        p.UpdatedAt,
+	}).Error; err != nil {
+		return nil, fmt.Errorf("failed to persist rotated secret: %w", err)
+	}
+
+	return &p, nil
+}
+
+// NotifySessionEnded notifies all container plugins that a user's session has ended
+func (m *Manager) NotifySessionEnded(ctx context.Context, rawSessionID string) {
+	if rawSessionID == "" {
+		return
+	}
+	var plugins []models.InstalledPlugin
+	if err := m.db.Where("runtime_type = ? AND status = ?", "container", "enabled").Find(&plugins).Error; err != nil {
+		return
+	}
+
+	for _, p := range plugins {
+		var manifest models.PluginManifest
+		if err := json.Unmarshal([]byte(p.ManifestJSON), &manifest); err == nil {
+			_ = m.container.NotifySessionEnded(ctx, &p, &manifest, rawSessionID)
+		}
+	}
+}
+
+// NotifyUserDisabled notifies all container plugins that a user has been disabled
+func (m *Manager) NotifyUserDisabled(ctx context.Context, userID uint) {
+	if userID == 0 {
+		return
+	}
+	var plugins []models.InstalledPlugin
+	if err := m.db.Where("runtime_type = ? AND status = ?", "container", "enabled").Find(&plugins).Error; err != nil {
+		return
+	}
+
+	for _, p := range plugins {
+		var manifest models.PluginManifest
+		if err := json.Unmarshal([]byte(p.ManifestJSON), &manifest); err == nil {
+			_ = m.container.NotifyUserDisabled(ctx, &p, &manifest, userID)
+		}
+	}
 }
 

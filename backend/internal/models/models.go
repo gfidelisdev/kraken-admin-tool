@@ -328,6 +328,7 @@ type TestServerRequest struct {
 	SSHPassword        string `json:"ssh_password"`
 	SSHPrivateKey      string `json:"ssh_private_key"`
 	SSHKeyPassphrase   string `json:"ssh_key_passphrase"`
+	SudoPassword       string `json:"sudo_password,omitempty"`
 	CredentialSource   string `json:"credential_source,omitempty"`
 	CredentialPluginID string `json:"credential_plugin_id,omitempty"`
 	SecretReference    string `json:"secret_reference,omitempty"`
@@ -650,8 +651,12 @@ type InstalledPlugin struct {
 	SignerKeyID        string    `gorm:"size:128" json:"signer_key_id,omitempty"`
 	SourceURL          string    `gorm:"type:text" json:"source_url,omitempty"`
 	InstallPath        string    `gorm:"type:text" json:"install_path"`
-	ContainerID        string    `gorm:"size:128" json:"container_id,omitempty"`
-	InstalledBy        string    `gorm:"size:64" json:"installed_by,omitempty"`
+	ContainerID        string     `gorm:"size:128" json:"container_id,omitempty"`
+	InstallationID     string     `gorm:"size:64;index" json:"installation_id,omitempty"`
+	InstanceSecret     string     `gorm:"type:text" json:"-"` // Never expose in JSON responses / Web Workers
+	PreviousSecret     string     `gorm:"type:text" json:"-"` // Used for graceful secret rotation window
+	SecretRotatedAt    *time.Time `json:"-"`
+	InstalledBy        string     `gorm:"size:64" json:"installed_by,omitempty"`
 	IconURL            string    `gorm:"-" json:"icon_url,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`

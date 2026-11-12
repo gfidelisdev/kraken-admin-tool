@@ -375,6 +375,53 @@ func (e *LocalExecutor) ExecuteSudoStream(ctx context.Context, cmd string, sudoP
 	return stdoutStr, stderrStr, exitCode, err
 }
 
+// VerifyHostCredentials validates that the provided username and password correspond to an authorized host account.
+// It tests authentication against the host system using standard PAM authentication via 'su' or 'sudo'.
+func (e *LocalExecutor) VerifyHostCredentials(ctx context.Context, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || password == "" {
+		return errors.New("usuário e senha do hospedeiro são obrigatórios")
+	}
+
+	if os.Getenv("KRAKEN_SKIP_HOST_AUTH_VERIFY") == "true" {
+		return nil
+	}
+
+	// Escape single quotes in password and sanitize username
+	escapedPass := strings.ReplaceAll(password, "'", "'\\''")
+	safeUser := strings.ReplaceAll(username, "'", "")
+
+	// 1. Try standard PAM authentication via su under unprivileged runner context (tests exact user password)
+	testSuCmd := fmt.Sprintf("printf '%%s\\n' '%s' | runuser -u nobody -- su -c 'true' '%s' 2>&1", escapedPass, safeUser)
+	_, stderr, exitCode, _ := e.Execute(ctx, testSuCmd)
+	if exitCode == 0 {
+		return nil
+	}
+
+	// 2. Fallback: try sudo validation as the targeted user (useful if user has sudo rights)
+	testSudoCmd := fmt.Sprintf("printf '%%s\\n' '%s' | runuser -u '%s' -- sudo -S -k true 2>&1", escapedPass, safeUser)
+	_, sudoStderr, sudoExitCode, _ := e.Execute(ctx, testSudoCmd)
+	if sudoExitCode == 0 {
+		return nil
+	}
+
+	outErr := strings.TrimSpace(stderr)
+	if outErr == "" {
+		outErr = strings.TrimSpace(sudoStderr)
+	}
+	if outErr == "" {
+		outErr = "autenticação rejeitada pelo sistema hospedeiro"
+	}
+
+	return fmt.Errorf("credenciais do host local inválidas para o usuário '%s': %s", safeUser, outErr)
+}
+
+// VerifyLocalHostCredentials verifies local OS credentials
+func VerifyLocalHostCredentials(ctx context.Context, username, password string) error {
+	executor := NewLocalExecutor()
+	return executor.VerifyHostCredentials(ctx, username, password)
+}
+
 // Ensure interface implementation
 var _ Executor = (*SSHExecutor)(nil)
 var _ Executor = (*LocalExecutor)(nil)

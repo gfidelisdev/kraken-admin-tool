@@ -43,6 +43,14 @@ func TestLoadCustomEnv(t *testing.T) {
 	if len(cfg.CorsOrigins) != 2 || cfg.CorsOrigins[0] != "http://localhost:3000" {
 		t.Errorf("expected CORS origins parsed, got %v", cfg.CorsOrigins)
 	}
+
+	// Test BACKEND_PORT takes precedence over PORT
+	os.Setenv("BACKEND_PORT", "9191")
+	defer os.Unsetenv("BACKEND_PORT")
+	cfgBackend := Load()
+	if cfgBackend.Port != "9191" {
+		t.Errorf("expected port 9191 from BACKEND_PORT, got %s", cfgBackend.Port)
+	}
 }
 
 func TestPostgresDSN(t *testing.T) {

@@ -871,13 +871,29 @@ func (h *Handler) UpgradePackagesStreamHandler(w http.ResponseWriter, r *http.Re
 				})
 			}
 
+			callerClaims := claims
 			execResolver := func(ctx context.Context) (Executor, error) {
 				cleanHost := strings.TrimSpace(server.HostURL)
 				if docker.IsSSHHost(cleanHost) {
 					if h.DockerService == nil {
 						return nil, errors.New("docker service is nil")
 					}
-					client, _, err := h.DockerService.GetSSHClient(ctx, server.ID, overrides...)
+					resolveCtx := ctx
+					if auth.GetUserFromContext(resolveCtx) == nil {
+						if callerClaims != nil {
+							resolveCtx = auth.WithUserContext(ctx, callerClaims)
+						} else if userID > 0 {
+							resolveCtx = auth.WithUserContext(ctx, &auth.Claims{
+								UserID:   userID,
+								Username: username,
+							})
+						} else if server.UserID > 0 {
+							resolveCtx = auth.WithUserContext(ctx, &auth.Claims{
+								UserID: server.UserID,
+							})
+						}
+					}
+					client, _, err := h.DockerService.GetSSHClient(resolveCtx, server.ID, overrides...)
 					if err != nil {
 						return nil, err
 					}

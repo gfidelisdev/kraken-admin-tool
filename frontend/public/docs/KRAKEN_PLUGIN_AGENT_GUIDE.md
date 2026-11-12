@@ -19,9 +19,9 @@ Plugins in Kraken Admin Tool run inside a strictly isolated, multi-tier sandbox:
 2. **Backend Execution Options**:
    - **No Backend (`"runtime": { "type": "none" }`)**: Recommended for UI-only plugins, dashboards, widgets, monitoring viewers, and direct API integrations. Requires **zero compilation** and **no Go code**.
    - **WASM Sandbox (`"runtime": { "type": "wasm" }`)**: Embedded WebAssembly runtime powered by pure-Go `wazero`. Reads JSON request from `os.Stdin` and writes JSON response to `os.Stdout`. Quota: 64 MB memory, 15s execution timeout.
-   - **Container Sidecar (`"runtime": { "type": "container" }`)**: Runs as a managed Docker container sidecar for long-running services, Python/Node/Go servers, or microservices.
+   - **Container Sidecar (`"runtime": { "type": "container" }`)**: Runs as a managed Docker container sidecar for long-running services, Python/Node/Go microservices, or complex backend workflows.
+     - **Cryptographic Kraken ↔ Sidecar Contract**: Communication does **not** rely on plain HTTP headers. Every call is signed using HMAC-SHA256, uses canonical request hashing (`KRKN1`), carries a short-lived (30s) JWT context, enforces anti-replay (60s retention, 30s skew window), and uses an isolated instance secret (`KRAKEN_PLUGIN_INSTANCE_SECRET`).
      - **Auto-Build from Dockerfile**: You do **NOT** need to pre-build or push images to Docker Hub or external registries! Simply supply a standard `Dockerfile` in the root or in `backend/Dockerfile`. Kraken Admin Tool automatically compiles and tags the container image upon import.
-     - **Pre-built Images**: If using an existing image from a registry, specify `"entrypoint": "image:tag"`.
 
 3. **Built-in Kraken Auto-Builder (Source-Only Plugins)**:
    > ⚡ **CRITICAL FOR AI ASSISTANTS**:
@@ -39,7 +39,7 @@ Every plugin must be created as a standalone repository or folder with this exac
 my-plugin-root/
 ├── plugin.json             # [REQUIRED] Identity, entrypoints, permissions and UI extensions
 ├── README.md               # [REQUIRED] Markdown documentation shown in store/inspection
-├── ico.svg                 # [OPTIONAL] Custom plugin icon: ico.(svg|png|jpg|jpeg) or icon.(svg|png|jpg|jpeg)
+├── icon.svg                # [OPTIONAL] Vector icon for UI navigation and cards
 ├── frontend/
 │   └── worker.js           # [REQUIRED if UI is provided] Isolated Web Worker UI logic
 └── backend/
@@ -158,11 +158,94 @@ Kraken will automatically build the container image using the provided `Dockerfi
   },
   "permissions": [
     "ui:sidebar",
-    "docker:read"
+    "docker:read",
+    "network:ldap"
   ]
 }
 ```
 > 💡 *Note*: If `dockerfile` is omitted in the manifest, Kraken automatically looks for `Dockerfile` or `backend/Dockerfile` in the plugin archive. If `entrypoint` is omitted, Kraken automatically generates a local tag `kraken-plugin-<id>:<version>`.
+
+---
+
+## 3.1 Secure Kraken ↔ Sidecar Contract (`sidecarauth`)
+
+When running container sidecars, communication is protected against tampering, impersonation, and replay attacks. The contract completely eliminates legacy implicit header trust (`X-Kraken-User` and `X-Kraken-Role` are deprecated and strictly rejected if unauthenticated).
+
+### 1. Mandatory Headers
+Every call from the Kraken Backend to the sidecar contains:
+- `X-Kraken-Plugin-ID`: Target plugin ID (e.g. `com.mpt.ad-collaborator`).
+- `X-Kraken-Installation-ID`: Unique UUID v4 for the specific plugin instance.
+- `X-Kraken-Request-ID`: Unique UUID v4 identifying the request.
+- `X-Kraken-Timestamp`: ISO 8601 UTC timestamp (e.g. `2026-11-11T17:00:00Z`). Maximum allowable clock skew is **30 seconds**.
+- `X-Kraken-Nonce`: Cryptographically random 16-byte nonce (`base64url`).
+- `X-Kraken-User-Context`: Short-lived internal JWT (HS256) valid for at most **30 seconds**.
+- `X-Kraken-Content-SHA256`: `BASE64URL(SHA256(request_body_bytes))`.
+- `X-Kraken-Signature`: `v1=<BASE64URL(HMAC-SHA256(instance_secret, canonical_request))>`.
+- `Content-Type`: `application/json`.
+
+### 2. Internal Context JWT Claims (`X-Kraken-User-Context`)
+Issued by Kraken Control Plane with HS256:
+```json
+{
+  "iss": "kraken-control-plane",
+  "aud": "plugin:<plugin_id>",
+  "sub": "user:<user_id>",
+  "jti": "<request_id>",
+  "iat": 1794416400,
+  "nbf": 1794416395,
+  "exp": 1794416430,
+  "plugin_id": "<plugin_id>",
+  "installation_id": "<installation_id>",
+  "kraken_user_id": 41,
+  "kraken_username": "gfidelis",
+  "kraken_session_id": "sha256:...",
+  "roles": ["operator"],
+  "permissions": ["ad:authenticate", "ad:read", "ad:create-collaborator"],
+  "action": "ldap.session.open",
+  "request_id": "<request_id>"
+}
+```
+- `kraken_session_id`: Computed as `base64url(SHA256(internal_pepper || session_id))`, ensuring that operations cannot be replayed across different user sessions without exposing original tokens.
+
+### 3. Canonical Request & Signature
+```text
+KRKN1
+POST
+/call
+plugin_id=<plugin_id>
+installation_id=<installation_id>
+request_id=<request_id>
+timestamp=<timestamp>
+nonce=<nonce>
+content_sha256=<content_sha256>
+context_sha256=<context_sha256>
+```
+Verification must use constant-time comparison (`hmac.Equal`).
+
+### 4. Instance Secret & Rotation
+- `KRAKEN_PLUGIN_INSTANCE_SECRET`: 32 cryptographically random bytes generated per installation and mounted/injected into the container.
+- **Secret Rotation**: When rotated, the sidecar allows a **60-second grace window** for the previous secret, ensuring zero dropped requests during cutover.
+
+### 5. Anti-Replay Protection
+The sidecar tracks `installation_id + request_id + nonce` for **60 seconds**.
+Any replayed `request_id` or `nonce` within the window or timestamp difference > 30s is rejected immediately with HTTP 409 Conflict:
+```json
+{
+  "type": "urn:kraken:plugin:error:replay-detected",
+  "title": "Request rejected",
+  "status": 409,
+  "code": "REPLAY_DETECTED",
+  "request_id": "<request_id>"
+}
+```
+
+### 6. Lifecycle Callbacks
+Kraken notifies sidecars of critical lifecycle changes at `POST /v1/internal/session-events`:
+- `kraken.session.ended`: Terminates all authenticated downstream sessions (e.g. LDAP bind) associated with `kraken_session_id`.
+- `kraken.user.disabled`: Invalidates all sessions associated with `kraken_user_id`.
+- `plugin.installation.revoked`: Triggered upon plugin uninstallation/revocation to clean temporary states and stop containers.
+
+---
 
 ### Permitted Scopes (`permissions`)
 Only declare permissions strictly required by your plugin:
@@ -179,6 +262,8 @@ Only declare permissions strictly required by your plugin:
 - `http:outbound` — Enables outbound HTTP calls to domains declared in `allowed_hosts`.
 - `credentials:resolve` — Dynamically resolves server logon secrets (SSH keys, passwords) Just-in-Time for external Key Vaults.
 - `credentials:manage` — Manages external Key Vault secrets (list, create, bind, test connection).
+- `network:ldap` — Authorizes LDAP/Active Directory directory integration and authentication.
+  - *Internal Granular Permissions*: `ad:authenticate`, `ad:read`, `ad:create-collaborator`, `ad:session:close`, `ad:config:read`, `ad:config:write`, `ad:audit:read`.
 
 ---
 
@@ -231,7 +316,7 @@ The declarative tree emitted by `kraken.render(node)` supports the following nod
 | `Badge` | `label`, `variant` (`running`, `error`, `pending`, `outline`) | Status tag |
 | `Alert` | `title`, `description`, `variant` (`info`, `warning`, `destructive`, `success`) | Contextual callout banner |
 | `Terminal` / `CodeBlock` | `code`, `value`, `language` | Formatted monospaced output block |
-| `CustomShadowHtml` | `html` | Isolated Shadow DOM HTML container (styles and scripts sandboxed) |
+| `CustomShadowHtml` | `html` | Isolated Shadow DOM HTML container (styles sandboxed; external links with `target="_blank"` automatically open in an isolated popup window or new tab and copy `data-copy-text` to clipboard) |
 | `CodeEditor` | `id`, `value`, `defaultValue`, `language`, `theme`, `readOnly`, `lineNumbers`, `minimap`, `wordWrap`, `tabSize`, `insertSpaces`, `automaticLayout`, `height`, `saveActionId`, `label`, `description` | Full-featured Monaco code editor (VS Code-like) with syntax highlighting, line numbers, automatic indentation, tab formatting, bracket pair colorization, search/replace, responsive auto-layout, debounced change events, immediate form participation, and Ctrl+S/Cmd+S save shortcut support |
 
 ### CodeEditor Component (Monaco Editor)

@@ -21,6 +21,10 @@ On the backend, plugins must execute with strict bounds to prevent unauthorized 
 2. **Backend Dual-Runtime Model**:
    - **WASM Sandbox (Default)**: Embedded, pure-Go WebAssembly runtime via `wazero` (zero CGO dependencies). Executes compiled WASM modules (`GOOS=wasip1 GOARCH=wasm`, Rust, C) with configurable memory ceilings (default 64MB) and execution timeouts (15s). Host functions provide strictly mediated logging (`kraken_log`) and scoped key-value storage (`kraken_kv_get`, `kraken_kv_set`).
    - **Container Sidecar (Advanced)**: Dedicated isolated Docker container per plugin, managed through the host Docker daemon with isolated bridge networks, read-only root filesystems, and strict CPU/memory quotas.
+     - **Cryptographic Kraken ↔ Sidecar Contract**: Replaces implicit trust in plain HTTP headers (`X-Kraken-User` and `X-Kraken-Role` are eliminated and rejected). All requests carry an HMAC-SHA256 signature (`X-Kraken-Signature: v1=...`) computed over canonical request string `KRKN1`, body SHA-256 hash, and a short-lived (30s) internal context JWT (`X-Kraken-User-Context`).
+     - **Anti-Replay & Session Binding**: Enforces non-repeatable nonces and request IDs with a 60-second retention cache and 30-second timestamp window (returning HTTP 409 `REPLAY_DETECTED` on duplicates). User actions are bound via `kraken_session_id = base64url(SHA256(pepper + session_id))`.
+     - **Instance Secrets & Graceful Rotation**: Each installation receives a 32-byte cryptographically random secret (`KRAKEN_PLUGIN_INSTANCE_SECRET`), supporting graceful secret rotation with a 60-second grace period for the previous key.
+     - **Lifecycle Callbacks**: Lifecycle events (`POST /v1/internal/session-events`) notify sidecars on session termination (`kraken.session.ended`), user deactivation (`kraken.user.disabled`), and plugin revocation (`plugin.installation.revoked`).
 
 3. **Archive Packaging & Safe Extraction**:
    - Plugins are packaged as self-contained `.zip` or `.tar.gz` archives containing `plugin.json` (manifest), `README.md`, optional frontend entrypoint (`frontend/worker.js`), and optional backend binary (`backend/plugin.wasm`).

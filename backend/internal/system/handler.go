@@ -28,7 +28,7 @@ func NewHandler(dbHandle *database.Handle, docker *docker.DockerService, k8s *k8
 		Docker:    docker,
 		K8s:       k8s,
 		StartTime: startTime,
-		Version:   "1.0.0",
+		Version:   "1.1.0",
 	}
 }
 

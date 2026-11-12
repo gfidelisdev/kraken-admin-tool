@@ -270,6 +270,34 @@ func (b *MicrosoftSessionBroker) GetScopedToken(ctx context.Context, sessionID s
 	return payload.AccessToken, accountMeta, nil
 }
 
+// GetScopedTokenForUser searches for an active Microsoft session for the given userID and returns a scoped token.
+// If multiple active sessions exist for this user, it selects the one with the latest expiration.
+func (b *MicrosoftSessionBroker) GetScopedTokenForUser(ctx context.Context, userID uint, scope string) (string, *models.MicrosoftSessionAccount, error) {
+	if userID == 0 {
+		return "", nil, errors.New("empty user id")
+	}
+
+	b.mu.RLock()
+	var matchingSessionID string
+	var newestExpiry time.Time
+	now := time.Now()
+	for sid, entry := range b.sessions {
+		if entry.UserID == userID && entry.ExpiresAt.After(now) {
+			if matchingSessionID == "" || entry.ExpiresAt.After(newestExpiry) {
+				newestExpiry = entry.ExpiresAt
+				matchingSessionID = sid
+			}
+		}
+	}
+	b.mu.RUnlock()
+
+	if matchingSessionID == "" {
+		return "", nil, errors.New("no active microsoft session found for user")
+	}
+
+	return b.GetScopedToken(ctx, matchingSessionID, scope)
+}
+
 // DeleteSession wipes tokens and removes session
 func (b *MicrosoftSessionBroker) DeleteSession(sessionID string) {
 	if sessionID == "" {

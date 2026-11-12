@@ -136,7 +136,24 @@ export default function LoginPage() {
     navigator.clipboard.writeText(msDeviceData.user_code);
     setHasCopiedCode(true);
     setTimeout(() => setHasCopiedCode(false), 3000);
-    window.open(msDeviceData.verification_uri || "https://microsoft.com/devicelogin", "_blank", "noopener,noreferrer");
+
+    const url = msDeviceData.verification_uri || "https://microsoft.com/devicelogin";
+    const width = 600;
+    const height = 750;
+    const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
+    const top = window.screenY + Math.max(0, (window.outerHeight - height) / 2);
+    const popupFeatures = `width=${width},height=${height},top=${top},left=${left},toolbar=no,menubar=no,scrollbars=yes,resizable=yes,location=yes,status=yes`;
+
+    let popup: Window | null = null;
+    try {
+      popup = window.open(url, "KrakenMSLoginPopup", popupFeatures);
+    } catch (_) {}
+
+    if (!popup || popup.closed || typeof popup.closed === "undefined") {
+      window.open(url, "_blank", "noopener,noreferrer");
+    } else {
+      popup.focus();
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

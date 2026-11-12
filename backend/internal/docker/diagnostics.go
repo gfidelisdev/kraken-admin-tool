@@ -95,9 +95,9 @@ func RunServerDiagnostics(
 		return runSSHDiagnostics(ctx, hostURL, req, emit, logs)
 	}
 
-	// Check if this is a local socket
-	if strings.HasPrefix(strings.ToLower(hostURL), "unix://") {
-		return runLocalSocketDiagnostics(ctx, hostURL, emit, logs)
+	// Check if this is a local socket or localhost
+	if IsLocalHost(hostURL) {
+		return runLocalSocketDiagnostics(ctx, hostURL, req, emit, logs)
 	}
 
 	// Standard TCP / TLS diagnostics
@@ -447,6 +447,7 @@ func DialDirectSSHClient(ctx context.Context, parsed *ParsedSSHHost, cfg SSHConf
 func runLocalSocketDiagnostics(
 	ctx context.Context,
 	hostURL string,
+	req models.TestServerRequest,
 	emit func(level, msg string, suggestion string, extra map[string]interface{}),
 	logs []ServerDiagnosticLog,
 ) (*ServerDiagnosticResult, error) {
@@ -454,6 +455,24 @@ func runLocalSocketDiagnostics(
 	if socketPath == "" {
 		socketPath = "/var/run/docker.sock"
 	}
+
+	// 1. Verify OS host credentials
+	user := strings.TrimSpace(req.SSHUser)
+	pass := strings.TrimSpace(req.SSHPassword)
+	if pass == "" {
+		pass = strings.TrimSpace(req.SudoPassword)
+	}
+
+	emit("info", fmt.Sprintf("Verificando autenticação do sistema hospedeiro para o usuário '%s'...", user), "", nil)
+	if err := verifyLocalHostCredentials(ctx, user, pass); err != nil {
+		emit("error", fmt.Sprintf("Falha na autenticação do host: %v", err), "Informe usuário e senha válidos do sistema hospedeiro para autorizar o gerenciamento do host local.", nil)
+		return &ServerDiagnosticResult{
+			Status:  "UNREACHABLE",
+			Message: err.Error(),
+			Logs:    logs,
+		}, err
+	}
+	emit("success", fmt.Sprintf("Usuário '%s' autenticado com sucesso no sistema hospedeiro.", user), "", nil)
 
 	emit("info", fmt.Sprintf("Verificando arquivo de socket local em %s...", socketPath), "", nil)
 	if stat, err := os.Stat(socketPath); err != nil {
@@ -486,7 +505,7 @@ func runLocalSocketDiagnostics(
 	return &ServerDiagnosticResult{
 		Status:  "CONNECTED",
 		Version: "local",
-		Message: "Daemon Docker local conectado com sucesso",
+		Message: "Daemon Docker local autenticado e conectado com sucesso",
 		Logs:    logs,
 	}, nil
 }

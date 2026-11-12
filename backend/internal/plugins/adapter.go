@@ -77,6 +77,16 @@ func (m *Manager) ResolveHostAdapter(
 		}
 		return m.executeNetworkScan(ctx, pluginID, dataObj)
 
+	case "network.ldap_ping", "network.ldap_test", "network.ldap_dial":
+		if !permMap["network:ldap"] {
+			return HostAdapterResponse{
+				Status:    "denied",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Error:     "Plugin lacks mandatory permission 'network:ldap'",
+			}, nil
+		}
+		return m.executeLDAPTest(ctx, pluginID, dataObj)
+
 	case "network.block_external_port":
 		if !permMap["hosts:exec"] {
 			return HostAdapterResponse{
@@ -231,6 +241,63 @@ func (m *Manager) executeNetworkScan(ctx context.Context, pluginID string, param
 		Data: map[string]interface{}{
 			"scanned_hosts": scannedCount,
 			"ports":         allPorts,
+		},
+	}, nil
+}
+
+// executeLDAPTest verifies connectivity to an LDAP domain controller
+func (m *Manager) executeLDAPTest(ctx context.Context, pluginID string, params map[string]interface{}) (HostAdapterResponse, error) {
+	host, _ := params["host"].(string)
+	if host == "" {
+		host, _ = params["server"].(string)
+	}
+	if host == "" {
+		return HostAdapterResponse{
+			Status:    "error",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     "Missing required parameter 'host' or 'server' for LDAP test",
+		}, nil
+	}
+
+	port := 389
+	if p, ok := params["port"].(float64); ok && p > 0 {
+		port = int(p)
+	} else if p, ok := params["port"].(int); ok && p > 0 {
+		port = p
+	}
+
+	useTLS, _ := params["tls"].(bool)
+	if useTLS && port == 389 {
+		port = 636
+	}
+
+	timeoutSec := 5
+	if t, ok := params["timeout"].(float64); ok && t > 0 {
+		timeoutSec = int(t)
+	}
+
+	target := fmt.Sprintf("%s:%d", host, port)
+	dialer := &net.Dialer{Timeout: time.Duration(timeoutSec) * time.Second}
+	start := time.Now()
+	conn, err := dialer.DialContext(ctx, "tcp", target)
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		return HostAdapterResponse{
+			Status:    "error",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     fmt.Sprintf("Failed to connect to LDAP server %s: %v", target, err),
+		}, nil
+	}
+	_ = conn.Close()
+
+	return HostAdapterResponse{
+		Status:    "success",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Data: map[string]interface{}{
+			"reachable":  true,
+			"target":     target,
+			"latency_ms": latency,
 		},
 	}, nil
 }

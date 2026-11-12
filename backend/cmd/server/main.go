@@ -6,8 +6,10 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -112,11 +114,28 @@ func main() {
 	} else {
 		dockerService.SetCredentialResolver(pluginsManager)
 		pluginsManager.SetMicrosoftTokenProvider(func(ctx context.Context, scope string) (string, *models.MicrosoftSessionAccount, error) {
-			claims := auth.GetUserFromContext(ctx)
-			if claims == nil || claims.ID == "" || authHandler.MSBroker == nil {
+			if authHandler.MSBroker == nil {
 				return "", nil, nil
 			}
-			return authHandler.MSBroker.GetScopedToken(ctx, claims.ID, scope)
+			claims := auth.GetUserFromContext(ctx)
+			if claims != nil && claims.ID != "" {
+				tok, acc, err := authHandler.MSBroker.GetScopedToken(ctx, claims.ID, scope)
+				if err == nil && tok != "" {
+					return tok, acc, nil
+				}
+			}
+			// Fallback: look up active session by UserID if claims.ID is not found or claims is nil
+			var targetUserID uint
+			if claims != nil && claims.UserID > 0 {
+				targetUserID = claims.UserID
+			}
+			if targetUserID > 0 {
+				tok, acc, err := authHandler.MSBroker.GetScopedTokenForUser(ctx, targetUserID, scope)
+				if err == nil && tok != "" {
+					return tok, acc, nil
+				}
+			}
+			return "", nil, nil
 		})
 		pluginsManager.SetMicrosoftSessionRevoker(func(userID uint, sessionID string) {
 			if authHandler.MSBroker == nil {
@@ -160,7 +179,28 @@ func main() {
 	})
 
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   cfg.CorsOrigins,
+		AllowedOrigins: cfg.CorsOrigins,
+		AllowOriginFunc: func(r *http.Request, origin string) bool {
+			if len(cfg.CorsOrigins) == 0 {
+				return true
+			}
+			for _, o := range cfg.CorsOrigins {
+				if o == "*" || strings.EqualFold(o, origin) {
+					return true
+				}
+			}
+			// Automatically allow requests originating from frontend port 3000, 8080, 8443, 443, or reverse proxy origins
+			if u, err := url.Parse(origin); err == nil {
+				if u.Port() == "3000" || u.Port() == "8080" || u.Port() == "8443" || u.Port() == "443" || u.Port() == "" {
+					return true
+				}
+				// Also allow any HTTPS origin reaching Kraken via reverse proxy
+				if u.Scheme == "https" || r.Header.Get("X-Forwarded-Proto") == "https" {
+					return true
+				}
+			}
+			return false
+		},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Server-ID", "X-Host-Password", "X-Host-Key", "X-Host-Key-Passphrase", "X-Sudo-Password"},
 		ExposedHeaders:   []string{"Link"},

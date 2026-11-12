@@ -198,6 +198,13 @@ func TestMicrosoftSessionBroker_DeviceLoginFlow(t *testing.T) {
 	require.NotNil(t, acc)
 	assert.Equal(t, "alice@contoso.com", acc.Email)
 
+	// 7b. Test GetScopedTokenForUser (resolves token even without knowing session ID, e.g. for background host tasks)
+	tokenUser, accUser, errUser := handler.MSBroker.GetScopedTokenForUser(context.Background(), claims.UserID, "https://management.azure.com/.default")
+	require.NoError(t, errUser)
+	assert.Equal(t, token, tokenUser)
+	require.NotNil(t, accUser)
+	assert.Equal(t, "alice@contoso.com", accUser.Email)
+
 	// 8. Test Logout evicts session
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
 	logoutRec := httptest.NewRecorder()

@@ -191,7 +191,7 @@ export function Sidebar({ className }: { className?: string }) {
         </div>
 
         <div className="mt-3 flex items-center justify-between px-1 text-[10px] text-slate-500">
-          <span>Kraken Tool v1.0.0</span>
+          <span>Kraken Tool v1.1.0</span>
           <span className="font-mono">Go + Next.js</span>
         </div>
       </div>

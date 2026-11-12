@@ -32,6 +32,7 @@ var AllowedPermissions = map[string]string{
 	"http:outbound":       "Realizar chamadas HTTP externas para hosts autorizados",
 	"credentials:resolve": "Resolver credenciais e segredos de logon para servidores (Key Vault)",
 	"credentials:manage":  "Criar, listar e vincular segredos em cofres de chaves externos (Key Vault)",
+	"network:ldap":        "Consultar serviços LDAP (Domain Controllers)",
 }
 
 // ParseAndValidateManifest parses raw plugin.json bytes and validates security & schema constraints

@@ -38,6 +38,22 @@ func IsSSHHost(hostURL string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(hostURL)), "ssh://")
 }
 
+// IsLocalHost returns true if the given hostURL targets the local machine
+// (Unix domain socket, localhost, 127.0.0.1, ::1).
+func IsLocalHost(hostURL string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(hostURL))
+	if strings.HasPrefix(trimmed, "unix://") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "tcp://localhost") || strings.HasPrefix(trimmed, "tcp://127.0.0.1") || strings.HasPrefix(trimmed, "tcp://[::1]") {
+		return true
+	}
+	if trimmed == "localhost" || trimmed == "127.0.0.1" || trimmed == "::1" {
+		return true
+	}
+	return false
+}
+
 // ParseSSHHost parses an SSH host URL of the form ssh://[user@]host[:port][/path/to/docker.sock].
 // If overrideUser is provided, it takes precedence over the user in the URL.
 // If user is empty in both, it defaults to "root".

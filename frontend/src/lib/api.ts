@@ -91,15 +91,36 @@ export function setActiveServerId(id: number | null): void {
 }
 
 export function getBaseApiUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
-  }
   if (typeof window !== "undefined") {
-    if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-      return "http://localhost:8080";
+    const protocol = window.location.protocol;
+    const hostname = window.location.hostname;
+
+    // When accessed via HTTPS (e.g. reverse proxy terminating TLS), all API
+    // requests must be same-origin (relative path) to avoid mixed-content and cert warnings.
+    if (protocol === "https:") {
+      return "";
     }
+
+    if (process.env.NEXT_PUBLIC_API_URL) {
+      const configured = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
+      try {
+        const parsed = new URL(configured);
+        // If accessed via LAN IP / remote host but configured API URL was hardcoded to localhost/127.0.0.1,
+        // dynamically route requests to the same host IP on the backend port.
+        if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+          if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+            const port = parsed.port || "8080";
+            return `${protocol}//${hostname}:${port}`;
+          }
+        }
+        return configured;
+      } catch {
+        // ignore and fallback
+      }
+    }
+    return "";
   }
-  return "";
+  return process.env.INTERNAL_API_URL || process.env.NEXT_PUBLIC_API_URL || "http://backend:8080";
 }
 
 async function request<T>(

@@ -88,3 +88,19 @@ _Avoid_: CGO runner, wasm subprocess
 A remote or private HTTP repository exposing an `index.json` registry of discoverable, verifiable plugins for the online store.
 _Avoid_: App marketplace, repo mirror
 
+**Container Sidecar**:
+A managed, long-running Docker or Kubernetes container service communicating with the Kraken backend exclusively through a short-lived, cryptographically signed, and replay-protected contract (`internal/plugins/sidecarauth`).
+_Avoid_: Worker container, backend daemon
+
+**Sidecar Authentication Contract**:
+The cryptographic mutual protocol between Kraken and container sidecars, enforcing HMAC-SHA256 request signatures, canonical payload hashing (`KRKN1`), short-lived JWT context claims (30s), anti-replay cache (60s retention, 30s clock skew window), and rejection of legacy unauthenticated headers (`X-Kraken-User`, `X-Kraken-Role`).
+_Avoid_: Sidecar token, plugin API key
+
+**Host OS Verification**:
+The authentication barrier verifying host OS credentials via PAM/su/sudo before granting access to local Docker daemon sockets (`unix:///var/run/docker.sock`).
+_Avoid_: Local bypass, auto-host bind
+
+**Reverse Proxy Gateway**:
+The mandatory TLS gateway terminating HTTPS on port 8443 and enforcing 301 redirection with HSTS from HTTP port 8000, isolating internal services.
+_Avoid_: Web router, direct port forward
+

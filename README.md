@@ -9,9 +9,11 @@ Built with a modular **Go (Chi Router)** backend and a sleek **Next.js 15 (App R
 ## 🌟 Features
 
 ### 🔐 Authentication & Security
-- **JWT Authentication**: Secure token issuance using HS256 claims (`UserID`, `Username`, `Role`) and `bcrypt` password hashing.
-- **Dual-mode Middleware**: Seamless token extraction from both `Authorization: Bearer <token>` headers and `?token=<token>` query parameters (vital for native browser WebSocket streaming).
-- **Default Seed User**: Automatically seeds an administrator account (`admin` / `admin123`) on initial database startup.
+- **Unified HTTPS & HSTS Proxy**: Gateway reverso Nginx com terminação TLS obrigatória na porta **8443**, redirecionamento automático 301 de HTTP (**8000**) para HTTPS, cabeçalhos HSTS (`max-age=31536000`), e isolamento de portas internas (3000 e 8080 restritas à rede interna).
+- **Host OS Credential Verification**: Adição e gestão do host Docker local (`unix:///var/run/docker.sock`) exige autenticação obrigatória do sistema operacional hospedeiro via PAM/su/sudo. Conexões sem credenciais ou automáticas são estritamente bloqueadas.
+- **Contrato Seguro Kraken ↔ Sidecar (`sidecarauth`)**: Chamadas a containers de plugins utilizam assinatura criptográfica HMAC-SHA256 sobre requisição canônica (`KRKN1`), JWT de contexto efêmero (30s) vinculado à sessão Kraken (`kraken_session_id`), cache anti-replay (60s) e segredos por instalação rotacionáveis (`KRAKEN_PLUGIN_INSTANCE_SECRET`). Cabeçalhos inseguros (`X-Kraken-User` e `X-Kraken-Role`) foram eliminados e são rejeitados.
+- **JWT Authentication & TOTP**: Emissão de tokens de acesso seguros com HS256, suporte a TOTP 2FA, recuperação de senha administrativa e autenticação Broker Microsoft SSO (OAuth2 Device Code Flow).
+- **Default Seed User**: Inicializa automaticamente o usuário administrador inicial (`admin` / `admin123`) na primeira execução.
 
 ### 🐳 Docker Management
 - **Container Lifecycle**: List all containers (running, stopped, paused), start, stop, restart, and safely remove containers with confirmation modals.
@@ -84,9 +86,10 @@ docker compose up -d --build
 ```
 
 ### 2. Access the Application
-- **Frontend Dashboard**: [http://localhost:3000](http://localhost:3000)
-- **Backend API**: [http://localhost:8080](http://localhost:8080)
-- **API Health**: [http://localhost:8080/health](http://localhost:8080/health)
+- **HTTPS Gateway (Dashboard & API)**: [https://localhost:8443](https://localhost:8443)
+- **HTTP Auto-Redirect (Port 8000 -> 8443)**: [http://localhost:8000](http://localhost:8000) (Redirecionamento automático 301 para HTTPS com cabeçalhos HSTS)
+- **API Health**: [https://localhost:8443/api/system/status](https://localhost:8443/api/system/status)
+- **Isolamento de Rede**: As portas internas `3000` (frontend) e `8080` (backend) operam exclusivamente dentro da rede privada `kraken-network`, protegidas contra conexões externas diretas.
 
 ### 3. Default Credentials
 | Field | Value |

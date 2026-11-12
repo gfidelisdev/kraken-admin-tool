@@ -1,13 +1,11 @@
 package plugins
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,20 +18,19 @@ import (
 	dockerclient "github.com/docker/docker/client"
 	"github.com/kraken/admin-tool/backend/internal/docker"
 	"github.com/kraken/admin-tool/backend/internal/models"
+	"github.com/kraken/admin-tool/backend/internal/plugins/sidecarauth"
 )
 
 type ContainerRuntimeManager struct {
 	mu            sync.RWMutex
 	dockerService *docker.DockerService
-	httpClient    *http.Client
+	transport     *sidecarauth.Transport
 }
 
 func NewContainerRuntimeManager(ds *docker.DockerService) *ContainerRuntimeManager {
 	return &ContainerRuntimeManager{
 		dockerService: ds,
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		transport:     sidecarauth.NewTransport(20 * time.Second),
 	}
 }
 
@@ -99,14 +96,28 @@ func (m *ContainerRuntimeManager) StartContainer(ctx context.Context, plugin *mo
 		internalPort = 8080
 	}
 
+	// Ensure cryptographically secure installation ID and instance secret exist
+	if plugin.InstallationID == "" {
+		plugin.InstallationID = sidecarauth.GenerateInstallationID()
+	}
+	if plugin.InstanceSecret == "" {
+		sec, secErr := sidecarauth.GenerateInstanceSecret()
+		if secErr == nil {
+			plugin.InstanceSecret = sec
+		}
+	}
+
 	cfg := &container.Config{
 		Image: imageName,
 		Labels: map[string]string{
-			"com.kraken.plugin.id":      plugin.PluginID,
-			"com.kraken.plugin.version": plugin.Version,
+			"com.kraken.plugin.id":              plugin.PluginID,
+			"com.kraken.plugin.installation_id": plugin.InstallationID,
+			"com.kraken.plugin.version":         plugin.Version,
 		},
 		Env: []string{
 			fmt.Sprintf("KRAKEN_PLUGIN_ID=%s", plugin.PluginID),
+			fmt.Sprintf("KRAKEN_PLUGIN_INSTALLATION_ID=%s", plugin.InstallationID),
+			fmt.Sprintf("KRAKEN_PLUGIN_INSTANCE_SECRET=%s", plugin.InstanceSecret),
 			fmt.Sprintf("PORT=%d", internalPort),
 		},
 	}
@@ -191,7 +202,7 @@ func (m *ContainerRuntimeManager) StopContainer(ctx context.Context, plugin *mod
 	return nil
 }
 
-// ExecuteCall proxies an action call to the running container
+// ExecuteCall proxies an authenticated, signed action call to the running container sidecar
 func (m *ContainerRuntimeManager) ExecuteCall(
 	ctx context.Context,
 	plugin *models.InstalledPlugin,
@@ -200,6 +211,9 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 	payload interface{},
 	username string,
 	userRole string,
+	userID uint,
+	sessionID string,
+	grantedPerms []string,
 ) (interface{}, error) {
 	cli, err := m.getClient(ctx)
 	if err != nil {
@@ -217,7 +231,17 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 		internalPort = 8080
 	}
 
-	// Determine address: if kraken-network is used, containerName can be resolved directly
+	// Ensure instance credentials exist
+	if plugin.InstallationID == "" {
+		plugin.InstallationID = sidecarauth.GenerateInstallationID()
+	}
+	if plugin.InstanceSecret == "" {
+		sec, secErr := sidecarauth.GenerateInstanceSecret()
+		if secErr == nil {
+			plugin.InstanceSecret = sec
+		}
+	}
+
 	targetURL := fmt.Sprintf("http://%s:%d/call", containerName, internalPort)
 
 	reqBody := map[string]interface{}{
@@ -225,20 +249,29 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 		"payload":   payload,
 		"plugin_id": plugin.PluginID,
 	}
-	data, _ := json.Marshal(reqBody)
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(data))
+	data, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to serialize request body: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Kraken-Plugin-ID", plugin.PluginID)
-	httpReq.Header.Set("X-Kraken-User", username)
-	httpReq.Header.Set("X-Kraken-Role", userRole)
 
-	resp, err := m.httpClient.Do(httpReq)
+	callParams := sidecarauth.CallParams{
+		TargetURL:      targetURL,
+		Path:           "/call",
+		PluginID:       plugin.PluginID,
+		InstallationID: plugin.InstallationID,
+		InstanceSecret: plugin.InstanceSecret,
+		UserID:         userID,
+		Username:       username,
+		SessionID:      sessionID,
+		Roles:          []string{userRole},
+		Permissions:    sidecarauth.MapRoleToPermissions(userRole, grantedPerms),
+		Action:         action,
+		RequestBody:    data,
+	}
+
+	resp, err := m.transport.Call(ctx, callParams)
 	if err != nil {
-		// Fallback to IP if containerName DNS fails
+		// Fallback to IP if containerName DNS fails within Docker network
 		ip := insp.NetworkSettings.IPAddress
 		if ip == "" && insp.NetworkSettings != nil {
 			for _, netEndpoint := range insp.NetworkSettings.Networks {
@@ -249,32 +282,115 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 			}
 		}
 		if ip != "" {
-			altURL := fmt.Sprintf("http://%s:%d/call", ip, internalPort)
-			httpReqAlt, _ := http.NewRequestWithContext(ctx, "POST", altURL, bytes.NewReader(data))
-			httpReqAlt.Header = httpReq.Header
-			resp, err = m.httpClient.Do(httpReqAlt)
+			callParams.TargetURL = fmt.Sprintf("http://%s:%d/call", ip, internalPort)
+			resp, err = m.transport.Call(ctx, callParams)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to communicate with plugin container: %w", err)
 		}
 	}
-	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response from plugin container: %w", err)
+	return resp, nil
+}
+
+// NotifySessionEnded sends a signed lifecycle event to the sidecar when a Kraken session expires or logs out
+func (m *ContainerRuntimeManager) NotifySessionEnded(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest, rawSessionID string) error {
+	eventPayload := map[string]interface{}{
+		"event":             "kraken.session.ended",
+		"kraken_session_id": sidecarauth.ComputeKrakenSessionID(rawSessionID),
+		"occurred_at":       time.Now().UTC().Format(time.RFC3339),
+	}
+	data, _ := json.Marshal(eventPayload)
+
+	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
+	internalPort := manifest.Runtime.Port
+	if internalPort <= 0 {
+		internalPort = 8080
+	}
+	targetURL := fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
+
+	callParams := sidecarauth.CallParams{
+		TargetURL:      targetURL,
+		Path:           "/v1/internal/session-events",
+		PluginID:       plugin.PluginID,
+		InstallationID: plugin.InstallationID,
+		InstanceSecret: plugin.InstanceSecret,
+		UserID:         0,
+		Username:       "system",
+		SessionID:      rawSessionID,
+		Roles:          []string{"system"},
+		Action:         "internal.session.event",
+		RequestBody:    data,
 	}
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("plugin container returned error %d: %s", resp.StatusCode, string(respBytes))
+	_, err := m.transport.Call(ctx, callParams)
+	return err
+}
+
+// NotifyUserDisabled sends a signed lifecycle event when a user is deactivated in Kraken
+func (m *ContainerRuntimeManager) NotifyUserDisabled(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest, userID uint) error {
+	eventPayload := map[string]interface{}{
+		"event":          "kraken.user.disabled",
+		"kraken_user_id": userID,
+		"occurred_at":    time.Now().UTC().Format(time.RFC3339),
+	}
+	data, _ := json.Marshal(eventPayload)
+
+	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
+	internalPort := manifest.Runtime.Port
+	if internalPort <= 0 {
+		internalPort = 8080
+	}
+	targetURL := fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
+
+	callParams := sidecarauth.CallParams{
+		TargetURL:      targetURL,
+		Path:           "/v1/internal/session-events",
+		PluginID:       plugin.PluginID,
+		InstallationID: plugin.InstallationID,
+		InstanceSecret: plugin.InstanceSecret,
+		UserID:         userID,
+		Username:       "system",
+		Roles:          []string{"system"},
+		Action:         "internal.session.event",
+		RequestBody:    data,
 	}
 
-	var parsed interface{}
-	if err := json.Unmarshal(respBytes, &parsed); err == nil {
-		return parsed, nil
+	_, err := m.transport.Call(ctx, callParams)
+	return err
+}
+
+// NotifyPluginRevoked notifies and revokes the sidecar upon plugin uninstall or status revocation
+func (m *ContainerRuntimeManager) NotifyPluginRevoked(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest) error {
+	eventPayload := map[string]interface{}{
+		"event":           "plugin.installation.revoked",
+		"installation_id": plugin.InstallationID,
+		"occurred_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	data, _ := json.Marshal(eventPayload)
+
+	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
+	internalPort := manifest.Runtime.Port
+	if internalPort <= 0 {
+		internalPort = 8080
+	}
+	targetURL := fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
+
+	callParams := sidecarauth.CallParams{
+		TargetURL:      targetURL,
+		Path:           "/v1/internal/session-events",
+		PluginID:       plugin.PluginID,
+		InstallationID: plugin.InstallationID,
+		InstanceSecret: plugin.InstanceSecret,
+		UserID:         0,
+		Username:       "system",
+		Roles:          []string{"system"},
+		Action:         "internal.session.event",
+		RequestBody:    data,
 	}
 
-	return string(respBytes), nil
+	_, _ = m.transport.Call(ctx, callParams)
+	return m.StopContainer(ctx, plugin)
 }
 
 func sanitizeContainerName(s string) string {
