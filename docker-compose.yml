@@ -5,13 +5,25 @@ services:
     container_name: kraken-postgres
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kraken}
+      POSTGRES_DB: ${POSTGRES_DB:-kraken_db}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$$POSTGRES_PASSWORD" ]; then
+          export POSTGRES_HOST_AUTH_METHOD=trust
+        fi
+        exec docker-entrypoint.sh postgres
     ports:
-      - "127.0.0.1:${DB_PORT}:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-kraken} -d $${POSTGRES_DB:-kraken_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -31,7 +43,18 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USER: ${DB_USER:-kraken}
+      DB_NAME: ${DB_NAME:-kraken_db}
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+      DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
+      PLUGINS_DIR: ${PLUGINS_DIR:-/app/data/plugins}
+      BACKEND_PORT: ${BACKEND_PORT:-8080}
     volumes:
       # Host Docker daemon socket to inspect and manage Docker containers & images
       - /var/run/docker.sock:/var/run/docker.sock
@@ -54,7 +77,12 @@ services:
     depends_on:
       - backend
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: ${FRONTEND_PORT:-3000}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://backend:8080}
     networks:
       - kraken-network
 
@@ -67,10 +95,14 @@ services:
       - backend
       - frontend
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      HTTP_PORT: ${HTTP_PORT:-8000}
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
     ports:
-      - "${HTTP_PORT}:${HTTP_PORT}"
-      - "${HTTPS_PORT}:${HTTPS_PORT}"
+      - "${HTTP_PORT:-8000}:${HTTP_PORT:-8000}"
+      - "${HTTPS_PORT:-8443}:${HTTPS_PORT:-8443}"
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./certs:/etc/nginx/certs:ro

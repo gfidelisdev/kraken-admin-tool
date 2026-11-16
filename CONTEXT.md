@@ -122,3 +122,7 @@ _Avoid_: Onboarding wizard, default seed bypass
 The dynamic Kubernetes network control loop (`/api/system/network-config`, `/settings`, `backend/internal/system/network.go`) allowing administrators to configure one or multiple FQDNs on standard HTTPS port 443 at any time, automatically generating a multi-SAN TLS certificate (`kraken-tls-secret`), updating `ConfigMap`s and `Ingress/kraken-ingress`, and triggering rolling restarts across Kubernetes deployments.
 _Avoid_: Static ingress YAML, manual cert rotation
 
+**Zero-Secret Initial Onboarding & Superadmin Secrets Panel**:
+The ability to boot Kraken in Kubernetes without `Secret/kraken-secrets` or in Docker Compose without `.env`, prompting the installing administrator in `/setup` to provide or auto-generate `JWT_SECRET`, `ENCRYPTION_KEY`, `DB_PASSWORD`, and `ADMIN_RECOVERY_KEY`, and manage or rotate them later in `/settings` (`/api/system/secrets`) with automatic PostgreSQL password updates, `ENCRYPTION_KEY_PREVIOUS` archival, and `Secret/kraken-secrets` sync.
+_Avoid_: Hardcoded fallback secrets, mandatory manual env pre-seeding
+

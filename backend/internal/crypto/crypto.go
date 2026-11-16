@@ -16,26 +16,49 @@ import (
 const encPrefix = "enc:v1:"
 
 var (
-	masterKeyOnce sync.Once
+	masterKeyMu   sync.RWMutex
+	masterKeyInit bool
 	masterKey     []byte
 )
 
+func computeMasterKey() []byte {
+	secret := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY"))
+	if secret == "" {
+		secret = strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	}
+	if secret == "" {
+		b := make([]byte, 32)
+		_, _ = rand.Read(b)
+		return b
+	}
+	hash := sha256.Sum256([]byte(secret))
+	return hash[:]
+}
+
 func getMasterKey() []byte {
-	masterKeyOnce.Do(func() {
-		secret := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY"))
-		if secret == "" {
-			secret = strings.TrimSpace(os.Getenv("JWT_SECRET"))
-		}
-		if secret == "" {
-			b := make([]byte, 32)
-			_, _ = rand.Read(b)
-			masterKey = b
-			return
-		}
-		hash := sha256.Sum256([]byte(secret))
-		masterKey = hash[:]
-	})
+	masterKeyMu.RLock()
+	if masterKeyInit {
+		key := masterKey
+		masterKeyMu.RUnlock()
+		return key
+	}
+	masterKeyMu.RUnlock()
+
+	masterKeyMu.Lock()
+	defer masterKeyMu.Unlock()
+	if !masterKeyInit {
+		masterKey = computeMasterKey()
+		masterKeyInit = true
+	}
 	return masterKey
+}
+
+// ReloadKeys refreshes the cached master encryption key from the current environment variables.
+func ReloadKeys() {
+	masterKeyMu.Lock()
+	defer masterKeyMu.Unlock()
+	masterKey = computeMasterKey()
+	masterKeyInit = true
 }
 
 // Encrypt encrypts a string using AES-256-GCM and returns a prefixed base64 string

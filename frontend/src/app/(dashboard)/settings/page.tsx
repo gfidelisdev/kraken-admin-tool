@@ -16,29 +16,56 @@ import {
   ExternalLink,
   Loader2,
   KeyRound,
+  Sparkles,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import {
   getNetworkConfig,
   updateNetworkConfig,
   regenerateNetworkCertificate,
+  getSystemSecrets,
+  updateSystemSecrets,
 } from "@/lib/api";
-import { NetworkConfigResponse } from "@/types";
+import { NetworkConfigResponse, SystemSecretsResponse } from "@/types";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 
+function generateStrongSecret(byteLen = 48): string {
+  const bytes = new Uint8Array(byteLen);
+  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLen; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 export default function DomainIngressSettingsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
 
+  const [activeTab, setActiveTab] = useState<"domain" | "secrets">("domain");
   const [config, setConfig] = useState<NetworkConfigResponse | null>(null);
+  const [secretsData, setSecretsData] = useState<SystemSecretsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingSecrets, setIsSavingSecrets] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Secret form state
+  const [jwtSecretInput, setJwtSecretInput] = useState("");
+  const [encryptionKeyInput, setEncryptionKeyInput] = useState("");
+  const [dbPasswordInput, setDbPasswordInput] = useState("");
+  const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
+  const [msClientIDInput, setMsClientIDInput] = useState("");
+  const [msTenantIDInput, setMsTenantIDInput] = useState("");
+  const [restartOnSecretsSave, setRestartOnSecretsSave] = useState(false);
 
   // Editable form state
   const [ingressEnabled, setIngressEnabled] = useState(false);
@@ -64,12 +91,23 @@ export default function DomainIngressSettingsPage() {
       setStandardHTTPSPort(data.standard_https_port !== false);
       setCertIssuer(data.cert_issuer || "");
       setTlsMode(data.tls_mode === "custom" ? "custom" : "auto_self_signed");
+
+      if (isAdmin) {
+        try {
+          const sec = await getSystemSecrets();
+          setSecretsData(sec);
+          setMsClientIDInput(sec.microsoft_client_id || "");
+          setMsTenantIDInput(sec.microsoft_tenant_id || "");
+        } catch {
+          // ignore non-admin or transient secrets fetch issue
+        }
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to load domain and ingress configuration.");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     loadConfig();
@@ -192,6 +230,39 @@ export default function DomainIngressSettingsPage() {
     URL.revokeObjectURL(url);
   };
 
+  const handleSaveSecrets = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin) return;
+    setError(null);
+    setSuccess(null);
+    setIsSavingSecrets(true);
+    try {
+      const updated = await updateSystemSecrets({
+        jwt_secret: jwtSecretInput.trim() || undefined,
+        encryption_key: encryptionKeyInput.trim() || undefined,
+        db_password: dbPasswordInput.trim() || undefined,
+        admin_recovery_key: recoveryKeyInput.trim() || undefined,
+        microsoft_client_id: msClientIDInput.trim() || undefined,
+        microsoft_tenant_id: msTenantIDInput.trim() || undefined,
+        restart_deployments: restartOnSecretsSave,
+      });
+      setSecretsData(updated);
+      setJwtSecretInput("");
+      setEncryptionKeyInput("");
+      setDbPasswordInput("");
+      setRecoveryKeyInput("");
+      setSuccess(
+        updated.k8s_connected
+          ? "System secrets persisted, PostgreSQL updated (if changed), and Kubernetes Secret/kraken-secrets synchronized."
+          : "System secrets persisted and applied in-process."
+      );
+    } catch (err: any) {
+      setError(err?.message || "Failed to update system secrets.");
+    } finally {
+      setIsSavingSecrets(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
@@ -253,6 +324,260 @@ export default function DomainIngressSettingsPage() {
         </div>
       )}
 
+      {/* Navigation Tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab("domain");
+            setError(null);
+            setSuccess(null);
+          }}
+          className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-all ${
+            activeTab === "domain"
+              ? "bg-sky-500/15 text-sky-300 border border-sky-500/30"
+              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+          }`}
+        >
+          <Globe className="h-4 w-4" />
+          <span>Domain &amp; Ingress (Port 443)</span>
+        </button>
+
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("secrets");
+              setError(null);
+              setSuccess(null);
+            }}
+            className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-all ${
+              activeTab === "secrets"
+                ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+            }`}
+          >
+            <KeyRound className="h-4 w-4" />
+            <span>Security &amp; Secrets</span>
+          </button>
+        )}
+      </div>
+
+      {activeTab === "secrets" && isAdmin ? (
+        <form onSubmit={handleSaveSecrets} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <KeyRound className="h-5 w-5 text-amber-400" />
+                  <span>System Cryptographic &amp; Database Secrets</span>
+                </CardTitle>
+                <CardDescription>
+                  Configure or rotate Kraken&apos;s core secrets at any time. Changes persist to <code className="text-slate-300">.kraken_secrets.json</code>, rotate <code className="text-slate-300">ENCRYPTION_KEY_PREVIOUS</code> without downtime, update PostgreSQL passwords, and synchronize <code className="text-slate-300">Secret/kraken-secrets</code> in Kubernetes.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setJwtSecretInput(generateStrongSecret(48));
+                      setEncryptionKeyInput(generateStrongSecret(48));
+                      setDbPasswordInput(generateStrongSecret(24));
+                      setRecoveryKeyInput(generateStrongSecret(48));
+                    }}
+                  >
+                    <Sparkles className="h-3.5 w-3.5 mr-1.5 text-sky-400" />
+                    Generate All New Secrets
+                  </Button>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-300">JWT_SECRET (32+ chars)</label>
+                    <button
+                      type="button"
+                      onClick={() => setJwtSecretInput(generateStrongSecret(48))}
+                      className="text-[11px] text-sky-400 hover:underline"
+                    >
+                      Generate
+                    </button>
+                  </div>
+                  <div className="mt-1">
+                    <Input
+                      type="password"
+                      placeholder="Leave blank to keep current JWT_SECRET"
+                      value={jwtSecretInput}
+                      onChange={(e) => setJwtSecretInput(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-300">
+                      ENCRYPTION_KEY (32+ chars — automatically archives old key to ENCRYPTION_KEY_PREVIOUS)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setEncryptionKeyInput(generateStrongSecret(48))}
+                      className="text-[11px] text-sky-400 hover:underline"
+                    >
+                      Generate
+                    </button>
+                  </div>
+                  <div className="mt-1">
+                    <Input
+                      type="password"
+                      placeholder="Leave blank to keep current ENCRYPTION_KEY"
+                      value={encryptionKeyInput}
+                      onChange={(e) => setEncryptionKeyInput(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-300">DB_PASSWORD / POSTGRES_PASSWORD (8+ chars)</label>
+                    <button
+                      type="button"
+                      onClick={() => setDbPasswordInput(generateStrongSecret(24))}
+                      className="text-[11px] text-sky-400 hover:underline"
+                    >
+                      Generate
+                    </button>
+                  </div>
+                  <div className="mt-1">
+                    <Input
+                      type="password"
+                      placeholder="Leave blank to keep current PostgreSQL password"
+                      value={dbPasswordInput}
+                      onChange={(e) => setDbPasswordInput(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-300">ADMIN_RECOVERY_KEY (Optional, 32+ chars)</label>
+                    <button
+                      type="button"
+                      onClick={() => setRecoveryKeyInput(generateStrongSecret(48))}
+                      className="text-[11px] text-sky-400 hover:underline"
+                    >
+                      Generate
+                    </button>
+                  </div>
+                  <div className="mt-1">
+                    <Input
+                      type="password"
+                      placeholder="Leave blank to keep current recovery key"
+                      value={recoveryKeyInput}
+                      onChange={(e) => setRecoveryKeyInput(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-800/80">
+                  <div>
+                    <label className="text-xs font-medium text-slate-300">MICROSOFT_TENANT_ID</label>
+                    <div className="mt-1">
+                      <Input
+                        placeholder="common"
+                        value={msTenantIDInput}
+                        onChange={(e) => setMsTenantIDInput(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-300">MICROSOFT_CLIENT_ID</label>
+                    <div className="mt-1">
+                      <Input
+                        placeholder="04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+                        value={msClientIDInput}
+                        onChange={(e) => setMsClientIDInput(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {secretsData?.k8s_connected && (
+                  <label className="flex items-center space-x-2.5 cursor-pointer select-none pt-1">
+                    <input
+                      type="checkbox"
+                      checked={restartOnSecretsSave}
+                      onChange={(e) => setRestartOnSecretsSave(e.target.checked)}
+                      className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500"
+                    />
+                    <span className="text-xs text-slate-300">
+                      Trigger rolling restart of <code className="text-slate-400">backend</code> deployment after updating <code className="text-slate-400">Secret/kraken-secrets</code>
+                    </span>
+                  </label>
+                )}
+
+                <div className="flex justify-end pt-3 border-t border-slate-800/80">
+                  <Button type="submit" isLoading={isSavingSecrets} className="font-semibold">
+                    <ShieldCheck className="h-4 w-4 mr-2" />
+                    Save &amp; Sync Secrets
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Secret Inventory &amp; Status</CardTitle>
+                <CardDescription>
+                  Values are never revealed after saving
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {(secretsData?.secrets || []).map((item) => (
+                  <div
+                    key={item.key}
+                    className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-mono font-semibold text-white">{item.key}</span>
+                      <Badge
+                        variant={
+                          item.configured
+                            ? item.source === "auto_generated"
+                              ? "pending"
+                              : "running"
+                            : "outline"
+                        }
+                        className="text-[10px]"
+                      >
+                        {item.configured ? item.source : "unset"}
+                      </Badge>
+                    </div>
+                    <p className="text-[11px] text-slate-400">{item.description}</p>
+                    {item.masked_hint && (
+                      <div className="text-[10px] font-mono text-slate-500">
+                        Active: {item.masked_hint}
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {secretsData?.k8s_connected && (
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
+                    <span className="text-slate-400">K8s Secret/kraken-secrets</span>
+                    <Badge variant={secretsData.k8s_secret_present ? "running" : "pending"}>
+                      {secretsData.k8s_secret_present ? "Present" : "Will Create on Save"}
+                    </Badge>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </form>
+      ) : (
       <form onSubmit={handleSave} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 columns: Domain & Ingress Configuration */}
         <div className="lg:col-span-2 space-y-6">
@@ -641,6 +966,7 @@ export default function DomainIngressSettingsPage() {
           </Card>
         </div>
       </form>
+      )}
     </div>
   );
 }

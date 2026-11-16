@@ -101,12 +101,33 @@ func main() {
 	authHandler := auth.NewHandler(dbHandle.DB, cfg.JWTSecret, cfg.AllowRegistration)
 	authHandler.SetAdminRecoveryKey(cfg.AdminRecoveryKey)
 	authHandler.SetMicrosoftConfig(cfg.MicrosoftClientID, cfg.MicrosoftTenantID)
+	authHandler.SecretsPreconfigured = cfg.SecretsPreconfigured
+	authHandler.MissingEnvSecrets = cfg.MissingEnvSecrets
 	dockerHandler := docker.NewHandler(dockerService, dbHandle.DB)
 	hostHandler := host.NewHandler(dbHandle.DB, dockerService)
 	sourceHandler := source.NewHandler(sourceService, dbHandle.DB)
 	k8sHandler := k8s.NewHandler(k8sService, dbHandle.DB)
 	auditHandler := audit.NewHandler(dbHandle.DB)
 	systemHandler := system.NewHandler(dbHandle, dockerService, k8sService, startTime)
+	systemHandler.SetSecretsCallbacks(
+		cfg.PluginsDir,
+		func(newJWT string) { authHandler.JWTSecret = newJWT },
+		func(newRec string) { authHandler.SetAdminRecoveryKey(newRec) },
+		func(cid, tid string) { authHandler.SetMicrosoftConfig(cid, tid) },
+	)
+	authHandler.OnSecretsSetup = func(ctx context.Context, req models.InitialSetupRequest, actor string, userID uint) error {
+		restart := false
+		_, err := systemHandler.ApplySystemSecrets(ctx, models.UpdateSystemSecretsRequest{
+			JWTSecret:          req.JWTSecret,
+			EncryptionKey:      req.EncryptionKey,
+			AdminRecoveryKey:   req.AdminRecoveryKey,
+			DBPassword:         req.DBPassword,
+			MicrosoftClientID:  req.MicrosoftClientID,
+			MicrosoftTenantID:  req.MicrosoftTenantID,
+			RestartDeployments: &restart,
+		}, actor, userID)
+		return err
+	}
 	systemHandler.SetOnOriginsUpdated(func(origins []string) {
 		merged := append([]string{}, cfg.CorsOrigins...)
 		merged = append(merged, origins...)
@@ -284,11 +305,13 @@ func main() {
 			adminAuth.Post("/api/auth/password-recovery-requests/{id}/reject", authHandler.RejectPasswordRecoveryRequest)
 		})
 
-		// System Status & Network Configuration
+		// System Status, Network & Secrets Configuration
 		r.Get("/api/system/status", systemHandler.StatusHandler)
 		r.Get("/api/system/network-config", systemHandler.GetNetworkConfigHandler)
 		r.With(auth.RequireRole("admin")).Put("/api/system/network-config", systemHandler.UpdateNetworkConfigHandler)
 		r.With(auth.RequireRole("admin")).Post("/api/system/network-config/regenerate-cert", systemHandler.RegenerateCertificateHandler)
+		r.With(auth.RequireRole("admin")).Get("/api/system/secrets", systemHandler.GetSecretsStatusHandler)
+		r.With(auth.RequireRole("admin")).Put("/api/system/secrets", systemHandler.UpdateSecretsHandler)
 
 		// Audit Logs (Restricted to Admin only)
 		r.With(auth.RequireRole("admin")).Get("/api/audit-logs", auditHandler.ListLogsHandler)

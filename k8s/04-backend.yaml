@@ -59,6 +59,7 @@ spec:
                 name: kraken-config
             - secretRef:
                 name: kraken-secrets
+                optional: true
           volumeMounts:
             - name: plugins-data
               mountPath: /app/data/plugins

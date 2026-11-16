@@ -25,15 +25,18 @@ import (
 )
 
 type Handler struct {
-	DB                *gorm.DB
-	JWTSecret         string
-	AdminRecoveryKey  string
-	AllowRegistration bool
-	MSBroker          *MicrosoftSessionBroker
-	MicrosoftClientID string
-	MicrosoftTenantID string
-	OnNetworkSetup    func(ctx context.Context, domains []string, ingressEnabled bool, ingressClass string, actor string, userID uint) error
-	setupMu           sync.Mutex
+	DB                   *gorm.DB
+	JWTSecret            string
+	AdminRecoveryKey     string
+	AllowRegistration    bool
+	MSBroker             *MicrosoftSessionBroker
+	MicrosoftClientID    string
+	MicrosoftTenantID    string
+	SecretsPreconfigured bool
+	MissingEnvSecrets    []string
+	OnNetworkSetup       func(ctx context.Context, domains []string, ingressEnabled bool, ingressClass string, actor string, userID uint) error
+	OnSecretsSetup       func(ctx context.Context, req models.InitialSetupRequest, actor string, userID uint) error
+	setupMu              sync.Mutex
 }
 
 func NewHandler(db *gorm.DB, secret string, allowRegistration bool) *Handler {
@@ -87,11 +90,13 @@ func (h *Handler) GetSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.SetupStatusResponse{
-		NeedsSetup:        needsSetup,
-		AllowRegistration: h.AllowRegistration,
-		RuntimeMode:       runtimeMode,
-		MicrosoftClientID: h.MicrosoftClientID,
-		MicrosoftTenantID: h.MicrosoftTenantID,
+		NeedsSetup:           needsSetup,
+		AllowRegistration:    h.AllowRegistration,
+		RuntimeMode:          runtimeMode,
+		MicrosoftClientID:    h.MicrosoftClientID,
+		MicrosoftTenantID:    h.MicrosoftTenantID,
+		SecretsPreconfigured: h.SecretsPreconfigured,
+		MissingEnvSecrets:    h.MissingEnvSecrets,
 	})
 }
 
@@ -171,6 +176,16 @@ func (h *Handler) CompleteInitialSetup(w http.ResponseWriter, r *http.Request) {
 		h.AllowRegistration = *req.AllowRegistration
 	}
 	h.SetMicrosoftConfig(req.MicrosoftClientID, req.MicrosoftTenantID)
+
+	if h.OnSecretsSetup != nil && (strings.TrimSpace(req.JWTSecret) != "" || strings.TrimSpace(req.EncryptionKey) != "" || strings.TrimSpace(req.AdminRecoveryKey) != "" || strings.TrimSpace(req.DBPassword) != "") {
+		if secErr := h.OnSecretsSetup(r.Context(), req, user.Username, user.ID); secErr != nil {
+			_ = h.DB.Unscoped().Delete(&user).Error
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": secErr.Error()})
+			return
+		}
+	}
 
 	if h.OnNetworkSetup != nil && (len(req.Domains) > 0 || (req.IngressEnabled != nil && *req.IngressEnabled)) {
 		ingressOn := false

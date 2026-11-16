@@ -92,8 +92,9 @@ docker compose up -d --build
 - **API Health**: [https://localhost:8443/api/system/status](https://localhost:8443/api/system/status)
 - **Isolamento de Rede**: As portas internas `3000` (frontend) e `8080` (backend) operam exclusivamente dentro da rede privada `kraken-network`, protegidas contra conexões externas diretas.
 
-### 3. First-Time Setup
-When starting Kraken without `INITIAL_ADMIN_PASSWORD` configured, opening the dashboard or `/login` automatically redirects to **`/setup`**, where the first operator defines the administrator credentials, password, registration policy, and optional Microsoft Entra ID SSO configuration.
+### 3. First-Time Setup & Zero-Secret Boot
+You can start Kraken with `docker compose up -d --build` **even without a `.env` file**, or deploy `k8s/` **without pre-populating `Secret/kraken-secrets`**.
+When starting Kraken without `INITIAL_ADMIN_PASSWORD` configured, opening the dashboard or `/login` automatically redirects to **`/setup`**, where the first operator defines the administrator credentials, password, system secrets (`JWT_SECRET`, `ENCRYPTION_KEY`, `DB_PASSWORD`, `ADMIN_RECOVERY_KEY` — or auto-generates them in one click), registration policy, and optional FQDNs / SSO configuration. All secrets can also be inspected or rotated anytime later in **Domain & Ingress / Security & Secrets** (`/settings`).
 
 ---
 

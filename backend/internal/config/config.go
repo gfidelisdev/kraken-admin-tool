@@ -32,10 +32,12 @@ type Config struct {
 	Environment       string
 	RuntimeMode       string
 	K8sNamespace      string
-	AllowRegistration bool
-	PluginsDir        string
-	MicrosoftClientID string
-	MicrosoftTenantID string
+	AllowRegistration    bool
+	PluginsDir           string
+	MicrosoftClientID    string
+	MicrosoftTenantID    string
+	SecretsPreconfigured bool
+	MissingEnvSecrets    []string
 }
 
 var knownInsecureSecrets = map[string]bool{
@@ -94,9 +96,14 @@ func LoadDotEnv(paths ...string) {
 	}
 }
 
-type persistentSecrets struct {
-	JWTSecret     string `json:"jwt_secret"`
-	EncryptionKey string `json:"encryption_key"`
+// PersistentSecrets stores cryptographic and database secrets persisted on disk across restarts.
+type PersistentSecrets struct {
+	JWTSecret             string `json:"jwt_secret"`
+	EncryptionKey         string `json:"encryption_key"`
+	EncryptionKeyPrevious string `json:"encryption_key_previous,omitempty"`
+	AdminRecoveryKey      string `json:"admin_recovery_key,omitempty"`
+	DBPassword            string `json:"db_password,omitempty"`
+	ConfiguredByAdmin     bool   `json:"configured_by_admin,omitempty"`
 }
 
 func generateEphemeralSecret() string {
@@ -107,12 +114,40 @@ func generateEphemeralSecret() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func loadOrGeneratePersistentSecrets(pluginsDir string) (string, string) {
-	secretsPath := filepath.Join(pluginsDir, ".kraken_secrets.json")
-	var stored persistentSecrets
-	if raw, err := os.ReadFile(secretsPath); err == nil {
-		_ = json.Unmarshal(raw, &stored)
+// LoadPersistentSecrets reads the persisted secrets JSON file from pluginsDir if present.
+func LoadPersistentSecrets(pluginsDir string) (PersistentSecrets, error) {
+	var stored PersistentSecrets
+	if pluginsDir == "" {
+		return stored, os.ErrNotExist
 	}
+	secretsPath := filepath.Join(pluginsDir, ".kraken_secrets.json")
+	raw, err := os.ReadFile(secretsPath)
+	if err != nil {
+		return stored, err
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return stored, err
+	}
+	return stored, nil
+}
+
+// SavePersistentSecrets writes the persistent secrets JSON file with 0600 permissions.
+func SavePersistentSecrets(pluginsDir string, s PersistentSecrets) error {
+	if pluginsDir == "" {
+		return fmt.Errorf("pluginsDir is empty")
+	}
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(pluginsDir, ".kraken_secrets.json"), encoded, 0600)
+}
+
+func loadOrGeneratePersistentSecrets(pluginsDir string) (PersistentSecrets, bool) {
+	stored, _ := LoadPersistentSecrets(pluginsDir)
 
 	dirty := false
 	if IsInsecureSecret(stored.JWTSecret) {
@@ -125,18 +160,12 @@ func loadOrGeneratePersistentSecrets(pluginsDir string) (string, string) {
 	}
 
 	if dirty && pluginsDir != "" {
-		if err := os.MkdirAll(pluginsDir, 0755); err == nil {
-			if encoded, err := json.MarshalIndent(stored, "", "  "); err == nil {
-				if err := os.WriteFile(secretsPath, encoded, 0600); err != nil {
-					log.Printf("[SECURITY] Warning: failed to persist auto-generated secrets to %s: %v", secretsPath, err)
-				}
-			}
-		} else {
-			log.Printf("[SECURITY] Warning: failed to create plugins directory %s for secret persistence: %v", pluginsDir, err)
+		if err := SavePersistentSecrets(pluginsDir, stored); err != nil {
+			log.Printf("[SECURITY] Warning: failed to persist auto-generated secrets to %s/.kraken_secrets.json: %v", pluginsDir, err)
 		}
 	}
 
-	return stored.JWTSecret, stored.EncryptionKey
+	return stored, dirty
 }
 
 func detectRuntimeMode() string {
@@ -204,29 +233,62 @@ func Load() *Config {
 	pluginsDir := getEnv("PLUGINS_DIR", "./data/plugins")
 	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	encryptionKey := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY"))
+	dbPassword := strings.TrimSpace(os.Getenv("DB_PASSWORD"))
+	adminRecoveryKey := strings.TrimSpace(os.Getenv("ADMIN_RECOVERY_KEY"))
 
-	if IsInsecureSecret(jwtSecret) || IsInsecureSecret(encryptionKey) {
-		var persistedJWT, persistedEnc string
+	var missingEnv []string
+	if IsInsecureSecret(jwtSecret) {
+		missingEnv = append(missingEnv, "JWT_SECRET")
+	}
+	if IsInsecureSecret(encryptionKey) {
+		missingEnv = append(missingEnv, "ENCRYPTION_KEY")
+	}
+	if dbPassword == "" {
+		missingEnv = append(missingEnv, "DB_PASSWORD")
+	}
+	if adminRecoveryKey == "" {
+		missingEnv = append(missingEnv, "ADMIN_RECOVERY_KEY")
+	}
+
+	secretsPreconfigured := !IsInsecureSecret(jwtSecret) && !IsInsecureSecret(encryptionKey)
+
+	if IsInsecureSecret(jwtSecret) || IsInsecureSecret(encryptionKey) || dbPassword == "" || adminRecoveryKey == "" {
+		var stored PersistentSecrets
 		// Avoid creating ./data/plugins inside source directories during unit tests unless PLUGINS_DIR is explicitly set.
 		if flag.Lookup("test.v") != nil && strings.TrimSpace(os.Getenv("PLUGINS_DIR")) == "" {
-			persistedJWT = generateEphemeralSecret()
-			persistedEnc = generateEphemeralSecret()
+			stored = PersistentSecrets{
+				JWTSecret:     generateEphemeralSecret(),
+				EncryptionKey: generateEphemeralSecret(),
+			}
 		} else {
-			persistedJWT, persistedEnc = loadOrGeneratePersistentSecrets(pluginsDir)
+			stored, _ = loadOrGeneratePersistentSecrets(pluginsDir)
+			if stored.ConfiguredByAdmin {
+				secretsPreconfigured = true
+			}
 			log.Printf("[SECURITY] Persistent cryptographic keys initialized in %s/.kraken_secrets.json (set JWT_SECRET and ENCRYPTION_KEY explicitly to override).", pluginsDir)
 		}
 
 		if IsInsecureSecret(jwtSecret) {
-			jwtSecret = persistedJWT
+			jwtSecret = stored.JWTSecret
 			_ = os.Setenv("JWT_SECRET", jwtSecret)
 		}
 		if IsInsecureSecret(encryptionKey) {
-			encryptionKey = persistedEnc
+			encryptionKey = stored.EncryptionKey
 			_ = os.Setenv("ENCRYPTION_KEY", encryptionKey)
+		}
+		if strings.TrimSpace(os.Getenv("ENCRYPTION_KEY_PREVIOUS")) == "" && stored.EncryptionKeyPrevious != "" {
+			_ = os.Setenv("ENCRYPTION_KEY_PREVIOUS", stored.EncryptionKeyPrevious)
+		}
+		if dbPassword == "" && stored.DBPassword != "" {
+			dbPassword = stored.DBPassword
+			_ = os.Setenv("DB_PASSWORD", dbPassword)
+		}
+		if adminRecoveryKey == "" && stored.AdminRecoveryKey != "" {
+			adminRecoveryKey = stored.AdminRecoveryKey
+			_ = os.Setenv("ADMIN_RECOVERY_KEY", adminRecoveryKey)
 		}
 	}
 
-	adminRecoveryKey := strings.TrimSpace(os.Getenv("ADMIN_RECOVERY_KEY"))
 	if adminRecoveryKey != "" {
 		if IsInsecureSecret(adminRecoveryKey) || adminRecoveryKey == jwtSecret {
 			log.Println("[SECURITY WARNING] ADMIN_RECOVERY_KEY is weak, a known default, or identical to JWT_SECRET; disabling HTTP admin recovery endpoint.")
@@ -235,27 +297,29 @@ func Load() *Config {
 	}
 
 	return &Config{
-		Port:              getEnv("BACKEND_PORT", getEnv("PORT", "8080")),
-		DBHost:            getEnv("DB_HOST", "localhost"),
-		DBPort:            getEnv("DB_PORT", "5432"),
-		DBUser:            getEnv("DB_USER", "postgres"),
-		DBPassword:        getEnv("DB_PASSWORD", ""),
-		DBName:            getEnv("DB_NAME", "kraken_db"),
-		DBSSLMode:         getEnv("DB_SSLMODE", "disable"),
-		JWTSecret:         jwtSecret,
-		EncryptionKey:     encryptionKey,
-		AdminRecoveryKey:  adminRecoveryKey,
-		TrustedProxies:    trustedProxies,
-		DockerHost:        getEnv("DOCKER_HOST", ""),
-		Kubeconfig:        getEnv("KUBECONFIG", defaultKubeconfig),
-		CorsOrigins:       origins,
-		Environment:       env,
-		RuntimeMode:       detectRuntimeMode(),
-		K8sNamespace:      detectK8sNamespace(),
-		AllowRegistration: getEnv("ALLOW_REGISTRATION", "false") == "true",
-		PluginsDir:        pluginsDir,
-		MicrosoftClientID: getEnv("MICROSOFT_CLIENT_ID", "04b07795-8ddb-461a-bbee-02f9e1bf7b46"),
-		MicrosoftTenantID: getEnv("MICROSOFT_TENANT_ID", "common"),
+		Port:                 getEnv("BACKEND_PORT", getEnv("PORT", "8080")),
+		DBHost:               getEnv("DB_HOST", "localhost"),
+		DBPort:               getEnv("DB_PORT", "5432"),
+		DBUser:               getEnv("DB_USER", "postgres"),
+		DBPassword:           dbPassword,
+		DBName:               getEnv("DB_NAME", "kraken_db"),
+		DBSSLMode:            getEnv("DB_SSLMODE", "disable"),
+		JWTSecret:            jwtSecret,
+		EncryptionKey:        encryptionKey,
+		AdminRecoveryKey:     adminRecoveryKey,
+		TrustedProxies:       trustedProxies,
+		DockerHost:           getEnv("DOCKER_HOST", ""),
+		Kubeconfig:           getEnv("KUBECONFIG", defaultKubeconfig),
+		CorsOrigins:          origins,
+		Environment:          env,
+		RuntimeMode:          detectRuntimeMode(),
+		K8sNamespace:         detectK8sNamespace(),
+		AllowRegistration:    getEnv("ALLOW_REGISTRATION", "false") == "true",
+		PluginsDir:           pluginsDir,
+		MicrosoftClientID:    getEnv("MICROSOFT_CLIENT_ID", "04b07795-8ddb-461a-bbee-02f9e1bf7b46"),
+		MicrosoftTenantID:    getEnv("MICROSOFT_TENANT_ID", "common"),
+		SecretsPreconfigured: secretsPreconfigured,
+		MissingEnvSecrets:    missingEnv,
 	}
 }
 

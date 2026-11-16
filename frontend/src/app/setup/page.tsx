@@ -15,10 +15,24 @@ import {
   Loader2,
   Container,
   Server,
+  KeyRound,
+  Sparkles,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
+
+function generateStrongSecret(byteLen = 48): string {
+  const bytes = new Uint8Array(byteLen);
+  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLen; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 export default function SetupPage() {
   const router = useRouter();
@@ -36,12 +50,20 @@ export default function SetupPage() {
   const [fqdnInput, setFqdnInput] = useState("");
   const [enableIngress, setEnableIngress] = useState(false);
   const [ingressClassName, setIngressClassName] = useState("");
+  const [showSecretsConfig, setShowSecretsConfig] = useState(false);
+  const [jwtSecret, setJwtSecret] = useState("");
+  const [encryptionKey, setEncryptionKey] = useState("");
+  const [dbPassword, setDbPassword] = useState("");
+  const [adminRecoveryKey, setAdminRecoveryKey] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (setupStatus) {
       setAllowRegistration(Boolean(setupStatus.allow_registration));
+      if (setupStatus.secrets_preconfigured === false) {
+        setShowSecretsConfig(true);
+      }
     }
   }, [setupStatus]);
 
@@ -104,6 +126,10 @@ export default function SetupPage() {
         domains: parsedDomains.length > 0 ? parsedDomains : undefined,
         ingress_enabled: parsedDomains.length > 0 ? enableIngress : undefined,
         ingress_class_name: ingressClassName.trim() || undefined,
+        jwt_secret: jwtSecret.trim() || undefined,
+        encryption_key: encryptionKey.trim() || undefined,
+        db_password: dbPassword.trim() || undefined,
+        admin_recovery_key: adminRecoveryKey.trim() || undefined,
       });
       router.replace("/");
     } catch (err: any) {
@@ -244,6 +270,138 @@ export default function SetupPage() {
                   </span>
                 </div>
               </label>
+
+              <div className="border-t border-slate-800/80 pt-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowSecretsConfig((prev) => !prev)}
+                  className="flex w-full items-center justify-between text-xs font-medium text-slate-300 hover:text-white"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <KeyRound className="h-3.5 w-3.5 text-amber-400" />
+                    <span>
+                      System Secrets &amp; Keys{" "}
+                      {setupStatus?.secrets_preconfigured === false
+                        ? "(Recommended — Not Set in Env / K8s Secret)"
+                        : "(Optional Override)"}
+                    </span>
+                  </span>
+                  {showSecretsConfig ? (
+                    <ChevronUp className="h-4 w-4 text-slate-400" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4 text-slate-400" />
+                  )}
+                </button>
+
+                {showSecretsConfig && (
+                  <div className="mt-3 space-y-3">
+                    <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200">
+                      <span>
+                        {setupStatus?.secrets_preconfigured === false
+                          ? "No external .env or Kubernetes Secret detected. Provide or auto-generate secrets below."
+                          : "Secrets are already initialized; leave blank to keep current values or enter new ones."}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!jwtSecret) setJwtSecret(generateStrongSecret(48));
+                          if (!encryptionKey) setEncryptionKey(generateStrongSecret(48));
+                          if (!dbPassword) setDbPassword(generateStrongSecret(24));
+                          if (!adminRecoveryKey) setAdminRecoveryKey(generateStrongSecret(48));
+                        }}
+                        className="shrink-0 inline-flex items-center gap-1 rounded-md bg-sky-500/20 px-2 py-1 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/30"
+                      >
+                        <Sparkles className="h-3 w-3" />
+                        Generate All
+                      </button>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-slate-400">JWT_SECRET (32+ chars)</label>
+                        <button
+                          type="button"
+                          onClick={() => setJwtSecret(generateStrongSecret(48))}
+                          className="text-[10px] text-sky-400 hover:underline"
+                        >
+                          Generate
+                        </button>
+                      </div>
+                      <div className="mt-1">
+                        <Input
+                          type="password"
+                          placeholder="Leave blank to keep auto-generated secret"
+                          value={jwtSecret}
+                          onChange={(e) => setJwtSecret(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-slate-400">ENCRYPTION_KEY (32+ chars)</label>
+                        <button
+                          type="button"
+                          onClick={() => setEncryptionKey(generateStrongSecret(48))}
+                          className="text-[10px] text-sky-400 hover:underline"
+                        >
+                          Generate
+                        </button>
+                      </div>
+                      <div className="mt-1">
+                        <Input
+                          type="password"
+                          placeholder="Leave blank to keep auto-generated key"
+                          value={encryptionKey}
+                          onChange={(e) => setEncryptionKey(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-slate-400">DB_PASSWORD / POSTGRES_PASSWORD (8+ chars)</label>
+                        <button
+                          type="button"
+                          onClick={() => setDbPassword(generateStrongSecret(24))}
+                          className="text-[10px] text-sky-400 hover:underline"
+                        >
+                          Generate
+                        </button>
+                      </div>
+                      <div className="mt-1">
+                        <Input
+                          type="password"
+                          placeholder="Set PostgreSQL password (syncs live DB & K8s Secret)"
+                          value={dbPassword}
+                          onChange={(e) => setDbPassword(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-slate-400">ADMIN_RECOVERY_KEY (Optional, 32+ chars)</label>
+                        <button
+                          type="button"
+                          onClick={() => setAdminRecoveryKey(generateStrongSecret(48))}
+                          className="text-[10px] text-sky-400 hover:underline"
+                        >
+                          Generate
+                        </button>
+                      </div>
+                      <div className="mt-1">
+                        <Input
+                          type="password"
+                          placeholder="Optional emergency HTTP recovery key"
+                          value={adminRecoveryKey}
+                          onChange={(e) => setAdminRecoveryKey(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div className="border-t border-slate-800/80 pt-2.5">
                 <button

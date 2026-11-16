@@ -38,6 +38,14 @@ spec:
         - name: postgres
           image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              if [ -z "$POSTGRES_PASSWORD" ]; then
+                export POSTGRES_HOST_AUTH_METHOD=trust
+              fi
+              exec docker-entrypoint.sh postgres
           ports:
             - name: postgres
               containerPort: 5432
@@ -47,6 +55,7 @@ spec:
                 name: kraken-config
             - secretRef:
                 name: kraken-secrets
+                optional: true
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data

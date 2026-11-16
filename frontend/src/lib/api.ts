@@ -46,6 +46,8 @@ import {
   InitialSetupRequest,
   NetworkConfigResponse,
   UpdateNetworkConfigRequest,
+  SystemSecretsResponse,
+  UpdateSystemSecretsRequest,
 } from "@/types";
 
 const TOKEN_KEY = process.env.NEXT_PUBLIC_AUTH_TOKEN_STORAGE_KEY || "kraken_auth_token";
@@ -1235,4 +1237,13 @@ export async function updateNetworkConfig(payload: UpdateNetworkConfigRequest): 
 
 export async function regenerateNetworkCertificate(): Promise<NetworkConfigResponse> {
   return api.post<NetworkConfigResponse>("/api/system/network-config/regenerate-cert", {});
+}
+
+// System Security Secrets Management (Superadmin)
+export async function getSystemSecrets(): Promise<SystemSecretsResponse> {
+  return api.get<SystemSecretsResponse>("/api/system/secrets");
+}
+
+export async function updateSystemSecrets(payload: UpdateSystemSecretsRequest): Promise<SystemSecretsResponse> {
+  return api.put<SystemSecretsResponse>("/api/system/secrets", payload);
 }

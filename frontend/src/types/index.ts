@@ -54,6 +54,8 @@ export interface SetupStatusResponse {
   runtime_mode: "kubernetes" | "docker" | string;
   microsoft_client_id?: string;
   microsoft_tenant_id?: string;
+  secrets_preconfigured?: boolean;
+  missing_env_secrets?: string[];
 }
 
 export interface InitialSetupRequest {
@@ -66,6 +68,41 @@ export interface InitialSetupRequest {
   domains?: string[];
   ingress_enabled?: boolean;
   ingress_class_name?: string;
+  jwt_secret?: string;
+  encryption_key?: string;
+  admin_recovery_key?: string;
+  db_password?: string;
+}
+
+export interface SecretStatusItem {
+  key: string;
+  label: string;
+  description: string;
+  required: boolean;
+  configured: boolean;
+  source: "environment" | "persisted" | "auto_generated" | "unset" | string;
+  masked_hint?: string;
+}
+
+export interface SystemSecretsResponse {
+  secrets: SecretStatusItem[];
+  runtime_mode: "kubernetes" | "docker" | string;
+  k8s_connected: boolean;
+  k8s_namespace?: string;
+  k8s_secret_present: boolean;
+  configured_by_admin: boolean;
+  microsoft_client_id?: string;
+  microsoft_tenant_id?: string;
+}
+
+export interface UpdateSystemSecretsRequest {
+  jwt_secret?: string;
+  encryption_key?: string;
+  admin_recovery_key?: string;
+  db_password?: string;
+  microsoft_client_id?: string;
+  microsoft_tenant_id?: string;
+  restart_deployments?: boolean;
 }
 
 export interface NetworkConfigResponse {

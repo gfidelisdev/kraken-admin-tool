@@ -51,3 +51,15 @@ Status: resolved
 *   ***Proposed Edit:***
     *   Location: `backend/internal/system/network.go`, `k8s/`, `frontend/src/app/(dashboard)/settings/page.tsx`
     *   Change: Adicionar reconciliador Kubernetes de Ingress/TLS multi-domínio, endpoints `/api/system/network-config` e interface administrativa para gerenciar múltiplos FQDNs e aplicar rollout restart automático.
+
+---
+
+### [Issue 5] [`Interactive Superadmin Secrets Management & Zero-Secret Initial Installation`] - Severity: Blocker
+*   **Affected Scope:** [`docker-compose.yml`](docker-compose.yml), [`k8s/03-postgres.yaml`](k8s/03-postgres.yaml), [`k8s/04-backend.yaml`](k8s/04-backend.yaml), [`secrets.go`](backend/internal/system/secrets.go), [`setup/page.tsx`](frontend/src/app/setup/page.tsx) & [`settings/page.tsx`](frontend/src/app/(dashboard)/settings/page.tsx)
+*   **Discrepancy Description:** Implantações iniciais em Kubernetes sem `Secret/kraken-secrets` ou em Docker Compose sem `.env` falhavam antes de o wizard inicial ser exibido, e não havia painel superadministrativo para inspecionar, definir ou rotacionar os segredos do sistema (`JWT_SECRET`, `ENCRYPTION_KEY`, `ADMIN_RECOVERY_KEY`, `DB_PASSWORD`).
+*   **Rationale:** Permitir inicialização limpa sem arquivo de secret prévio e solicitar os segredos ao administrador no wizard `/setup` (e no painel `/settings`) simplifica o onboarding mantendo criptografia forte e sincronização automática com `Secret/kraken-secrets` e PostgreSQL.
+*   ***AI Suggestion:*** PROPOSE FIX
+*   ***Justification:*** Tornar `kraken-secrets` opcional nos manifestos K8s e `.env` opcional no `docker-compose.yml` (com bootstrap seguro do PostgreSQL), expor endpoints `/api/system/secrets` para gestão/rotação segura e integrar a configuração de segredos no wizard `/setup` e no painel `/settings`.
+*   ***Proposed Edit:***
+    *   Location: `docker-compose.yml`, `k8s/`, `backend/internal/system/secrets.go`, `frontend/src/app/setup/page.tsx`, `frontend/src/app/(dashboard)/settings/page.tsx`
+    *   Change: Suportar boot sem `.env`/`kraken-secrets`, adicionar wizard de segredos na instalação inicial e painel de gestão de segredos para superadministradores.

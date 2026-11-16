@@ -28,7 +28,11 @@ type Handler struct {
 	clientMu            sync.RWMutex
 	k8sClient           kubernetes.Interface
 	k8sNamespace        string
+	pluginsDir          string
 	onOriginsUpdated    func(origins []string)
+	onJWTSecretUpdated  func(secret string)
+	onRecoveryUpdated   func(key string)
+	onMSConfigUpdated   func(clientID, tenantID string)
 	backendRestartDelay time.Duration
 }
 
@@ -59,6 +63,21 @@ func (h *Handler) SetOnOriginsUpdated(fn func(origins []string)) {
 	h.clientMu.Lock()
 	defer h.clientMu.Unlock()
 	h.onOriginsUpdated = fn
+}
+
+// SetSecretsCallbacks configures the plugins directory and live secret update callbacks.
+func (h *Handler) SetSecretsCallbacks(
+	pluginsDir string,
+	onJWT func(string),
+	onRecovery func(string),
+	onMS func(string, string),
+) {
+	h.clientMu.Lock()
+	defer h.clientMu.Unlock()
+	h.pluginsDir = strings.TrimSpace(pluginsDir)
+	h.onJWTSecretUpdated = onJWT
+	h.onRecoveryUpdated = onRecovery
+	h.onMSConfigUpdated = onMS
 }
 
 func (h *Handler) getAuthorizedServerID(r *http.Request) uint {

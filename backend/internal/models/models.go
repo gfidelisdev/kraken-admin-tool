@@ -150,11 +150,13 @@ type AuthResponse struct {
 }
 
 type SetupStatusResponse struct {
-	NeedsSetup        bool   `json:"needs_setup"`
-	AllowRegistration bool   `json:"allow_registration"`
-	RuntimeMode       string `json:"runtime_mode"`
-	MicrosoftClientID string `json:"microsoft_client_id,omitempty"`
-	MicrosoftTenantID string `json:"microsoft_tenant_id,omitempty"`
+	NeedsSetup           bool     `json:"needs_setup"`
+	AllowRegistration    bool     `json:"allow_registration"`
+	RuntimeMode          string   `json:"runtime_mode"`
+	MicrosoftClientID    string   `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID    string   `json:"microsoft_tenant_id,omitempty"`
+	SecretsPreconfigured bool     `json:"secrets_preconfigured"`
+	MissingEnvSecrets    []string `json:"missing_env_secrets,omitempty"`
 }
 
 type InitialSetupRequest struct {
@@ -167,6 +169,10 @@ type InitialSetupRequest struct {
 	Domains           []string `json:"domains,omitempty"`
 	IngressEnabled    *bool    `json:"ingress_enabled,omitempty"`
 	IngressClassName  string   `json:"ingress_class_name,omitempty"`
+	JWTSecret         string   `json:"jwt_secret,omitempty"`
+	EncryptionKey     string   `json:"encryption_key,omitempty"`
+	AdminRecoveryKey  string   `json:"admin_recovery_key,omitempty"`
+	DBPassword        string   `json:"db_password,omitempty"`
 }
 
 type MicrosoftDeviceCodeRequest struct {
@@ -700,6 +706,40 @@ type UpdateNetworkConfigRequest struct {
 	CustomCertPEM      string   `json:"custom_cert_pem,omitempty"`
 	CustomKeyPEM       string   `json:"custom_key_pem,omitempty"`
 	RestartDeployments *bool    `json:"restart_deployments,omitempty"`
+}
+
+// SecretStatusItem describes the configuration state of a system secret without exposing its raw value
+type SecretStatusItem struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+	Configured  bool   `json:"configured"`
+	Source      string `json:"source"` // "environment" | "persisted" | "auto_generated" | "unset"
+	MaskedHint  string `json:"masked_hint,omitempty"`
+}
+
+// SystemSecretsResponse reports all system secret statuses and Kubernetes Secret sync status
+type SystemSecretsResponse struct {
+	Secrets           []SecretStatusItem `json:"secrets"`
+	RuntimeMode       string             `json:"runtime_mode"`
+	K8sConnected      bool               `json:"k8s_connected"`
+	K8sNamespace      string             `json:"k8s_namespace,omitempty"`
+	K8sSecretPresent  bool               `json:"k8s_secret_present"`
+	ConfiguredByAdmin bool               `json:"configured_by_admin"`
+	MicrosoftClientID string             `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID string             `json:"microsoft_tenant_id,omitempty"`
+}
+
+// UpdateSystemSecretsRequest updates or rotates system secrets and optionally syncs them to Kubernetes
+type UpdateSystemSecretsRequest struct {
+	JWTSecret          string `json:"jwt_secret,omitempty"`
+	EncryptionKey      string `json:"encryption_key,omitempty"`
+	AdminRecoveryKey   string `json:"admin_recovery_key,omitempty"`
+	DBPassword         string `json:"db_password,omitempty"`
+	MicrosoftClientID  string `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID  string `json:"microsoft_tenant_id,omitempty"`
+	RestartDeployments *bool  `json:"restart_deployments,omitempty"`
 }
 
 // --- Plugin System Models & DTOs ---
