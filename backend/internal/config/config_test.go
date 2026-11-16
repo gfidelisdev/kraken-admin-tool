@@ -68,3 +68,41 @@ func TestPostgresDSN(t *testing.T) {
 		t.Errorf("expected %s, got %s", expected, cfg.PostgresDSN())
 	}
 }
+
+func TestLoadPersistentSecretsInProductionAndK8sMode(t *testing.T) {
+	os.Clearenv()
+	tmpDir := t.TempDir()
+	os.Setenv("ENVIRONMENT", "production")
+	os.Setenv("PLUGINS_DIR", tmpDir)
+	os.Setenv("KRAKEN_RUNTIME_MODE", "kubernetes")
+	os.Setenv("KRAKEN_NAMESPACE", "kraken")
+	defer os.Clearenv()
+
+	cfg1 := Load()
+	if cfg1.JWTSecret == "" || IsInsecureSecret(cfg1.JWTSecret) {
+		t.Fatalf("expected strong auto-generated JWT_SECRET, got %q", cfg1.JWTSecret)
+	}
+	if cfg1.EncryptionKey == "" || IsInsecureSecret(cfg1.EncryptionKey) {
+		t.Fatalf("expected strong auto-generated ENCRYPTION_KEY, got %q", cfg1.EncryptionKey)
+	}
+	if cfg1.JWTSecret == cfg1.EncryptionKey {
+		t.Fatalf("expected JWT_SECRET and ENCRYPTION_KEY to be distinct")
+	}
+	if cfg1.RuntimeMode != "kubernetes" {
+		t.Errorf("expected RuntimeMode kubernetes, got %q", cfg1.RuntimeMode)
+	}
+	if cfg1.K8sNamespace != "kraken" {
+		t.Errorf("expected K8sNamespace kraken, got %q", cfg1.K8sNamespace)
+	}
+
+	// Simulate fresh restart without env vars; secrets should reload identically from disk
+	os.Unsetenv("JWT_SECRET")
+	os.Unsetenv("ENCRYPTION_KEY")
+	cfg2 := Load()
+	if cfg2.JWTSecret != cfg1.JWTSecret {
+		t.Errorf("expected persisted JWTSecret %q across restarts, got %q", cfg1.JWTSecret, cfg2.JWTSecret)
+	}
+	if cfg2.EncryptionKey != cfg1.EncryptionKey {
+		t.Errorf("expected persisted EncryptionKey %q across restarts, got %q", cfg1.EncryptionKey, cfg2.EncryptionKey)
+	}
+}

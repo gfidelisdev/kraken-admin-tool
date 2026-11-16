@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kraken
+  labels:
+    app.kubernetes.io/name: kraken-admin-tool
+    app.kubernetes.io/part-of: kraken-admin-tool

@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/database"
@@ -15,21 +19,46 @@ import (
 )
 
 type Handler struct {
-	DBHandle  *database.Handle
-	Docker    *docker.DockerService
-	K8s       *k8s.K8sService
-	StartTime time.Time
-	Version   string
+	DBHandle            *database.Handle
+	Docker              *docker.DockerService
+	K8s                 *k8s.K8sService
+	StartTime           time.Time
+	Version             string
+	netMu               sync.Mutex
+	clientMu            sync.RWMutex
+	k8sClient           kubernetes.Interface
+	k8sNamespace        string
+	onOriginsUpdated    func(origins []string)
+	backendRestartDelay time.Duration
 }
 
 func NewHandler(dbHandle *database.Handle, docker *docker.DockerService, k8s *k8s.K8sService, startTime time.Time) *Handler {
 	return &Handler{
-		DBHandle:  dbHandle,
-		Docker:    docker,
-		K8s:       k8s,
-		StartTime: startTime,
-		Version:   "1.1.0",
+		DBHandle:            dbHandle,
+		Docker:              docker,
+		K8s:                 k8s,
+		StartTime:           startTime,
+		Version:             "1.1.0",
+		backendRestartDelay: 500 * time.Millisecond,
 	}
+}
+
+// SetK8sClient configures an explicit Kubernetes clientset and namespace (primarily for testing).
+func (h *Handler) SetK8sClient(cli kubernetes.Interface, namespace string) {
+	h.clientMu.Lock()
+	defer h.clientMu.Unlock()
+	h.k8sClient = cli
+	h.k8sNamespace = strings.TrimSpace(namespace)
+	if cli != nil {
+		h.backendRestartDelay = 0
+	}
+}
+
+// SetOnOriginsUpdated registers a callback invoked whenever configured FQDNs change.
+func (h *Handler) SetOnOriginsUpdated(fn func(origins []string)) {
+	h.clientMu.Lock()
+	defer h.clientMu.Unlock()
+	h.onOriginsUpdated = fn
 }
 
 func (h *Handler) getAuthorizedServerID(r *http.Request) uint {

@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy
+  namespace: kraken
+  labels:
+    app.kubernetes.io/name: kraken-proxy
+    app.kubernetes.io/part-of: kraken-admin-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kraken-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kraken-proxy
+        app.kubernetes.io/part-of: kraken-admin-tool
+    spec:
+      initContainers:
+        - name: generate-tls-certs
+          image: alpine:3.21
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -f /certs/cert.pem ] || [ ! -f /certs/key.pem ]; then
+                apk add --no-cache openssl &&
+                openssl req -x509 -newkey rsa:4096 -nodes \
+                  -keyout /certs/key.pem \
+                  -out /certs/cert.pem \
+                  -days 365 \
+                  -subj "/C=BR/ST=SP/L=Local/O=Kraken Admin Tool/CN=localhost" \
+                  -addext "subjectAltName=DNS:localhost,DNS:proxy,DNS:kraken-proxy,IP:127.0.0.1,IP:::1" &&
+                chmod 600 /certs/key.pem &&
+                chmod 644 /certs/cert.pem
+              fi
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /certs
+      containers:
+        - name: proxy
+          image: nginx:alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-std
+              containerPort: 80
+              protocol: TCP
+            - name: https-std
+              containerPort: 443
+              protocol: TCP
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: kraken-config
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates/default.conf.template
+              subPath: default.conf.template
+              readOnly: true
+            - name: tls-certs
+              mountPath: /etc/nginx/certs
+              readOnly: true
+      volumes:
+        - name: nginx-template
+          configMap:
+            name: kraken-nginx-template
+        - name: tls-certs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: kraken
+  labels:
+    app.kubernetes.io/name: kraken-proxy
+    app.kubernetes.io/part-of: kraken-admin-tool
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: kraken-proxy
+  ports:
+    - name: http-std
+      port: 80
+      targetPort: 80
+      protocol: TCP
+    - name: https-std
+      port: 443
+      targetPort: 443
+      protocol: TCP
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30800
+      protocol: TCP
+    - name: https
+      port: 8443
+      targetPort: 8443
+      nodePort: 30443
+      protocol: TCP

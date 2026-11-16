@@ -107,11 +107,31 @@ func main() {
 	k8sHandler := k8s.NewHandler(k8sService, dbHandle.DB)
 	auditHandler := audit.NewHandler(dbHandle.DB)
 	systemHandler := system.NewHandler(dbHandle, dockerService, k8sService, startTime)
+	systemHandler.SetOnOriginsUpdated(func(origins []string) {
+		merged := append([]string{}, cfg.CorsOrigins...)
+		merged = append(merged, origins...)
+		krakews.SetAllowedOrigins(merged)
+	})
+	authHandler.OnNetworkSetup = func(ctx context.Context, domains []string, ingressEnabled bool, ingressClass string, actor string, userID uint) error {
+		standardHTTPS := true
+		restart := true
+		_, err := systemHandler.ApplyNetworkConfig(ctx, models.UpdateNetworkConfigRequest{
+			IngressEnabled:     ingressEnabled,
+			Domains:            domains,
+			IngressClassName:   ingressClass,
+			StandardHTTPSPort:  &standardHTTPS,
+			TLSMode:            "auto_self_signed",
+			RestartDeployments: &restart,
+		}, actor, userID)
+		return err
+	}
+	systemHandler.EnsureBootNetworkConfig(context.Background())
 
 	pluginsManager, pErr := plugins.NewManager(context.Background(), dbHandle.DB, dockerService, cfg.PluginsDir)
 	if pErr != nil {
 		log.Printf("[PLUGINS] Warning: failed to initialize plugins manager: %v", pErr)
 	} else {
+		pluginsManager.SetK8sService(k8sService)
 		dockerService.SetCredentialResolver(pluginsManager)
 		pluginsManager.SetMicrosoftTokenProvider(func(ctx context.Context, scope string) (string, *models.MicrosoftSessionAccount, error) {
 			if authHandler.MSBroker == nil {
@@ -222,6 +242,8 @@ func main() {
 
 	// Public Auth endpoints
 	r.Route("/api/auth", func(r chi.Router) {
+		r.Get("/setup-status", authHandler.GetSetupStatus)
+		r.With(authRateLimiter.Middleware("Too many setup attempts. Please wait before trying again.")).Post("/setup", authHandler.CompleteInitialSetup)
 		r.With(authRateLimiter.Middleware("Too many registration attempts. Please wait before trying again.")).Post("/register", authHandler.Register)
 		r.With(authRateLimiter.Middleware("Too many login attempts. Please wait before trying again.")).Post("/login", authHandler.Login)
 		r.With(authRateLimiter.Middleware("Too many login attempts. Please wait before trying again.")).Post("/microsoft/device-code", authHandler.StartMicrosoftDeviceLogin)
@@ -262,8 +284,11 @@ func main() {
 			adminAuth.Post("/api/auth/password-recovery-requests/{id}/reject", authHandler.RejectPasswordRecoveryRequest)
 		})
 
-		// System Status (All authenticated users)
+		// System Status & Network Configuration
 		r.Get("/api/system/status", systemHandler.StatusHandler)
+		r.Get("/api/system/network-config", systemHandler.GetNetworkConfigHandler)
+		r.With(auth.RequireRole("admin")).Put("/api/system/network-config", systemHandler.UpdateNetworkConfigHandler)
+		r.With(auth.RequireRole("admin")).Post("/api/system/network-config/regenerate-cert", systemHandler.RegenerateCertificateHandler)
 
 		// Audit Logs (Restricted to Admin only)
 		r.With(auth.RequireRole("admin")).Get("/api/audit-logs", auditHandler.ListLogsHandler)

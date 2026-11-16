@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -506,5 +507,100 @@ func TestHandler_ChangePassword(t *testing.T) {
 	db.First(&updated, user.ID)
 	if err := bcrypt.CompareHashAndPassword([]byte(updated.PasswordHash), []byte("freshNewPassword123")); err != nil {
 		t.Errorf("failed to verify updated password hash: %v", err)
+	}
+}
+
+func TestHandler_SetupStatus_And_CompleteInitialSetup(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHandler(db, "test-jwt-secret-that-is-32-chars-minimum", false)
+
+	os.Setenv("KRAKEN_RUNTIME_MODE", "kubernetes")
+	defer os.Unsetenv("KRAKEN_RUNTIME_MODE")
+
+	// 1. Setup status should report needs_setup = true when no admin exists
+	statusReq := httptest.NewRequest("GET", "/api/auth/setup-status", nil)
+	statusRec := httptest.NewRecorder()
+	h.GetSetupStatus(statusRec, statusReq)
+
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for setup-status, got %d: %s", statusRec.Code, statusRec.Body.String())
+	}
+
+	var st models.SetupStatusResponse
+	if err := json.NewDecoder(statusRec.Body).Decode(&st); err != nil {
+		t.Fatalf("failed to decode setup-status: %v", err)
+	}
+	if !st.NeedsSetup {
+		t.Fatalf("expected NeedsSetup=true before setup")
+	}
+	if st.RuntimeMode != "kubernetes" {
+		t.Errorf("expected RuntimeMode='kubernetes', got %q", st.RuntimeMode)
+	}
+
+	// 2. Short password (< 8 chars) should be rejected with 400
+	shortPayload, _ := json.Marshal(models.InitialSetupRequest{
+		AdminUsername: "admin",
+		AdminEmail:    "admin@kraken.local",
+		AdminPassword: "short",
+	})
+	shortReq := httptest.NewRequest("POST", "/api/auth/setup", bytes.NewReader(shortPayload))
+	shortRec := httptest.NewRecorder()
+	h.CompleteInitialSetup(shortRec, shortReq)
+
+	if shortRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for short password, got %d: %s", shortRec.Code, shortRec.Body.String())
+	}
+
+	// 3. Valid initial setup creates admin, configures settings, and returns 201 + JWT
+	allowReg := true
+	validPayload, _ := json.Marshal(models.InitialSetupRequest{
+		AdminUsername:     "rootadmin",
+		AdminEmail:        "root@kraken.local",
+		AdminPassword:     "SuperSecretAdmin123!",
+		AllowRegistration: &allowReg,
+		MicrosoftTenantID: "custom-tenant",
+		MicrosoftClientID: "custom-client",
+	})
+	setupReq := httptest.NewRequest("POST", "/api/auth/setup", bytes.NewReader(validPayload))
+	setupRec := httptest.NewRecorder()
+	h.CompleteInitialSetup(setupRec, setupReq)
+
+	if setupRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for initial setup, got %d: %s", setupRec.Code, setupRec.Body.String())
+	}
+
+	var authRes models.AuthResponse
+	if err := json.NewDecoder(setupRec.Body).Decode(&authRes); err != nil {
+		t.Fatalf("failed to decode auth response: %v", err)
+	}
+	if authRes.Token == "" {
+		t.Fatalf("expected non-empty JWT token after setup")
+	}
+	if authRes.User.Role != "admin" || authRes.User.Status != "active" || authRes.User.Username != "rootadmin" {
+		t.Fatalf("unexpected admin user created: %+v", authRes.User)
+	}
+	if !h.AllowRegistration || h.MicrosoftTenantID != "custom-tenant" || h.MicrosoftClientID != "custom-client" {
+		t.Errorf("expected setup preferences updated on handler, got allowReg=%v tenant=%q client=%q", h.AllowRegistration, h.MicrosoftTenantID, h.MicrosoftClientID)
+	}
+
+	// 4. Subsequent setup-status returns needs_setup = false
+	statusReq2 := httptest.NewRequest("GET", "/api/auth/setup-status", nil)
+	statusRec2 := httptest.NewRecorder()
+	h.GetSetupStatus(statusRec2, statusReq2)
+	var st2 models.SetupStatusResponse
+	_ = json.NewDecoder(statusRec2.Body).Decode(&st2)
+	if st2.NeedsSetup {
+		t.Fatalf("expected NeedsSetup=false after setup completed")
+	}
+	if !st2.AllowRegistration {
+		t.Errorf("expected AllowRegistration=true after setup")
+	}
+
+	// 5. Subsequent POST /api/auth/setup is blocked with 403 Forbidden
+	againReq := httptest.NewRequest("POST", "/api/auth/setup", bytes.NewReader(validPayload))
+	againRec := httptest.NewRecorder()
+	h.CompleteInitialSetup(againRec, againReq)
+	if againRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when repeating setup, got %d: %s", againRec.Code, againRec.Body.String())
 	}
 }

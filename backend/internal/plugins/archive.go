@@ -344,6 +344,16 @@ func InspectArchive(filename string, data []byte, trustedKeys []models.PluginTru
 		sigVerified, signerKeyID, signerName = verifySignature(sha256Hex, signatureData, trustedKeys)
 	}
 
+	if manifest.Runtime.Type == "none" && len(dockerfileFiles) > 0 && len(wasmFiles) == 0 {
+		manifest.Runtime.Type = "container"
+		if strings.TrimSpace(manifest.Runtime.Entrypoint) == "" {
+			manifest.Runtime.Entrypoint = fmt.Sprintf("kraken-plugin-%s:%s", sanitizeContainerName(manifest.ID), manifest.Version)
+		}
+		if manifest.Runtime.Port <= 0 {
+			manifest.Runtime.Port = 8080
+		}
+	}
+
 	var needsCompilation bool
 	var sourceDetected bool
 	if manifest.Runtime.Type == "wasm" {
@@ -383,24 +393,7 @@ func InspectArchive(filename string, data []byte, trustedKeys []models.PluginTru
 				return nil, fmt.Errorf("declared dockerfile '%s' not found in plugin archive", manifest.Runtime.Dockerfile)
 			}
 		} else {
-			// Find Dockerfile automatically in archive (prefer root "Dockerfile", then "backend/Dockerfile")
-			for _, df := range dockerfileFiles {
-				if strings.EqualFold(df, "Dockerfile") {
-					foundDockerfile = df
-					break
-				}
-			}
-			if foundDockerfile == "" {
-				for _, df := range dockerfileFiles {
-					if strings.EqualFold(df, "backend/Dockerfile") {
-						foundDockerfile = df
-						break
-					}
-				}
-			}
-			if foundDockerfile == "" && len(dockerfileFiles) > 0 {
-				foundDockerfile = dockerfileFiles[0]
-			}
+			foundDockerfile = selectPreferredDockerfile(dockerfileFiles)
 		}
 
 		if foundDockerfile != "" {
@@ -586,6 +579,24 @@ func stripTopLevelDir(name string) string {
 		}
 	}
 	return name
+}
+
+// selectPreferredDockerfile picks the best Dockerfile candidate (root first, then backend/Dockerfile, then first found).
+func selectPreferredDockerfile(dockerfileFiles []string) string {
+	for _, df := range dockerfileFiles {
+		if strings.EqualFold(df, "Dockerfile") {
+			return df
+		}
+	}
+	for _, df := range dockerfileFiles {
+		if strings.EqualFold(df, "backend/Dockerfile") {
+			return df
+		}
+	}
+	if len(dockerfileFiles) > 0 {
+		return dockerfileFiles[0]
+	}
+	return ""
 }
 
 // verifySignature attempts to verify signature against trusted Ed25519 public keys

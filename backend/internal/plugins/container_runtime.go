@@ -16,22 +16,104 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	dockerclient "github.com/docker/docker/client"
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/kraken/admin-tool/backend/internal/docker"
+	"github.com/kraken/admin-tool/backend/internal/k8s"
 	"github.com/kraken/admin-tool/backend/internal/models"
 	"github.com/kraken/admin-tool/backend/internal/plugins/sidecarauth"
 )
 
 type ContainerRuntimeManager struct {
-	mu            sync.RWMutex
-	dockerService *docker.DockerService
-	transport     *sidecarauth.Transport
+	mu                  sync.RWMutex
+	dockerService       *docker.DockerService
+	k8sService          *k8s.K8sService
+	k8sClient           kubernetes.Interface
+	k8sNamespace        string
+	forceK8s            bool
+	podReadyWaitTimeout time.Duration
+	transport           *sidecarauth.Transport
 }
 
 func NewContainerRuntimeManager(ds *docker.DockerService) *ContainerRuntimeManager {
 	return &ContainerRuntimeManager{
-		dockerService: ds,
-		transport:     sidecarauth.NewTransport(20 * time.Second),
+		dockerService:       ds,
+		podReadyWaitTimeout: 15 * time.Second,
+		transport:           sidecarauth.NewTransport(20 * time.Second),
 	}
+}
+
+// SetK8sService associates the Kubernetes service for transparent Pod-based plugin execution.
+func (m *ContainerRuntimeManager) SetK8sService(ks *k8s.K8sService) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.k8sService = ks
+}
+
+// SetK8sClient configures an explicit Kubernetes clientset and namespace (primarily for testing).
+func (m *ContainerRuntimeManager) SetK8sClient(cli kubernetes.Interface, namespace string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.k8sClient = cli
+	m.k8sNamespace = strings.TrimSpace(namespace)
+	m.forceK8s = cli != nil
+	if cli != nil {
+		m.podReadyWaitTimeout = 0
+	}
+}
+
+func (m *ContainerRuntimeManager) getK8sClient() (kubernetes.Interface, string) {
+	m.mu.RLock()
+	cli := m.k8sClient
+	ns := m.k8sNamespace
+	ks := m.k8sService
+	m.mu.RUnlock()
+
+	if cli != nil {
+		if ns == "" {
+			ns = "default"
+		}
+		return cli, ns
+	}
+	if ks != nil && ks.IsConnected() {
+		return ks.GetClient(), ks.GetCurrentNamespace()
+	}
+	return nil, "default"
+}
+
+// ShouldUseKubernetes reports whether container plugins should run as Kubernetes Pods instead of Docker containers.
+func (m *ContainerRuntimeManager) ShouldUseKubernetes(ctx context.Context) bool {
+	cli, _ := m.getK8sClient()
+	if cli == nil {
+		return false
+	}
+
+	m.mu.RLock()
+	force := m.forceK8s
+	ks := m.k8sService
+	m.mu.RUnlock()
+
+	if force {
+		return true
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("KRAKEN_RUNTIME_MODE")))
+	if mode == "kubernetes" || mode == "k8s" {
+		return true
+	}
+	if mode == "docker" {
+		return false
+	}
+
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" || (ks != nil && ks.IsInCluster()) {
+		return true
+	}
+
+	// Fallback: if local Docker daemon is unavailable but Kubernetes cluster is connected, run as Pods
+	if _, err := m.getClient(ctx); err != nil {
+		return true
+	}
+	return false
 }
 
 func (m *ContainerRuntimeManager) getClient(ctx context.Context) (*dockerclient.Client, error) {
@@ -45,8 +127,12 @@ func (m *ContainerRuntimeManager) getClient(ctx context.Context) (*dockerclient.
 	return cli, nil
 }
 
-// StartContainer spawns or attaches to a sidecar container for the plugin
+// StartContainer spawns or attaches to a sidecar container (or Kubernetes Pod) for the plugin
 func (m *ContainerRuntimeManager) StartContainer(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest) (string, error) {
+	if m.ShouldUseKubernetes(ctx) {
+		return m.startKubernetesPod(ctx, plugin, manifest)
+	}
+
 	cli, err := m.getClient(ctx)
 	if err != nil {
 		return "", err
@@ -186,8 +272,12 @@ func resolveKrakenNetwork(ctx context.Context, cli *dockerclient.Client) string 
 	return ""
 }
 
-// StopContainer stops and removes the plugin container
+// StopContainer stops and removes the plugin container (or Kubernetes Pod + Service)
 func (m *ContainerRuntimeManager) StopContainer(ctx context.Context, plugin *models.InstalledPlugin) error {
+	if m.ShouldUseKubernetes(ctx) {
+		return m.stopKubernetesPod(ctx, plugin)
+	}
+
 	cli, err := m.getClient(ctx)
 	if err != nil {
 		return nil
@@ -202,7 +292,7 @@ func (m *ContainerRuntimeManager) StopContainer(ctx context.Context, plugin *mod
 	return nil
 }
 
-// ExecuteCall proxies an authenticated, signed action call to the running container sidecar
+// ExecuteCall proxies an authenticated, signed action call to the running container or Kubernetes Pod sidecar
 func (m *ContainerRuntimeManager) ExecuteCall(
 	ctx context.Context,
 	plugin *models.InstalledPlugin,
@@ -215,17 +305,6 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 	sessionID string,
 	grantedPerms []string,
 ) (interface{}, error) {
-	cli, err := m.getClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
-	insp, err := cli.ContainerInspect(ctx, containerName)
-	if err != nil || !insp.State.Running {
-		return nil, fmt.Errorf("plugin container is not running: %v", err)
-	}
-
 	internalPort := manifest.Runtime.Port
 	if internalPort <= 0 {
 		internalPort = 8080
@@ -242,8 +321,6 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 		}
 	}
 
-	targetURL := fmt.Sprintf("http://%s:%d/call", containerName, internalPort)
-
 	reqBody := map[string]interface{}{
 		"action":    action,
 		"payload":   payload,
@@ -255,7 +332,6 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 	}
 
 	callParams := sidecarauth.CallParams{
-		TargetURL:      targetURL,
 		Path:           "/call",
 		PluginID:       plugin.PluginID,
 		InstallationID: plugin.InstallationID,
@@ -269,6 +345,35 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 		RequestBody:    data,
 	}
 
+	if m.ShouldUseKubernetes(ctx) {
+		urls, urlErr := m.resolveKubernetesPluginURLs(ctx, plugin, internalPort, "/call")
+		if urlErr != nil {
+			return nil, urlErr
+		}
+		var lastErr error
+		for _, targetURL := range urls {
+			callParams.TargetURL = targetURL
+			resp, callErr := m.transport.Call(ctx, callParams)
+			if callErr == nil {
+				return resp, nil
+			}
+			lastErr = callErr
+		}
+		return nil, fmt.Errorf("failed to communicate with plugin pod: %w", lastErr)
+	}
+
+	cli, err := m.getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
+	insp, err := cli.ContainerInspect(ctx, containerName)
+	if err != nil || !insp.State.Running {
+		return nil, fmt.Errorf("plugin container is not running: %v", err)
+	}
+
+	callParams.TargetURL = fmt.Sprintf("http://%s:%d/call", containerName, internalPort)
 	resp, err := m.transport.Call(ctx, callParams)
 	if err != nil {
 		// Fallback to IP if containerName DNS fails within Docker network
@@ -293,29 +398,26 @@ func (m *ContainerRuntimeManager) ExecuteCall(
 	return resp, nil
 }
 
-// NotifySessionEnded sends a signed lifecycle event to the sidecar when a Kraken session expires or logs out
-func (m *ContainerRuntimeManager) NotifySessionEnded(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest, rawSessionID string) error {
-	eventPayload := map[string]interface{}{
-		"event":             "kraken.session.ended",
-		"kraken_session_id": sidecarauth.ComputeKrakenSessionID(rawSessionID),
-		"occurred_at":       time.Now().UTC().Format(time.RFC3339),
-	}
+func (m *ContainerRuntimeManager) sendLifecycleEvent(
+	ctx context.Context,
+	plugin *models.InstalledPlugin,
+	manifest *models.PluginManifest,
+	rawSessionID string,
+	userID uint,
+	eventPayload map[string]interface{},
+) error {
 	data, _ := json.Marshal(eventPayload)
-
-	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
 	internalPort := manifest.Runtime.Port
 	if internalPort <= 0 {
 		internalPort = 8080
 	}
-	targetURL := fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
 
 	callParams := sidecarauth.CallParams{
-		TargetURL:      targetURL,
 		Path:           "/v1/internal/session-events",
 		PluginID:       plugin.PluginID,
 		InstallationID: plugin.InstallationID,
 		InstanceSecret: plugin.InstanceSecret,
-		UserID:         0,
+		UserID:         userID,
 		Username:       "system",
 		SessionID:      rawSessionID,
 		Roles:          []string{"system"},
@@ -323,73 +425,54 @@ func (m *ContainerRuntimeManager) NotifySessionEnded(ctx context.Context, plugin
 		RequestBody:    data,
 	}
 
+	if m.ShouldUseKubernetes(ctx) {
+		urls, err := m.resolveKubernetesPluginURLs(ctx, plugin, internalPort, "/v1/internal/session-events")
+		if err != nil {
+			return err
+		}
+		var lastErr error
+		for _, targetURL := range urls {
+			callParams.TargetURL = targetURL
+			if _, callErr := m.transport.Call(ctx, callParams); callErr == nil {
+				return nil
+			} else {
+				lastErr = callErr
+			}
+		}
+		return lastErr
+	}
+
+	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
+	callParams.TargetURL = fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
 	_, err := m.transport.Call(ctx, callParams)
 	return err
+}
+
+// NotifySessionEnded sends a signed lifecycle event to the sidecar when a Kraken session expires or logs out
+func (m *ContainerRuntimeManager) NotifySessionEnded(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest, rawSessionID string) error {
+	return m.sendLifecycleEvent(ctx, plugin, manifest, rawSessionID, 0, map[string]interface{}{
+		"event":             "kraken.session.ended",
+		"kraken_session_id": sidecarauth.ComputeKrakenSessionID(rawSessionID),
+		"occurred_at":       time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // NotifyUserDisabled sends a signed lifecycle event when a user is deactivated in Kraken
 func (m *ContainerRuntimeManager) NotifyUserDisabled(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest, userID uint) error {
-	eventPayload := map[string]interface{}{
+	return m.sendLifecycleEvent(ctx, plugin, manifest, "", userID, map[string]interface{}{
 		"event":          "kraken.user.disabled",
 		"kraken_user_id": userID,
 		"occurred_at":    time.Now().UTC().Format(time.RFC3339),
-	}
-	data, _ := json.Marshal(eventPayload)
-
-	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
-	internalPort := manifest.Runtime.Port
-	if internalPort <= 0 {
-		internalPort = 8080
-	}
-	targetURL := fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
-
-	callParams := sidecarauth.CallParams{
-		TargetURL:      targetURL,
-		Path:           "/v1/internal/session-events",
-		PluginID:       plugin.PluginID,
-		InstallationID: plugin.InstallationID,
-		InstanceSecret: plugin.InstanceSecret,
-		UserID:         userID,
-		Username:       "system",
-		Roles:          []string{"system"},
-		Action:         "internal.session.event",
-		RequestBody:    data,
-	}
-
-	_, err := m.transport.Call(ctx, callParams)
-	return err
+	})
 }
 
 // NotifyPluginRevoked notifies and revokes the sidecar upon plugin uninstall or status revocation
 func (m *ContainerRuntimeManager) NotifyPluginRevoked(ctx context.Context, plugin *models.InstalledPlugin, manifest *models.PluginManifest) error {
-	eventPayload := map[string]interface{}{
+	_ = m.sendLifecycleEvent(ctx, plugin, manifest, "", 0, map[string]interface{}{
 		"event":           "plugin.installation.revoked",
 		"installation_id": plugin.InstallationID,
 		"occurred_at":     time.Now().UTC().Format(time.RFC3339),
-	}
-	data, _ := json.Marshal(eventPayload)
-
-	containerName := fmt.Sprintf("kraken-plugin-%s", sanitizeContainerName(plugin.PluginID))
-	internalPort := manifest.Runtime.Port
-	if internalPort <= 0 {
-		internalPort = 8080
-	}
-	targetURL := fmt.Sprintf("http://%s:%d/v1/internal/session-events", containerName, internalPort)
-
-	callParams := sidecarauth.CallParams{
-		TargetURL:      targetURL,
-		Path:           "/v1/internal/session-events",
-		PluginID:       plugin.PluginID,
-		InstallationID: plugin.InstallationID,
-		InstanceSecret: plugin.InstanceSecret,
-		UserID:         0,
-		Username:       "system",
-		Roles:          []string{"system"},
-		Action:         "internal.session.event",
-		RequestBody:    data,
-	}
-
-	_, _ = m.transport.Call(ctx, callParams)
+	})
 	return m.StopContainer(ctx, plugin)
 }
 

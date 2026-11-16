@@ -18,6 +18,7 @@ import (
 	"github.com/kraken/admin-tool/backend/internal/audit"
 	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/docker"
+	"github.com/kraken/admin-tool/backend/internal/k8s"
 	"github.com/kraken/admin-tool/backend/internal/models"
 	"github.com/kraken/admin-tool/backend/internal/plugins/sidecarauth"
 )
@@ -32,6 +33,24 @@ type Manager struct {
 	store            *StoreService
 	msTokenProvider  func(ctx context.Context, scope string) (string, *models.MicrosoftSessionAccount, error)
 	msSessionRevoker func(userID uint, sessionID string)
+}
+
+// SetK8sService attaches the Kubernetes service so container plugins transparently run as Kubernetes Pods.
+func (m *Manager) SetK8sService(ks *k8s.K8sService) {
+	if m.container == nil {
+		return
+	}
+	m.container.SetK8sService(ks)
+	if m.container.ShouldUseKubernetes(context.Background()) {
+		go m.initActivePlugins(context.Background())
+	}
+}
+
+func (m *Manager) buildContainerPlugin(ctx context.Context, targetDir string, manifest *models.PluginManifest) (*BuildResult, error) {
+	if m.container != nil && m.container.ShouldUseKubernetes(ctx) {
+		return PrepareKubernetesPluginBuild(ctx, m.dockerService, targetDir, manifest)
+	}
+	return BuildContainerPluginImage(ctx, m.dockerService, targetDir, manifest)
 }
 
 func (m *Manager) SetMicrosoftTokenProvider(fn func(ctx context.Context, scope string) (string, *models.MicrosoftSessionAccount, error)) {
@@ -145,6 +164,13 @@ func (m *Manager) syncBundledPlugins() {
 func (m *Manager) initActivePlugins(ctx context.Context) {
 	m.syncAllPluginServerBindings()
 
+	// When configured for Kubernetes runtime, defer plugin Pod startup until SetK8sService wires the K8s client.
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("KRAKEN_RUNTIME_MODE")))
+	k8sConfigured := mode == "kubernetes" || mode == "k8s" || strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != ""
+	if k8sConfigured && !m.container.ShouldUseKubernetes(ctx) {
+		return
+	}
+
 	var plugins []models.InstalledPlugin
 	if err := m.db.Where("status = ?", "enabled").Find(&plugins).Error; err != nil {
 		return
@@ -154,9 +180,11 @@ func (m *Manager) initActivePlugins(ctx context.Context) {
 		if p.RuntimeType == "container" {
 			var manifest models.PluginManifest
 			if err := json.Unmarshal([]byte(p.ManifestJSON), &manifest); err == nil {
-				_, startErr := m.container.StartContainer(ctx, &p, &manifest)
+				cID, startErr := m.container.StartContainer(ctx, &p, &manifest)
 				if startErr != nil {
 					log.Printf("[PLUGINS] Warning: failed to restart plugin container '%s': %v", p.PluginID, startErr)
+				} else if cID != "" && cID != p.ContainerID {
+					m.db.Model(&models.InstalledPlugin{}).Where("id = ?", p.ID).Update("container_id", cID)
 				}
 			}
 		}
@@ -275,7 +303,7 @@ func (m *Manager) InstallFromArchive(
 
 		if hasDF {
 			log.Printf("[MANAGER] Auto-building container image for plugin '%s'...", manifest.ID)
-			buildRes, buildErr := BuildContainerPluginImage(ctx, m.dockerService, targetDir, manifest)
+			buildRes, buildErr := m.buildContainerPlugin(ctx, targetDir, manifest)
 			if buildErr != nil {
 				return nil, fmt.Errorf("plugin requires container build but image build failed: %w", buildErr)
 			}
@@ -497,7 +525,7 @@ func (m *Manager) InstallFromDirectory(
 
 		if hasDF {
 			log.Printf("[MANAGER] Auto-building container image for plugin '%s' from directory...", manifest.ID)
-			buildRes, buildErr := BuildContainerPluginImage(ctx, m.dockerService, targetDir, manifest)
+			buildRes, buildErr := m.buildContainerPlugin(ctx, targetDir, manifest)
 			if buildErr != nil {
 				return nil, fmt.Errorf("plugin requires container build but image build failed: %w", buildErr)
 			}
@@ -648,7 +676,7 @@ func (m *Manager) EnablePlugin(ctx context.Context, pluginID string, username st
 		return fmt.Errorf("invalid plugin manifest: %w", err)
 	}
 
-	if manifest.Runtime.Type == "container" && p.ContainerID == "" {
+	if manifest.Runtime.Type == "container" && (p.ContainerID == "" || m.container.ShouldUseKubernetes(ctx)) {
 		startCtx, startCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer startCancel()
 		cID, cErr := m.container.StartContainer(startCtx, &p, &manifest)
@@ -1185,7 +1213,7 @@ func (m *Manager) RebuildPlugin(ctx context.Context, pluginID string, username s
 			}
 		}
 	case "container":
-		buildRes, buildErr = BuildContainerPluginImage(ctx, m.dockerService, targetDir, &manifest)
+		buildRes, buildErr = m.buildContainerPlugin(ctx, targetDir, &manifest)
 		if buildErr == nil {
 			manifestBytes, _ := json.Marshal(&manifest)
 			updates := map[string]interface{}{

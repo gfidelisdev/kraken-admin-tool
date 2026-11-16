@@ -134,6 +134,7 @@ func InitDB(cfg *config.Config) (*Handle, error) {
 		&models.PluginKVStore{},
 		&models.PluginCatalogSource{},
 		&models.PluginTrustedKey{},
+		&models.SystemNetworkConfig{},
 	); err != nil {
 		return nil, err
 	}

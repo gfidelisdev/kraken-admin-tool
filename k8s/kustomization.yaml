@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kraken
+
+resources:
+  - 00-namespace.yaml
+  - 01-rbac.yaml
+  - 02-config-secret.yaml
+  - 03-postgres.yaml
+  - 04-backend.yaml
+  - 05-frontend.yaml
+  - 06-proxy.yaml
+  - 07-ingress.yaml

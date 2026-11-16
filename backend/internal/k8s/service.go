@@ -75,6 +75,7 @@ func shellEscape(s string) string {
 type K8sService struct {
 	client    kubernetes.Interface
 	connected bool
+	inCluster bool
 	errMsg    string
 	db        *gorm.DB
 	docker    *docker.DockerService
@@ -85,10 +86,12 @@ type K8sService struct {
 func NewK8sService(kubeconfigPath string) *K8sService {
 	var cfg *rest.Config
 	var err error
+	inCluster := false
 
 	// 1. Try InCluster config
 	cfg, err = rest.InClusterConfig()
 	if err == nil {
+		inCluster = true
 		log.Printf("[K8S] Loaded InCluster Kubernetes configuration.")
 	} else {
 		// 2. Try explicit or discovered kubeconfig path
@@ -139,6 +142,7 @@ func NewK8sService(kubeconfigPath string) *K8sService {
 		return &K8sService{
 			client:    clientset,
 			connected: false,
+			inCluster: inCluster,
 			errMsg:    err.Error(),
 		}
 	}
@@ -147,7 +151,31 @@ func NewK8sService(kubeconfigPath string) *K8sService {
 	return &K8sService{
 		client:    clientset,
 		connected: true,
+		inCluster: inCluster,
 	}
+}
+
+// GetClient returns the underlying Kubernetes clientset interface
+func (s *K8sService) GetClient() kubernetes.Interface {
+	return s.client
+}
+
+// IsInCluster returns true when initialized via Kubernetes InCluster service account config
+func (s *K8sService) IsInCluster() bool {
+	return s.inCluster
+}
+
+// GetCurrentNamespace resolves the active Kubernetes namespace for Kraken-managed workloads
+func (s *K8sService) GetCurrentNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("KRAKEN_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if raw, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(raw)); ns != "" {
+			return ns
+		}
+	}
+	return "default"
 }
 
 // SetDB associates the database handle after initialization

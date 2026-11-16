@@ -16,6 +16,7 @@ import {
   Cpu,
   Users,
   Puzzle,
+  Globe,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context/AuthContext";
@@ -34,6 +35,7 @@ const navigation = [
   { name: "Plugins & Store", href: "/plugins", icon: Puzzle, badge: "Loja" },
   { name: "Audit Trail", href: "/audit", icon: ShieldCheck },
   { name: "Users & Roles", href: "/users", icon: Users, badge: "Admin", adminOnly: true },
+  { name: "Domain & Ingress", href: "/settings", icon: Globe, badge: "Admin", adminOnly: true },
 ];
 
 export function Sidebar({ className }: { className?: string }) {

@@ -13,6 +13,7 @@ import {
   UserPlus,
   Users,
   Smartphone,
+  Globe,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/Button";
@@ -157,6 +158,14 @@ export function Header({
                       >
                         <Users className="mr-2 h-3.5 w-3.5 text-sky-400" />
                         Users & Approvals
+                      </Link>
+                      <Link
+                        href="/settings"
+                        onClick={() => setShowProfileMenu(false)}
+                        className="flex items-center w-full rounded-md px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                      >
+                        <Globe className="mr-2 h-3.5 w-3.5 text-indigo-400" />
+                        Domain & Ingress (FQDN)
                       </Link>
                       <Button
                         variant="ghost"

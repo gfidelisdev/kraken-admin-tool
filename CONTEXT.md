@@ -104,3 +104,21 @@ _Avoid_: Local bypass, auto-host bind
 The mandatory TLS gateway terminating HTTPS on port 8443 and enforcing 301 redirection with HSTS from HTTP port 8000, isolating internal services.
 _Avoid_: Web router, direct port forward
 
+### Deployment & Initialization
+
+**Kubernetes Native Deployment**:
+Running Kraken Admin Tool natively inside a Kubernetes cluster using the manifests in `k8s/` (`Namespace`, RBAC `ClusterRole`/`ServiceAccount`, `ConfigMap`/`Secret`, PostgreSQL PVC/Deployment, Backend, Frontend, and TLS Nginx Proxy), with full backwards compatibility preserved for `docker-compose.yml`.
+_Avoid_: K8s port, cluster rewrite
+
+**Pod Sidecar Conversion**:
+The transparent runtime translation performed by `ContainerRuntimeManager` and `k8s_pod_runtime.go` when Kraken operates on Kubernetes, automatically launching container-based or Dockerfile-based plugins as isolated Kubernetes Pods and ClusterIP Services while preserving the `sidecarauth` cryptographic contract.
+_Avoid_: Container emulation, manual pod yaml
+
+**First-Time Setup Gate**:
+The one-time initialization guard (`/api/auth/setup-status`, `/api/auth/setup`, and `/setup`) that intercepts first-boot visits before any active administrator exists so the operator explicitly configures the administrator password and essential security settings.
+_Avoid_: Onboarding wizard, default seed bypass
+
+**Multi-Domain Ingress Reconciliation**:
+The dynamic Kubernetes network control loop (`/api/system/network-config`, `/settings`, `backend/internal/system/network.go`) allowing administrators to configure one or multiple FQDNs on standard HTTPS port 443 at any time, automatically generating a multi-SAN TLS certificate (`kraken-tls-secret`), updating `ConfigMap`s and `Ingress/kraken-ingress`, and triggering rolling restarts across Kubernetes deployments.
+_Avoid_: Static ingress YAML, manual cert rotation
+

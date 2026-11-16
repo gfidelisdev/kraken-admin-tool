@@ -149,6 +149,26 @@ type AuthResponse struct {
 	User  UserResponse `json:"user"`
 }
 
+type SetupStatusResponse struct {
+	NeedsSetup        bool   `json:"needs_setup"`
+	AllowRegistration bool   `json:"allow_registration"`
+	RuntimeMode       string `json:"runtime_mode"`
+	MicrosoftClientID string `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID string `json:"microsoft_tenant_id,omitempty"`
+}
+
+type InitialSetupRequest struct {
+	AdminUsername     string   `json:"admin_username"`
+	AdminEmail        string   `json:"admin_email"`
+	AdminPassword     string   `json:"admin_password"`
+	AllowRegistration *bool    `json:"allow_registration,omitempty"`
+	MicrosoftClientID string   `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID string   `json:"microsoft_tenant_id,omitempty"`
+	Domains           []string `json:"domains,omitempty"`
+	IngressEnabled    *bool    `json:"ingress_enabled,omitempty"`
+	IngressClassName  string   `json:"ingress_class_name,omitempty"`
+}
+
 type MicrosoftDeviceCodeRequest struct {
 	TenantID string `json:"tenant_id,omitempty"`
 	ClientID string `json:"client_id,omitempty"`
@@ -627,6 +647,59 @@ type SystemStatusResponse struct {
 	K8sDeployments       int    `json:"k8s_deployments"`
 	DatabaseType         string `json:"database_type"`
 	DatabaseStatus       string `json:"database_status"`
+}
+
+// SystemNetworkConfig persists dynamic FQDN, Ingress (Port 443), and TLS certificate settings
+type SystemNetworkConfig struct {
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	IngressEnabled    bool       `gorm:"default:false" json:"ingress_enabled"`
+	DomainsJSON       string     `gorm:"type:text" json:"-"`
+	IngressClassName  string     `gorm:"size:128" json:"ingress_class_name,omitempty"`
+	StandardHTTPSPort bool       `gorm:"default:true" json:"standard_https_port"`
+	TLSMode           string     `gorm:"size:32;default:'auto_self_signed'" json:"tls_mode"` // "auto_self_signed" | "custom"
+	CertIssuer        string     `gorm:"size:128" json:"cert_issuer,omitempty"`
+	CertPEM           string     `gorm:"type:text" json:"cert_pem,omitempty"`
+	KeyPEM            string     `gorm:"type:text" json:"-"`
+	CertFingerprint   string     `gorm:"size:128" json:"cert_fingerprint,omitempty"`
+	CertExpiresAt     *time.Time `json:"cert_expires_at,omitempty"`
+	LastAppliedAt     *time.Time `json:"last_applied_at,omitempty"`
+	LastApplyStatus   string     `gorm:"size:32" json:"last_apply_status,omitempty"`
+	LastApplyMessage  string     `gorm:"type:text" json:"last_apply_message,omitempty"`
+	UpdatedBy         string     `gorm:"size:64" json:"updated_by,omitempty"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type NetworkConfigResponse struct {
+	IngressEnabled    bool       `json:"ingress_enabled"`
+	Domains           []string   `json:"domains"`
+	IngressClassName  string     `json:"ingress_class_name,omitempty"`
+	StandardHTTPSPort bool       `json:"standard_https_port"`
+	TLSMode           string     `json:"tls_mode"`
+	CertIssuer        string     `json:"cert_issuer,omitempty"`
+	CertPEM           string     `json:"cert_pem,omitempty"`
+	CertFingerprint   string     `json:"cert_fingerprint,omitempty"`
+	CertExpiresAt     *time.Time `json:"cert_expires_at,omitempty"`
+	CertSANs          []string   `json:"cert_sans,omitempty"`
+	RuntimeMode       string     `json:"runtime_mode"`
+	K8sConnected      bool       `json:"k8s_connected"`
+	K8sNamespace      string     `json:"k8s_namespace,omitempty"`
+	LastAppliedAt     *time.Time `json:"last_applied_at,omitempty"`
+	LastApplyStatus   string     `json:"last_apply_status,omitempty"`
+	LastApplyMessage  string     `json:"last_apply_message,omitempty"`
+	UpdatedBy         string     `json:"updated_by,omitempty"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+}
+
+type UpdateNetworkConfigRequest struct {
+	IngressEnabled     bool     `json:"ingress_enabled"`
+	Domains            []string `json:"domains"`
+	IngressClassName   string   `json:"ingress_class_name,omitempty"`
+	StandardHTTPSPort  *bool    `json:"standard_https_port,omitempty"`
+	TLSMode            string   `json:"tls_mode,omitempty"` // "auto_self_signed" | "custom"
+	CertIssuer         string   `json:"cert_issuer,omitempty"`
+	CustomCertPEM      string   `json:"custom_cert_pem,omitempty"`
+	CustomKeyPEM       string   `json:"custom_key_pem,omitempty"`
+	RestartDeployments *bool    `json:"restart_deployments,omitempty"`
 }
 
 // --- Plugin System Models & DTOs ---

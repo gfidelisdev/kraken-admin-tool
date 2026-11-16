@@ -173,6 +173,19 @@ func InspectDirectory(dirPath string, trustedKeys []models.PluginTrustedKey) (*E
 		signatureVerified, signerKeyID, signerName = verifySignature(sha256Hex, signatureData, trustedKeys)
 	}
 
+	if manifest.Runtime.Type == "none" && len(dockerfileFiles) > 0 && len(wasmFiles) == 0 {
+		manifest.Runtime.Type = "container"
+		if manifest.Runtime.Dockerfile == "" {
+			manifest.Runtime.Dockerfile = selectPreferredDockerfile(dockerfileFiles)
+		}
+		if strings.TrimSpace(manifest.Runtime.Entrypoint) == "" {
+			manifest.Runtime.Entrypoint = fmt.Sprintf("kraken-plugin-%s:%s", sanitizeContainerName(manifest.ID), manifest.Version)
+		}
+		if manifest.Runtime.Port <= 0 {
+			manifest.Runtime.Port = 8080
+		}
+	}
+
 	// 5. Detect compilation needs
 	var needsCompilation bool
 	var sourceDetected bool
@@ -193,6 +206,9 @@ func InspectDirectory(dirPath string, trustedKeys []models.PluginTrustedKey) (*E
 			needsCompilation = true
 		}
 	} else if manifest.Runtime.Type == "container" {
+		if manifest.Runtime.Dockerfile == "" && len(dockerfileFiles) > 0 {
+			manifest.Runtime.Dockerfile = selectPreferredDockerfile(dockerfileFiles)
+		}
 		if len(dockerfileFiles) > 0 || len(sourceFiles) > 0 {
 			sourceDetected = true
 			needsCompilation = true

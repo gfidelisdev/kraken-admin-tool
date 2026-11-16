@@ -86,6 +86,9 @@ func ParseAndValidateManifest(data []byte) (*models.PluginManifest, error) {
 	switch rtType {
 	case "none", "wasm", "container":
 		m.Runtime.Type = rtType
+	case "docker":
+		rtType = "container"
+		m.Runtime.Type = "container"
 	default:
 		return nil, fmt.Errorf("unsupported runtime type '%s': allowed values are 'none', 'wasm', 'container'", rtType)
 	}

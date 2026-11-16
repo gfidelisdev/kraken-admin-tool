@@ -13,18 +13,25 @@ map $http_upgrade $connection_upgrade {
 
 # 1. HTTP Server: Enforce HTTPS Redirection
 server {
+    listen 80;
+    listen [::]:80;
     listen ${HTTP_PORT};
     listen [::]:${HTTP_PORT};
     server_name _;
 
-    # Redirection to HTTPS preserving URI and targeting the configured HTTPS port
+    # Redirection to HTTPS preserving URI and targeting standard 443 or configured HTTPS port
     location / {
+        if ($server_port = 80) {
+            return 301 https://$host$request_uri;
+        }
         return 301 https://$host:${HTTPS_PORT}$request_uri;
     }
 }
 
 # 2. HTTPS Server: SSL Termination & Internal Routing
 server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
     listen ${HTTPS_PORT} ssl;
     listen [::]:${HTTPS_PORT} ssl;
     server_name _;
@@ -57,7 +64,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Port ${HTTPS_PORT};
+        proxy_set_header X-Forwarded-Port $server_port;
 
         # WebSocket support
         proxy_set_header Upgrade $http_upgrade;
@@ -89,7 +96,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Port ${HTTPS_PORT};
+        proxy_set_header X-Forwarded-Port $server_port;
 
         # Next.js WebSockets / HMR
         proxy_set_header Upgrade $http_upgrade;

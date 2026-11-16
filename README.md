@@ -13,7 +13,8 @@ Built with a modular **Go (Chi Router)** backend and a sleek **Next.js 15 (App R
 - **Host OS Credential Verification**: Adição e gestão do host Docker local (`unix:///var/run/docker.sock`) exige autenticação obrigatória do sistema operacional hospedeiro via PAM/su/sudo. Conexões sem credenciais ou automáticas são estritamente bloqueadas.
 - **Contrato Seguro Kraken ↔ Sidecar (`sidecarauth`)**: Chamadas a containers de plugins utilizam assinatura criptográfica HMAC-SHA256 sobre requisição canônica (`KRKN1`), JWT de contexto efêmero (30s) vinculado à sessão Kraken (`kraken_session_id`), cache anti-replay (60s) e segredos por instalação rotacionáveis (`KRAKEN_PLUGIN_INSTANCE_SECRET`). Cabeçalhos inseguros (`X-Kraken-User` e `X-Kraken-Role`) foram eliminados e são rejeitados.
 - **JWT Authentication & TOTP**: Emissão de tokens de acesso seguros com HS256, suporte a TOTP 2FA, recuperação de senha administrativa e autenticação Broker Microsoft SSO (OAuth2 Device Code Flow).
-- **Default Seed User**: Inicializa automaticamente o usuário administrador inicial (`admin` / `admin123`) na primeira execução.
+- **First-Time Configuration Screen (`/setup`)**: Na primeira inicialização (sem `INITIAL_ADMIN_PASSWORD` pré-definido), o Kraken exibe automaticamente uma tela de configuração inicial para definir a senha do administrador, política de auto-registro e parâmetros opcionais de SSO, enquanto gera e persiste chaves criptográficas (`JWT_SECRET` e `ENCRYPTION_KEY`) automaticamente.
+- **Transparent Container-to-Pod Plugin Runtime**: Plugins com runtime `container` / `docker` (ou baseados em `Dockerfile`) executam como contêineres Docker no modo Docker Compose e são automaticamente convertidos e orquestrados como Kubernetes Pods + Services quando o Kraken executa em Kubernetes, mantendo o contrato `sidecarauth`.
 
 ### 🐳 Docker Management
 - **Container Lifecycle**: List all containers (running, stopped, paused), start, stop, restart, and safely remove containers with confirmation modals.
@@ -91,13 +92,35 @@ docker compose up -d --build
 - **API Health**: [https://localhost:8443/api/system/status](https://localhost:8443/api/system/status)
 - **Isolamento de Rede**: As portas internas `3000` (frontend) e `8080` (backend) operam exclusivamente dentro da rede privada `kraken-network`, protegidas contra conexões externas diretas.
 
-### 3. Default Credentials
-| Field | Value |
-|---|---|
-| **Username** | `admin` |
-| **Password** | `admin123` |
+### 3. First-Time Setup
+When starting Kraken without `INITIAL_ADMIN_PASSWORD` configured, opening the dashboard or `/login` automatically redirects to **`/setup`**, where the first operator defines the administrator credentials, password, registration policy, and optional Microsoft Entra ID SSO configuration.
 
-*(A button to auto-fill these credentials is available on the login page for convenience).*
+---
+
+## ☸️ Quick Start with Kubernetes
+
+Complete Kubernetes manifests are provided in [`k8s/`](k8s/kustomization.yaml) while keeping `docker-compose.yml` 100% backwards compatible.
+
+### 1. Build or Load Images
+Ensure the `kraken-backend:latest` and `kraken-frontend:latest` images are available to your cluster nodes (or update the image references in `k8s/04-backend.yaml` and `k8s/05-frontend.yaml`).
+
+```bash
+docker build -t kraken-backend:latest ./backend
+docker build -t kraken-frontend:latest ./frontend
+```
+
+### 2. Deploy Manifests
+```bash
+kubectl apply -f k8s/
+# or with Kustomize:
+kubectl apply -k k8s/
+```
+
+### 3. Access & Plugin Pod Conversion
+- **HTTPS Gateway (NodePort)**: `https://<NODE_IP>:30443` (HTTP `30800` redirects to HTTPS `30443`).
+- **First-Time Configuration**: On initial boot, access `/setup` (auto-redirected) to configure the administrator password, security settings, and optional FQDNs.
+- **Anytime Multi-Domain FQDN & Port 443 Ingress (`/settings`)**: Start on `ip:port` and at any time navigate to **Domain & Ingress** (`/settings`) to add one or multiple DNS names (e.g. `kat.mycompany.com`, `kraken.mycompany.com`), enable Kubernetes Ingress on standard port **443** ([`k8s/07-ingress.yaml`](k8s/07-ingress.yaml)), auto-generate a multi-SAN TLS certificate covering every configured DNS name (stored in `kraken-tls-secret`), update `ConfigMap`s/`Service`, and automatically rollout-restart Kubernetes deployments.
+- **Invisible Container-to-Pod Plugins**: When any plugin declaring `runtime.type: "container"` / `"docker"` or providing a `Dockerfile` is installed and enabled while Kraken runs on Kubernetes (`KRAKEN_RUNTIME_MODE=kubernetes` or in-cluster ServiceAccount), Kraken automatically runs it as an isolated Kubernetes Pod + ClusterIP Service (including automatic multi-stage/runtime Dockerfile conversion when no local Docker daemon is present) with zero manual user configuration.
 
 ---
 

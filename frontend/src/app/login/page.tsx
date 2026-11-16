@@ -27,7 +27,7 @@ import Image from "next/image";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, completeMicrosoftLogin, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { login, completeMicrosoftLogin, isAuthenticated, isLoading: authLoading, needsSetup } = useAuth();
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -56,10 +56,12 @@ export default function LoginPage() {
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated && !authLoading) {
+    if (!authLoading && needsSetup) {
+      router.replace("/setup");
+    } else if (isAuthenticated && !authLoading) {
       router.push("/");
     }
-  }, [isAuthenticated, authLoading, router]);
+  }, [isAuthenticated, authLoading, needsSetup, router]);
 
   const handleStartMicrosoftLogin = async () => {
     setError(null);

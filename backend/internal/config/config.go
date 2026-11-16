@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -28,6 +30,8 @@ type Config struct {
 	Kubeconfig        string
 	CorsOrigins       []string
 	Environment       string
+	RuntimeMode       string
+	K8sNamespace      string
 	AllowRegistration bool
 	PluginsDir        string
 	MicrosoftClientID string
@@ -90,12 +94,75 @@ func LoadDotEnv(paths ...string) {
 	}
 }
 
+type persistentSecrets struct {
+	JWTSecret     string `json:"jwt_secret"`
+	EncryptionKey string `json:"encryption_key"`
+}
+
 func generateEphemeralSecret() string {
-	b := make([]byte, 32)
+	b := make([]byte, 48)
 	if _, err := rand.Read(b); err != nil {
 		panic(fmt.Sprintf("failed to generate random secret: %v", err))
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func loadOrGeneratePersistentSecrets(pluginsDir string) (string, string) {
+	secretsPath := filepath.Join(pluginsDir, ".kraken_secrets.json")
+	var stored persistentSecrets
+	if raw, err := os.ReadFile(secretsPath); err == nil {
+		_ = json.Unmarshal(raw, &stored)
+	}
+
+	dirty := false
+	if IsInsecureSecret(stored.JWTSecret) {
+		stored.JWTSecret = generateEphemeralSecret()
+		dirty = true
+	}
+	if IsInsecureSecret(stored.EncryptionKey) || stored.EncryptionKey == stored.JWTSecret {
+		stored.EncryptionKey = generateEphemeralSecret()
+		dirty = true
+	}
+
+	if dirty && pluginsDir != "" {
+		if err := os.MkdirAll(pluginsDir, 0755); err == nil {
+			if encoded, err := json.MarshalIndent(stored, "", "  "); err == nil {
+				if err := os.WriteFile(secretsPath, encoded, 0600); err != nil {
+					log.Printf("[SECURITY] Warning: failed to persist auto-generated secrets to %s: %v", secretsPath, err)
+				}
+			}
+		} else {
+			log.Printf("[SECURITY] Warning: failed to create plugins directory %s for secret persistence: %v", pluginsDir, err)
+		}
+	}
+
+	return stored.JWTSecret, stored.EncryptionKey
+}
+
+func detectRuntimeMode() string {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("KRAKEN_RUNTIME_MODE")))
+	if mode == "kubernetes" || mode == "k8s" {
+		return "kubernetes"
+	}
+	if mode == "docker" {
+		return "docker"
+	}
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" {
+		return "kubernetes"
+	}
+	return "docker"
+}
+
+func detectK8sNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("KRAKEN_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if raw, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(raw)); ns != "" {
+			return ns
+		}
+	}
+	return "default"
 }
 
 // Load loads the configuration from .env files and environment variables
@@ -134,19 +201,28 @@ func Load() *Config {
 	}
 
 	env := getEnv("ENVIRONMENT", "development")
+	pluginsDir := getEnv("PLUGINS_DIR", "./data/plugins")
 	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
-	if IsInsecureSecret(jwtSecret) {
-		if strings.EqualFold(env, "production") {
-			log.Fatalf("[SECURITY FATAL] Refusing to start in production: JWT_SECRET is missing, shorter than 32 bytes, or set to a known default placeholder. Configure a strong JWT_SECRET in your .env file.")
-		}
-		jwtSecret = generateEphemeralSecret()
-		log.Println("[SECURITY] Generated random ephemeral JWT_SECRET for non-production session. Set JWT_SECRET in .env to persist sessions across restarts.")
-	}
-
 	encryptionKey := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY"))
-	if encryptionKey != "" && IsInsecureSecret(encryptionKey) {
-		if strings.EqualFold(env, "production") {
-			log.Fatalf("[SECURITY FATAL] Refusing to start in production: ENCRYPTION_KEY is shorter than 32 bytes or set to a known placeholder.")
+
+	if IsInsecureSecret(jwtSecret) || IsInsecureSecret(encryptionKey) {
+		var persistedJWT, persistedEnc string
+		// Avoid creating ./data/plugins inside source directories during unit tests unless PLUGINS_DIR is explicitly set.
+		if flag.Lookup("test.v") != nil && strings.TrimSpace(os.Getenv("PLUGINS_DIR")) == "" {
+			persistedJWT = generateEphemeralSecret()
+			persistedEnc = generateEphemeralSecret()
+		} else {
+			persistedJWT, persistedEnc = loadOrGeneratePersistentSecrets(pluginsDir)
+			log.Printf("[SECURITY] Persistent cryptographic keys initialized in %s/.kraken_secrets.json (set JWT_SECRET and ENCRYPTION_KEY explicitly to override).", pluginsDir)
+		}
+
+		if IsInsecureSecret(jwtSecret) {
+			jwtSecret = persistedJWT
+			_ = os.Setenv("JWT_SECRET", jwtSecret)
+		}
+		if IsInsecureSecret(encryptionKey) {
+			encryptionKey = persistedEnc
+			_ = os.Setenv("ENCRYPTION_KEY", encryptionKey)
 		}
 	}
 
@@ -174,8 +250,10 @@ func Load() *Config {
 		Kubeconfig:        getEnv("KUBECONFIG", defaultKubeconfig),
 		CorsOrigins:       origins,
 		Environment:       env,
+		RuntimeMode:       detectRuntimeMode(),
+		K8sNamespace:      detectK8sNamespace(),
 		AllowRegistration: getEnv("ALLOW_REGISTRATION", "false") == "true",
-		PluginsDir:        getEnv("PLUGINS_DIR", "./data/plugins"),
+		PluginsDir:        pluginsDir,
 		MicrosoftClientID: getEnv("MICROSOFT_CLIENT_ID", "04b07795-8ddb-461a-bbee-02f9e1bf7b46"),
 		MicrosoftTenantID: getEnv("MICROSOFT_TENANT_ID", "common"),
 	}

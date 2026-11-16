@@ -139,3 +139,5 @@ ehthumbs_vista.db
 # Assistant & Agent Caches
 # ------------------------------------------
 .flowmem/
+k8s/02-config-secret.yaml
+secret.yaml

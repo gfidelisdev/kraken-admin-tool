@@ -48,6 +48,59 @@ export interface AuthResponse {
   user: User;
 }
 
+export interface SetupStatusResponse {
+  needs_setup: boolean;
+  allow_registration: boolean;
+  runtime_mode: "kubernetes" | "docker" | string;
+  microsoft_client_id?: string;
+  microsoft_tenant_id?: string;
+}
+
+export interface InitialSetupRequest {
+  admin_username: string;
+  admin_email: string;
+  admin_password: string;
+  allow_registration?: boolean;
+  microsoft_client_id?: string;
+  microsoft_tenant_id?: string;
+  domains?: string[];
+  ingress_enabled?: boolean;
+  ingress_class_name?: string;
+}
+
+export interface NetworkConfigResponse {
+  ingress_enabled: boolean;
+  domains: string[];
+  ingress_class_name?: string;
+  standard_https_port: boolean;
+  tls_mode: "auto_self_signed" | "custom" | string;
+  cert_issuer?: string;
+  cert_pem?: string;
+  cert_fingerprint?: string;
+  cert_expires_at?: string;
+  cert_sans?: string[];
+  runtime_mode: "kubernetes" | "docker" | string;
+  k8s_connected: boolean;
+  k8s_namespace?: string;
+  last_applied_at?: string;
+  last_apply_status?: string;
+  last_apply_message?: string;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface UpdateNetworkConfigRequest {
+  ingress_enabled: boolean;
+  domains: string[];
+  ingress_class_name?: string;
+  standard_https_port?: boolean;
+  tls_mode?: "auto_self_signed" | "custom" | string;
+  cert_issuer?: string;
+  custom_cert_pem?: string;
+  custom_key_pem?: string;
+  restart_deployments?: boolean;
+}
+
 export interface MicrosoftDeviceCodeRequest {
   tenant_id?: string;
   client_id?: string;

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -23,8 +23,14 @@ import Image from "next/image";
 
 export default function RegisterPage() {
   const router = useRouter();
-  const { user, register } = useAuth();
+  const { user, register, needsSetup, isLoading: authLoading } = useAuth();
   const isAdmin = user?.role === "admin";
+
+  useEffect(() => {
+    if (!authLoading && needsSetup) {
+      router.replace("/setup");
+    }
+  }, [authLoading, needsSetup, router]);
 
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");

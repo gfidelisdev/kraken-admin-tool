@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -30,6 +32,8 @@ type Handler struct {
 	MSBroker          *MicrosoftSessionBroker
 	MicrosoftClientID string
 	MicrosoftTenantID string
+	OnNetworkSetup    func(ctx context.Context, domains []string, ingressEnabled bool, ingressClass string, actor string, userID uint) error
+	setupMu           sync.Mutex
 }
 
 func NewHandler(db *gorm.DB, secret string, allowRegistration bool) *Handler {
@@ -55,6 +59,157 @@ func (h *Handler) SetMicrosoftConfig(clientID, tenantID string) {
 
 func (h *Handler) SetAdminRecoveryKey(key string) {
 	h.AdminRecoveryKey = strings.TrimSpace(key)
+}
+
+func (h *Handler) needsInitialSetup() (bool, error) {
+	var adminCount int64
+	if err := h.DB.Model(&models.User{}).Where("role = ? AND status = ?", "admin", "active").Count(&adminCount).Error; err != nil {
+		return false, err
+	}
+	return adminCount == 0, nil
+}
+
+// GetSetupStatus reports whether the Kraken instance requires initial first-time configuration.
+func (h *Handler) GetSetupStatus(w http.ResponseWriter, r *http.Request) {
+	needsSetup, err := h.needsInitialSetup()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to inspect setup status"})
+		return
+	}
+
+	runtimeMode := "docker"
+	k8sEnv := strings.ToLower(strings.TrimSpace(os.Getenv("KRAKEN_RUNTIME_MODE")))
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" || k8sEnv == "kubernetes" || k8sEnv == "k8s" {
+		runtimeMode = "kubernetes"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(models.SetupStatusResponse{
+		NeedsSetup:        needsSetup,
+		AllowRegistration: h.AllowRegistration,
+		RuntimeMode:       runtimeMode,
+		MicrosoftClientID: h.MicrosoftClientID,
+		MicrosoftTenantID: h.MicrosoftTenantID,
+	})
+}
+
+// CompleteInitialSetup performs one-time first-boot configuration (creating the initial admin account and settings).
+func (h *Handler) CompleteInitialSetup(w http.ResponseWriter, r *http.Request) {
+	h.setupMu.Lock()
+	defer h.setupMu.Unlock()
+
+	needsSetup, err := h.needsInitialSetup()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to inspect setup status"})
+		return
+	}
+	if !needsSetup {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Initial system setup has already been completed"})
+		return
+	}
+
+	var req models.InitialSetupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	req.AdminUsername = strings.TrimSpace(req.AdminUsername)
+	if req.AdminUsername == "" {
+		req.AdminUsername = "admin"
+	}
+	req.AdminEmail = strings.TrimSpace(strings.ToLower(req.AdminEmail))
+	if req.AdminEmail == "" {
+		req.AdminEmail = "admin@kraken.local"
+	}
+	if len(req.AdminPassword) < 8 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Admin password must be at least 8 characters long"})
+		return
+	}
+
+	var existing models.User
+	if err := h.DB.Where("username = ? OR email = ?", req.AdminUsername, req.AdminEmail).First(&existing).Error; err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Username or email already in use"})
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.AdminPassword), bcrypt.DefaultCost)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to hash password"})
+		return
+	}
+
+	user := models.User{
+		Username:     req.AdminUsername,
+		Email:        req.AdminEmail,
+		PasswordHash: string(hash),
+		Role:         "admin",
+		Status:       "active",
+	}
+	if err := h.DB.Create(&user).Error; err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create initial administrator account"})
+		return
+	}
+
+	if req.AllowRegistration != nil {
+		h.AllowRegistration = *req.AllowRegistration
+	}
+	h.SetMicrosoftConfig(req.MicrosoftClientID, req.MicrosoftTenantID)
+
+	if h.OnNetworkSetup != nil && (len(req.Domains) > 0 || (req.IngressEnabled != nil && *req.IngressEnabled)) {
+		ingressOn := false
+		if req.IngressEnabled != nil {
+			ingressOn = *req.IngressEnabled
+		}
+		if netErr := h.OnNetworkSetup(r.Context(), req.Domains, ingressOn, req.IngressClassName, user.Username, user.ID); netErr != nil {
+			_ = h.DB.Unscoped().Delete(&user).Error
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": netErr.Error()})
+			return
+		}
+	}
+
+	token, err := GenerateToken(&user, h.JWTSecret, 24*time.Hour)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate token"})
+		return
+	}
+
+	audit.Log(h.DB, user.ID, user.Username, "INITIAL_SETUP", "auth", user.Username, "Initial administrator and configuration completed via setup screen", "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(models.AuthResponse{
+		Token: token,
+		User: models.UserResponse{
+			ID:         user.ID,
+			Username:   user.Username,
+			Email:      user.Email,
+			Role:       user.Role,
+			Status:     user.Status,
+			OTPEnabled: user.OTPEnabled,
+			CreatedAt:  user.CreatedAt,
+		},
+	})
 }
 
 func generateRandomPassword(length int) (string, error) {

@@ -41,6 +41,11 @@ import {
   VaultSecretItem,
   TestVaultConnectionRequest,
   TestVaultConnectionResponse,
+  AuthResponse,
+  SetupStatusResponse,
+  InitialSetupRequest,
+  NetworkConfigResponse,
+  UpdateNetworkConfigRequest,
 } from "@/types";
 
 const TOKEN_KEY = process.env.NEXT_PUBLIC_AUTH_TOKEN_STORAGE_KEY || "kraken_auth_token";
@@ -159,7 +164,12 @@ async function request<T>(
     if (response.status === 401) {
       // Do not treat host-level operations (like sudo password prompts) as JWT authentication logout
       const isHostEndpoint = cleanEndpoint.startsWith("/api/hosts/");
-      if (!isHostEndpoint && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      if (
+        !isHostEndpoint &&
+        typeof window !== "undefined" &&
+        !window.location.pathname.startsWith("/login") &&
+        !window.location.pathname.startsWith("/setup")
+      ) {
         removeToken();
         window.location.href = "/login";
       }
@@ -1203,4 +1213,26 @@ export async function getDashboardLayout(): Promise<{ user_id: number; layout_js
 
 export async function saveDashboardLayout(layoutJson: string): Promise<{ status: string; layout_json: string }> {
   return api.put<{ status: string; layout_json: string }>("/api/users/me/dashboard", { layout_json: layoutJson });
+}
+
+// First-Time Initialization Setup
+export async function getSetupStatus(): Promise<SetupStatusResponse> {
+  return api.get<SetupStatusResponse>("/api/auth/setup-status");
+}
+
+export async function completeInitialSetup(payload: InitialSetupRequest): Promise<AuthResponse> {
+  return api.post<AuthResponse>("/api/auth/setup", payload);
+}
+
+// System Network, FQDN, Ingress & TLS Certificate Configuration
+export async function getNetworkConfig(): Promise<NetworkConfigResponse> {
+  return api.get<NetworkConfigResponse>("/api/system/network-config");
+}
+
+export async function updateNetworkConfig(payload: UpdateNetworkConfigRequest): Promise<NetworkConfigResponse> {
+  return api.put<NetworkConfigResponse>("/api/system/network-config", payload);
+}
+
+export async function regenerateNetworkCertificate(): Promise<NetworkConfigResponse> {
+  return api.post<NetworkConfigResponse>("/api/system/network-config/regenerate-cert", {});
 }

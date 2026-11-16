@@ -1,8 +1,8 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { User, AuthResponse } from "@/types";
-import { api, getToken, setToken, removeToken } from "@/lib/api";
+import { User, AuthResponse, SetupStatusResponse, InitialSetupRequest } from "@/types";
+import { api, getToken, setToken, removeToken, getSetupStatus, completeInitialSetup } from "@/lib/api";
 import { SetupOTPModal } from "@/components/auth/SetupOTPModal";
 
 interface AuthContextType {
@@ -10,9 +10,12 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+  needsSetup: boolean;
+  setupStatus: SetupStatusResponse | null;
   login: (username: string, password: string) => Promise<void>;
   completeMicrosoftLogin: (token: string, user: User) => void;
   register: (username: string, email: string, password: string) => Promise<any>;
+  completeSetup: (payload: InitialSetupRequest) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
   openOTPSetup: () => void;
@@ -24,8 +27,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setTokenState] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [needsSetup, setNeedsSetup] = useState<boolean>(false);
+  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null);
 
   const fetchCurrentUser = useCallback(async () => {
+    try {
+      const status = await getSetupStatus();
+      setSetupStatus(status);
+      if (status?.needs_setup) {
+        setNeedsSetup(true);
+        removeToken();
+        setUser(null);
+        setTokenState(null);
+        setIsLoading(false);
+        return;
+      }
+      setNeedsSetup(false);
+    } catch {
+      // Ignore setup status check failure and fall back to token verification
+    }
+
     const currentToken = getToken();
     if (!currentToken) {
       setUser(null);
@@ -60,6 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setToken(res.token);
       setTokenState(res.token);
       setUser(res.user);
+      setNeedsSetup(false);
     } finally {
       setIsLoading(false);
     }
@@ -69,6 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setToken(newToken);
     setTokenState(newToken);
     setUser(newUser);
+    setNeedsSetup(false);
     setIsLoading(false);
   };
 
@@ -84,8 +107,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setToken(res.token);
         setTokenState(res.token);
         setUser(res.user);
+        setNeedsSetup(false);
       }
       return res;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const completeSetup = async (payload: InitialSetupRequest) => {
+    setIsLoading(true);
+    try {
+      const res = await completeInitialSetup(payload);
+      setToken(res.token);
+      setTokenState(res.token);
+      setUser(res.user);
+      setNeedsSetup(false);
+      setSetupStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              needs_setup: false,
+              allow_registration: payload.allow_registration ?? prev.allow_registration,
+            }
+          : {
+              needs_setup: false,
+              allow_registration: !!payload.allow_registration,
+              runtime_mode: "docker",
+            }
+      );
     } finally {
       setIsLoading(false);
     }
@@ -134,9 +184,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         token,
         isLoading,
         isAuthenticated: !!user,
+        needsSetup,
+        setupStatus,
         login,
         completeMicrosoftLogin,
         register,
+        completeSetup,
         logout,
         refreshUser: fetchCurrentUser,
         openOTPSetup,
