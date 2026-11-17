@@ -17,6 +17,10 @@ import {
   Loader2,
   KeyRound,
   Sparkles,
+  Eye,
+  EyeOff,
+  Copy,
+  Check,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -66,6 +70,22 @@ export default function DomainIngressSettingsPage() {
   const [msClientIDInput, setMsClientIDInput] = useState("");
   const [msTenantIDInput, setMsTenantIDInput] = useState("");
   const [restartOnSecretsSave, setRestartOnSecretsSave] = useState(false);
+
+  // Visibility & copy states for sensitive secret fields
+  const [showJwtSecret, setShowJwtSecret] = useState(false);
+  const [showEncryptionKey, setShowEncryptionKey] = useState(false);
+  const [showDbPassword, setShowDbPassword] = useState(false);
+  const [showRecoveryKey, setShowRecoveryKey] = useState(false);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+
+  const copyToClipboard = (text: string, fieldName: string) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    setCopiedField(fieldName);
+    setTimeout(() => {
+      setCopiedField((current) => (current === fieldName ? null : current));
+    }, 2000);
+  };
 
   // Editable form state
   const [ingressEnabled, setIngressEnabled] = useState(false);
@@ -397,17 +417,50 @@ export default function DomainIngressSettingsPage() {
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-slate-300">JWT_SECRET (32+ chars)</label>
-                    <button
-                      type="button"
-                      onClick={() => setJwtSecretInput(generateStrongSecret(48))}
-                      className="text-[11px] text-sky-400 hover:underline"
-                    >
-                      Generate
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      {jwtSecretInput && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setShowJwtSecret(!showJwtSecret)}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title={showJwtSecret ? "Hide secret" : "Show secret"}
+                          >
+                            {showJwtSecret ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                            <span>{showJwtSecret ? "Hide" : "Show"}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(jwtSecretInput, "jwt")}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title="Copy secret"
+                          >
+                            {copiedField === "jwt" ? (
+                              <Check className="h-3 w-3 text-emerald-400" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                            <span className={copiedField === "jwt" ? "text-emerald-400" : ""}>
+                              {copiedField === "jwt" ? "Copied" : "Copy"}
+                            </span>
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setJwtSecretInput(generateStrongSecret(48));
+                          setShowJwtSecret(true);
+                        }}
+                        className="text-[11px] text-sky-400 hover:underline"
+                      >
+                        Generate
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-1">
                     <Input
-                      type="password"
+                      type={showJwtSecret ? "text" : "password"}
                       placeholder="Leave blank to keep current JWT_SECRET"
                       value={jwtSecretInput}
                       onChange={(e) => setJwtSecretInput(e.target.value)}
@@ -420,17 +473,50 @@ export default function DomainIngressSettingsPage() {
                     <label className="text-xs font-medium text-slate-300">
                       ENCRYPTION_KEY (32+ chars — automatically archives old key to ENCRYPTION_KEY_PREVIOUS)
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => setEncryptionKeyInput(generateStrongSecret(48))}
-                      className="text-[11px] text-sky-400 hover:underline"
-                    >
-                      Generate
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      {encryptionKeyInput && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setShowEncryptionKey(!showEncryptionKey)}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title={showEncryptionKey ? "Hide key" : "Show key"}
+                          >
+                            {showEncryptionKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                            <span>{showEncryptionKey ? "Hide" : "Show"}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(encryptionKeyInput, "enc")}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title="Copy key"
+                          >
+                            {copiedField === "enc" ? (
+                              <Check className="h-3 w-3 text-emerald-400" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                            <span className={copiedField === "enc" ? "text-emerald-400" : ""}>
+                              {copiedField === "enc" ? "Copied" : "Copy"}
+                            </span>
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEncryptionKeyInput(generateStrongSecret(48));
+                          setShowEncryptionKey(true);
+                        }}
+                        className="text-[11px] text-sky-400 hover:underline"
+                      >
+                        Generate
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-1">
                     <Input
-                      type="password"
+                      type={showEncryptionKey ? "text" : "password"}
                       placeholder="Leave blank to keep current ENCRYPTION_KEY"
                       value={encryptionKeyInput}
                       onChange={(e) => setEncryptionKeyInput(e.target.value)}
@@ -441,17 +527,50 @@ export default function DomainIngressSettingsPage() {
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-slate-300">DB_PASSWORD / POSTGRES_PASSWORD (8+ chars)</label>
-                    <button
-                      type="button"
-                      onClick={() => setDbPasswordInput(generateStrongSecret(24))}
-                      className="text-[11px] text-sky-400 hover:underline"
-                    >
-                      Generate
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      {dbPasswordInput && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setShowDbPassword(!showDbPassword)}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title={showDbPassword ? "Hide password" : "Show password"}
+                          >
+                            {showDbPassword ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                            <span>{showDbPassword ? "Hide" : "Show"}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(dbPasswordInput, "db")}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title="Copy password"
+                          >
+                            {copiedField === "db" ? (
+                              <Check className="h-3 w-3 text-emerald-400" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                            <span className={copiedField === "db" ? "text-emerald-400" : ""}>
+                              {copiedField === "db" ? "Copied" : "Copy"}
+                            </span>
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDbPasswordInput(generateStrongSecret(24));
+                          setShowDbPassword(true);
+                        }}
+                        className="text-[11px] text-sky-400 hover:underline"
+                      >
+                        Generate
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-1">
                     <Input
-                      type="password"
+                      type={showDbPassword ? "text" : "password"}
                       placeholder="Leave blank to keep current PostgreSQL password"
                       value={dbPasswordInput}
                       onChange={(e) => setDbPasswordInput(e.target.value)}
@@ -462,17 +581,50 @@ export default function DomainIngressSettingsPage() {
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-slate-300">ADMIN_RECOVERY_KEY (Optional, 32+ chars)</label>
-                    <button
-                      type="button"
-                      onClick={() => setRecoveryKeyInput(generateStrongSecret(48))}
-                      className="text-[11px] text-sky-400 hover:underline"
-                    >
-                      Generate
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      {recoveryKeyInput && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setShowRecoveryKey(!showRecoveryKey)}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title={showRecoveryKey ? "Hide recovery key" : "Show recovery key"}
+                          >
+                            {showRecoveryKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                            <span>{showRecoveryKey ? "Hide" : "Show"}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(recoveryKeyInput, "rec")}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1"
+                            title="Copy recovery key"
+                          >
+                            {copiedField === "rec" ? (
+                              <Check className="h-3 w-3 text-emerald-400" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                            <span className={copiedField === "rec" ? "text-emerald-400" : ""}>
+                              {copiedField === "rec" ? "Copied" : "Copy"}
+                            </span>
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRecoveryKeyInput(generateStrongSecret(48));
+                          setShowRecoveryKey(true);
+                        }}
+                        className="text-[11px] text-sky-400 hover:underline"
+                      >
+                        Generate
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-1">
                     <Input
-                      type="password"
+                      type={showRecoveryKey ? "text" : "password"}
                       placeholder="Leave blank to keep current recovery key"
                       value={recoveryKeyInput}
                       onChange={(e) => setRecoveryKeyInput(e.target.value)}
