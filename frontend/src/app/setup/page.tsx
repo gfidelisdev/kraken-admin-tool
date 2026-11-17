@@ -663,7 +663,7 @@ export default function SetupPage() {
               {step < STEPS.length ? (
                 <Button
                   type="button"
-                  variant="primary"
+                  variant="default"
                   size="lg"
                   className="shadow-sky-500/20"
                   onClick={handleNext}
@@ -674,7 +674,7 @@ export default function SetupPage() {
               ) : (
                 <Button
                   type="submit"
-                  variant="primary"
+                  variant="default"
                   size="lg"
                   className="shadow-sky-500/20"
                   isLoading={isSubmitting}
