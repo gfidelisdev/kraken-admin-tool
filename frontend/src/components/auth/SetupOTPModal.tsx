@@ -54,33 +54,43 @@ export function SetupOTPModal({ isOpen, onClose, isInitialPrompt = false }: Setu
     }
 
     if (!user?.otp_enabled) {
-      loadSetupData();
+      let cancelled = false;
+      (async () => {
+        setLoading(true);
+        setError(null);
+        try {
+          const res = await getOTPSetup();
+          if (cancelled) return;
+          setSecretKey(res.secret);
+          setAuthUrl(res.otpauth_url);
+
+          const qr = await QRCode.toDataURL(res.otpauth_url, {
+            width: 200,
+            margin: 2,
+            color: {
+              dark: "#0f172a",
+              light: "#ffffff",
+            },
+          });
+          if (!cancelled) {
+            setQrCodeDataUrl(qr);
+          }
+        } catch (err: any) {
+          if (!cancelled) {
+            setError(err?.message || "Falha ao gerar segredo do autenticador.");
+          }
+        } finally {
+          if (!cancelled) {
+            setLoading(false);
+          }
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
     }
   }, [isOpen, user?.otp_enabled]);
 
-  const loadSetupData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await getOTPSetup();
-      setSecretKey(res.secret);
-      setAuthUrl(res.otpauth_url);
-
-      const qr = await QRCode.toDataURL(res.otpauth_url, {
-        width: 200,
-        margin: 2,
-        color: {
-          dark: "#0f172a",
-          light: "#ffffff",
-        },
-      });
-      setQrCodeDataUrl(qr);
-    } catch (err: any) {
-      setError(err?.message || "Falha ao gerar segredo do autenticador.");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleCopySecret = () => {
     if (!secretKey) return;
