@@ -147,6 +147,10 @@ func main() {
 		}, actor, userID)
 		return err
 	}
+	authHandler.OnTimeSetup = func(tz string, explicitOffset *int64, clientUnixMs int64, actor string, userID uint) error {
+		_, err := systemHandler.ApplyTimeConfig(tz, explicitOffset, clientUnixMs, actor, userID)
+		return err
+	}
 	systemHandler.EnsureBootNetworkConfig(context.Background())
 
 	pluginsManager, pErr := plugins.NewManager(context.Background(), dbHandle.DB, dockerService, cfg.PluginsDir)
@@ -310,6 +314,7 @@ func main() {
 		r.Get("/api/system/status", systemHandler.StatusHandler)
 		r.Get("/api/system/network-config", systemHandler.GetNetworkConfigHandler)
 		r.With(auth.RequireRole("admin")).Put("/api/system/network-config", systemHandler.UpdateNetworkConfigHandler)
+		r.With(auth.RequireRole("admin")).Put("/api/system/time-config", systemHandler.UpdateTimeConfigHandler)
 		r.With(auth.RequireRole("admin")).Post("/api/system/network-config/regenerate-cert", systemHandler.RegenerateCertificateHandler)
 		r.With(auth.RequireRole("admin")).Get("/api/system/secrets", systemHandler.GetSecretsStatusHandler)
 		r.With(auth.RequireRole("admin")).Put("/api/system/secrets", systemHandler.UpdateSecretsHandler)

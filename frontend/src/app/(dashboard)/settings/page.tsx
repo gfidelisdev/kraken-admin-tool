@@ -21,11 +21,13 @@ import {
   EyeOff,
   Copy,
   Check,
+  Clock,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import {
   getNetworkConfig,
   updateNetworkConfig,
+  updateTimeConfig,
   regenerateNetworkCertificate,
   getSystemSecrets,
   updateSystemSecrets,
@@ -52,7 +54,9 @@ export default function DomainIngressSettingsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
 
-  const [activeTab, setActiveTab] = useState<"domain" | "secrets">("domain");
+  const [activeTab, setActiveTab] = useState<"domain" | "secrets" | "time">("domain");
+  const [timezoneInput, setTimezoneInput] = useState<string>("UTC");
+  const [isSavingTime, setIsSavingTime] = useState(false);
   const [config, setConfig] = useState<NetworkConfigResponse | null>(null);
   const [secretsData, setSecretsData] = useState<SystemSecretsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -111,6 +115,7 @@ export default function DomainIngressSettingsPage() {
       setStandardHTTPSPort(data.standard_https_port !== false);
       setCertIssuer(data.cert_issuer || "");
       setTlsMode(data.tls_mode === "custom" ? "custom" : "auto_self_signed");
+      setTimezoneInput(data.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
 
       if (isAdmin) {
         try {
@@ -381,9 +386,167 @@ export default function DomainIngressSettingsPage() {
             <span>Security &amp; Secrets</span>
           </button>
         )}
+
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("time");
+              setError(null);
+              setSuccess(null);
+            }}
+            className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-all ${
+              activeTab === "time"
+                ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+            }`}
+          >
+            <Clock className="h-4 w-4" />
+            <span>Timezone &amp; Clock</span>
+          </button>
+        )}
       </div>
 
-      {activeTab === "secrets" && isAdmin ? (
+      {activeTab === "time" && isAdmin ? (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Clock className="h-5 w-5 text-emerald-400" />
+                  <span>System Timezone &amp; TOTP Clock Calibration</span>
+                </CardTitle>
+                <CardDescription>
+                  Configure the IANA timezone for Kraken and transparently align TOTP/2FA validation with real UTC if the host OS clock has drift.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-medium text-slate-300">System Timezone (IANA)</label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        try {
+                          setTimezoneInput(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+                        } catch {
+                          setTimezoneInput("UTC");
+                        }
+                      }}
+                      className="text-[11px] font-medium text-sky-400 hover:text-sky-300 transition-colors"
+                    >
+                      Use Browser Timezone
+                    </button>
+                  </div>
+                  <Input
+                    list="kraken-settings-timezones"
+                    placeholder="America/Sao_Paulo"
+                    value={timezoneInput}
+                    onChange={(e) => setTimezoneInput(e.target.value)}
+                  />
+                  <datalist id="kraken-settings-timezones">
+                    {[
+                      "UTC",
+                      "America/Sao_Paulo",
+                      "America/New_York",
+                      "America/Chicago",
+                      "America/Denver",
+                      "America/Los_Angeles",
+                      "America/Bogota",
+                      "America/Argentina/Buenos_Aires",
+                      "Europe/London",
+                      "Europe/Lisbon",
+                      "Europe/Madrid",
+                      "Europe/Berlin",
+                      "Asia/Tokyo",
+                      "Asia/Singapore",
+                      "Australia/Sydney",
+                    ].map((tz) => (
+                      <option key={tz} value={tz} />
+                    ))}
+                  </datalist>
+                </div>
+
+                {typeof config?.server_unix === "number" && config.server_unix > 0 && (() => {
+                  const activeOffset = config.totp_clock_offset_seconds || 0;
+                  const rawSkew = Math.round(Date.now() / 1000 - config.server_unix);
+                  const effectiveSkew = Math.round(Date.now() / 1000 - (config.server_unix + activeOffset));
+                  return (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-2 text-xs text-slate-300">
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Raw Host Clock Skew vs Browser UTC:</span>
+                        <span className="font-mono">{rawSkew >= 0 ? `+${rawSkew}s` : `${rawSkew}s`}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Active TOTP Calibration Offset:</span>
+                        <span className="font-mono">{activeOffset >= 0 ? `+${activeOffset}s` : `${activeOffset}s`}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Effective TOTP UTC Drift:</span>
+                        <span className={`font-mono ${Math.abs(effectiveSkew) > 30 ? "text-amber-400" : "text-emerald-400"}`}>
+                          {effectiveSkew >= 0 ? `+${effectiveSkew}s` : `${effectiveSkew}s`}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="flex flex-wrap items-center gap-3 pt-2">
+                  <Button
+                    type="button"
+                    isLoading={isSavingTime}
+                    onClick={async () => {
+                      setError(null);
+                      setSuccess(null);
+                      setIsSavingTime(true);
+                      try {
+                        const updated = await updateTimeConfig({
+                          timezone: timezoneInput.trim() || undefined,
+                          client_unix_ms: Date.now(),
+                        });
+                        setConfig(updated);
+                        setTimezoneInput(updated.timezone || timezoneInput);
+                        setSuccess("Timezone saved and TOTP clock alignment updated.");
+                      } catch (err: any) {
+                        setError(err?.message || "Failed to update timezone configuration.");
+                      } finally {
+                        setIsSavingTime(false);
+                      }
+                    }}
+                  >
+                    Save Timezone &amp; Auto-Align Clock
+                  </Button>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={isSavingTime}
+                    onClick={async () => {
+                      setError(null);
+                      setSuccess(null);
+                      setIsSavingTime(true);
+                      try {
+                        const updated = await updateTimeConfig({
+                          timezone: timezoneInput.trim() || undefined,
+                          totp_clock_offset_seconds: 0,
+                        });
+                        setConfig(updated);
+                        setSuccess("TOTP clock offset reset to 0s.");
+                      } catch (err: any) {
+                        setError(err?.message || "Failed to reset TOTP clock offset.");
+                      } finally {
+                        setIsSavingTime(false);
+                      }
+                    }}
+                  >
+                    Reset Offset to 0s
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      ) : activeTab === "secrets" && isAdmin ? (
         <form onSubmit={handleSaveSecrets} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             <Card>

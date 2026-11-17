@@ -767,6 +767,21 @@ func (h *Handler) detectRuntimeMode() string {
 	return "docker"
 }
 
+// ApplySystemTimeConfig applies the configured IANA timezone to the Go process and updates the TOTP clock offset.
+func ApplySystemTimeConfig(tz string, offsetSeconds int64) error {
+	cleanTZ := strings.TrimSpace(tz)
+	if cleanTZ != "" {
+		loc, err := time.LoadLocation(cleanTZ)
+		if err != nil {
+			return fmt.Errorf("invalid timezone %q: %w", cleanTZ, err)
+		}
+		time.Local = loc
+		_ = os.Setenv("TZ", cleanTZ)
+	}
+	auth.SetTOTPClockOffsetSeconds(offsetSeconds)
+	return nil
+}
+
 // EnsureBootNetworkConfig initializes persisted network/TLS state on first startup and keeps CORS/WS origins aligned.
 func (h *Handler) EnsureBootNetworkConfig(ctx context.Context) {
 	if h.DBHandle == nil || h.DBHandle.DB == nil {
@@ -776,6 +791,9 @@ func (h *Handler) EnsureBootNetworkConfig(ctx context.Context) {
 	var cfg models.SystemNetworkConfig
 	err := h.DBHandle.DB.Order("id asc").First(&cfg).Error
 	if err == nil {
+		if applyErr := ApplySystemTimeConfig(cfg.Timezone, cfg.TOTPClockOffsetSeconds); applyErr != nil {
+			log.Printf("[SYSTEM-TIME] Warning: failed to apply persisted time config: %v", applyErr)
+		}
 		var domains []string
 		if cfg.DomainsJSON != "" {
 			_ = json.Unmarshal([]byte(cfg.DomainsJSON), &domains)
@@ -860,13 +878,16 @@ func (h *Handler) buildNetworkConfigResponse(cfg *models.SystemNetworkConfig) *m
 
 	_, ns, k8sConnected := h.resolveK8sClient()
 	resp := &models.NetworkConfigResponse{
-		Domains:           domains,
-		StandardHTTPSPort: true,
-		TLSMode:           "auto_self_signed",
-		CertSANs:          certSANs,
-		RuntimeMode:       h.detectRuntimeMode(),
-		K8sConnected:      k8sConnected,
-		K8sNamespace:      ns,
+		Domains:                domains,
+		StandardHTTPSPort:      true,
+		TLSMode:                "auto_self_signed",
+		CertSANs:               certSANs,
+		Timezone:               time.Local.String(),
+		TOTPClockOffsetSeconds: auth.GetTOTPClockOffsetSeconds(),
+		ServerUnix:             time.Now().Unix(),
+		RuntimeMode:            h.detectRuntimeMode(),
+		K8sConnected:           k8sConnected,
+		K8sNamespace:           ns,
 	}
 	if cfg != nil && cfg.ID != 0 {
 		resp.IngressEnabled = cfg.IngressEnabled
@@ -875,6 +896,10 @@ func (h *Handler) buildNetworkConfigResponse(cfg *models.SystemNetworkConfig) *m
 		if cfg.TLSMode != "" {
 			resp.TLSMode = cfg.TLSMode
 		}
+		if cfg.Timezone != "" {
+			resp.Timezone = cfg.Timezone
+		}
+		resp.TOTPClockOffsetSeconds = cfg.TOTPClockOffsetSeconds
 		resp.CertIssuer = cfg.CertIssuer
 		resp.CertPEM = cfg.CertPEM
 		resp.CertFingerprint = cfg.CertFingerprint
@@ -1144,6 +1169,105 @@ func (h *Handler) RegenerateCertificateHandler(w http.ResponseWriter, r *http.Re
 		CertIssuer:         cfg.CertIssuer,
 		RestartDeployments: &restart,
 	}, actor, userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// ApplyTimeConfig validates, persists, and applies the system timezone and optional TOTP clock offset.
+func (h *Handler) ApplyTimeConfig(tz string, explicitOffset *int64, clientUnixMs int64, actor string, userID uint) (*models.NetworkConfigResponse, error) {
+	h.netMu.Lock()
+	defer h.netMu.Unlock()
+
+	cleanTZ := strings.TrimSpace(tz)
+	if cleanTZ != "" {
+		if _, err := time.LoadLocation(cleanTZ); err != nil {
+			return nil, fmt.Errorf("invalid timezone %q: %w", cleanTZ, err)
+		}
+	}
+
+	var cfg models.SystemNetworkConfig
+	if h.DBHandle != nil && h.DBHandle.DB != nil {
+		_ = h.DBHandle.DB.Order("id asc").First(&cfg).Error
+	}
+
+	offset := cfg.TOTPClockOffsetSeconds
+	if explicitOffset != nil {
+		offset = *explicitOffset
+	} else if clientUnixMs > 0 {
+		diff := (clientUnixMs / 1000) - time.Now().Unix()
+		if diff > 30 || diff < -30 {
+			offset = diff
+		} else {
+			offset = 0
+		}
+	}
+
+	if err := ApplySystemTimeConfig(cleanTZ, offset); err != nil {
+		return nil, err
+	}
+
+	if cleanTZ != "" {
+		cfg.Timezone = cleanTZ
+	}
+	cfg.TOTPClockOffsetSeconds = offset
+	if actor != "" {
+		cfg.UpdatedBy = actor
+	}
+	cfg.UpdatedAt = time.Now().UTC()
+
+	if h.DBHandle != nil && h.DBHandle.DB != nil {
+		if cfg.ID == 0 {
+			if cfg.TLSMode == "" {
+				cfg.TLSMode = "auto_self_signed"
+			}
+			cfg.StandardHTTPSPort = true
+			if err := h.DBHandle.DB.Create(&cfg).Error; err != nil {
+				return nil, fmt.Errorf("failed to persist time config: %w", err)
+			}
+		} else {
+			if err := h.DBHandle.DB.Save(&cfg).Error; err != nil {
+				return nil, fmt.Errorf("failed to update time config: %w", err)
+			}
+		}
+		if userID > 0 {
+			audit.Log(h.DBHandle.DB, userID, actor, "UPDATE_TIME_CONFIG", "system", "time", fmt.Sprintf("Timezone=%q, TOTPClockOffsetSeconds=%d", cfg.Timezone, cfg.TOTPClockOffsetSeconds), "SUCCESS")
+		}
+	}
+
+	return h.buildNetworkConfigResponse(&cfg), nil
+}
+
+type updateTimeConfigRequest struct {
+	Timezone               string `json:"timezone,omitempty"`
+	TOTPClockOffsetSeconds *int64 `json:"totp_clock_offset_seconds,omitempty"`
+	ClientUnixMs           int64  `json:"client_unix_ms,omitempty"`
+}
+
+// UpdateTimeConfigHandler handles PUT /api/system/time-config
+func (h *Handler) UpdateTimeConfigHandler(w http.ResponseWriter, r *http.Request) {
+	var req updateTimeConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+
+	actor := "admin"
+	var userID uint
+	if claims := auth.GetUserFromContext(r.Context()); claims != nil {
+		actor = claims.Username
+		userID = claims.UserID
+	}
+
+	resp, err := h.ApplyTimeConfig(req.Timezone, req.TOTPClockOffsetSeconds, req.ClientUnixMs, actor, userID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

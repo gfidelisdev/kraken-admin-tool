@@ -141,3 +141,4 @@ ehthumbs_vista.db
 .flowmem/
 k8s/02-config-secret.yaml
 secret.yaml
+backend/server

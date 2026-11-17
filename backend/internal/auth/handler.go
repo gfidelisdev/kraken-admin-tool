@@ -36,6 +36,7 @@ type Handler struct {
 	MissingEnvSecrets    []string
 	OnNetworkSetup       func(ctx context.Context, domains []string, ingressEnabled bool, ingressClass string, actor string, userID uint) error
 	OnSecretsSetup       func(ctx context.Context, req models.InitialSetupRequest, actor string, userID uint) error
+	OnTimeSetup          func(tz string, explicitOffset *int64, clientUnixMs int64, actor string, userID uint) error
 	setupMu              sync.Mutex
 	jwtMu                sync.RWMutex
 }
@@ -104,13 +105,16 @@ func (h *Handler) GetSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.SetupStatusResponse{
-		NeedsSetup:           needsSetup,
-		AllowRegistration:    h.AllowRegistration,
-		RuntimeMode:          runtimeMode,
-		MicrosoftClientID:    h.MicrosoftClientID,
-		MicrosoftTenantID:    h.MicrosoftTenantID,
-		SecretsPreconfigured: h.SecretsPreconfigured,
-		MissingEnvSecrets:    h.MissingEnvSecrets,
+		NeedsSetup:             needsSetup,
+		AllowRegistration:      h.AllowRegistration,
+		RuntimeMode:            runtimeMode,
+		MicrosoftClientID:      h.MicrosoftClientID,
+		MicrosoftTenantID:      h.MicrosoftTenantID,
+		SecretsPreconfigured:   h.SecretsPreconfigured,
+		MissingEnvSecrets:      h.MissingEnvSecrets,
+		Timezone:               time.Local.String(),
+		TOTPClockOffsetSeconds: GetTOTPClockOffsetSeconds(),
+		ServerUnix:             time.Now().Unix(),
 	})
 }
 
@@ -211,6 +215,16 @@ func (h *Handler) CompleteInitialSetup(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": netErr.Error()})
+			return
+		}
+	}
+
+	if h.OnTimeSetup != nil && (strings.TrimSpace(req.Timezone) != "" || req.TOTPClockOffsetSeconds != nil || req.ClientUnixMs > 0) {
+		if timeErr := h.OnTimeSetup(req.Timezone, req.TOTPClockOffsetSeconds, req.ClientUnixMs, user.Username, user.ID); timeErr != nil {
+			_ = h.DB.Unscoped().Delete(&user).Error
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": timeErr.Error()})
 			return
 		}
 	}

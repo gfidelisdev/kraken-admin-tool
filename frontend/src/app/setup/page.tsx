@@ -22,6 +22,7 @@ import {
   EyeOff,
   Copy,
   Check,
+  Clock,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { Input } from "@/components/ui/Input";
@@ -45,7 +46,26 @@ const STEPS = [
   { id: 3, title: "Secrets", icon: ShieldCheck },
   { id: 4, title: "Entra ID", icon: KeyRound },
   { id: 5, title: "Domain / FQDN", icon: Globe },
+  { id: 6, title: "Timezone", icon: Clock },
 ] as const;
+
+const COMMON_TIMEZONES = [
+  "UTC",
+  "America/Sao_Paulo",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Bogota",
+  "America/Argentina/Buenos_Aires",
+  "Europe/London",
+  "Europe/Lisbon",
+  "Europe/Madrid",
+  "Europe/Berlin",
+  "Asia/Tokyo",
+  "Asia/Singapore",
+  "Australia/Sydney",
+];
 
 type SecretFieldKey = "db_password" | "jwt_secret" | "encryption_key" | "admin_recovery_key";
 
@@ -89,6 +109,15 @@ export default function SetupPage() {
   const [fqdnInput, setFqdnInput] = useState("");
   const [enableIngress, setEnableIngress] = useState(false);
   const [ingressClassName, setIngressClassName] = useState("");
+
+  // Step 6: Timezone & Clock Calibration
+  const [timezone, setTimezone] = useState<string>(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    } catch {
+      return "UTC";
+    }
+  });
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -230,6 +259,8 @@ export default function SetupPage() {
         domains: parsedDomains.length > 0 ? parsedDomains : undefined,
         ingress_enabled: parsedDomains.length > 0 ? enableIngress : undefined,
         ingress_class_name: ingressClassName.trim() || undefined,
+        timezone: timezone.trim() || undefined,
+        client_unix_ms: Date.now(),
       });
       router.replace("/");
     } catch (err: any) {
@@ -345,7 +376,7 @@ export default function SetupPage() {
         </div>
 
         {/* Stepper */}
-        <div className="mb-6 grid grid-cols-5 gap-2">
+        <div className="mb-6 grid grid-cols-6 gap-2">
           {STEPS.map((s) => {
             const Icon = s.icon;
             const isActive = step === s.id;
@@ -652,6 +683,70 @@ export default function SetupPage() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Step 6: Timezone & Clock Sync */}
+            {step === 6 && (
+              <div className="space-y-4">
+                <div className="flex items-center space-x-2 text-xs font-semibold uppercase tracking-wider text-sky-400">
+                  <Clock className="h-4 w-4" />
+                  <span>Step 6 — Timezone &amp; Clock Alignment</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Configures the system timezone (IANA) and transparently aligns TOTP/2FA validation with UTC even if the host clock has drift. You can change this anytime in{" "}
+                  <span className="text-slate-200 font-medium">Settings</span>.
+                </p>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-medium text-slate-300">System Timezone (IANA)</label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        try {
+                          setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+                        } catch {
+                          setTimezone("UTC");
+                        }
+                      }}
+                      className="text-[11px] font-medium text-sky-400 hover:text-sky-300 transition-colors"
+                    >
+                      Use Browser Timezone
+                    </button>
+                  </div>
+                  <Input
+                    list="kraken-common-timezones"
+                    placeholder="America/Sao_Paulo"
+                    value={timezone}
+                    onChange={(e) => setTimezone(e.target.value)}
+                  />
+                  <datalist id="kraken-common-timezones">
+                    {COMMON_TIMEZONES.map((tz) => (
+                      <option key={tz} value={tz} />
+                    ))}
+                  </datalist>
+                </div>
+
+                {typeof setupStatus?.server_unix === "number" && setupStatus.server_unix > 0 && (() => {
+                  const skewSec = Math.round(Date.now() / 1000 - setupStatus.server_unix);
+                  const absSkew = Math.abs(skewSec);
+                  return (
+                    <div className={`rounded-xl border p-3 text-xs ${
+                      absSkew > 30
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                        : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                    }`}>
+                      {absSkew > 30 ? (
+                        <span>
+                          Host clock skew detected ({skewSec > 0 ? `+${skewSec}s` : `${skewSec}s`} vs browser UTC). Kraken will automatically calibrate TOTP validation so 2FA works seamlessly.
+                        </span>
+                      ) : (
+                        <span>Server UTC clock is synchronized with your browser ({absSkew}s diff).</span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 

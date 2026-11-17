@@ -150,30 +150,36 @@ type AuthResponse struct {
 }
 
 type SetupStatusResponse struct {
-	NeedsSetup           bool     `json:"needs_setup"`
-	AllowRegistration    bool     `json:"allow_registration"`
-	RuntimeMode          string   `json:"runtime_mode"`
-	MicrosoftClientID    string   `json:"microsoft_client_id,omitempty"`
-	MicrosoftTenantID    string   `json:"microsoft_tenant_id,omitempty"`
-	SecretsPreconfigured bool     `json:"secrets_preconfigured"`
-	MissingEnvSecrets    []string `json:"missing_env_secrets,omitempty"`
+	NeedsSetup             bool     `json:"needs_setup"`
+	AllowRegistration      bool     `json:"allow_registration"`
+	RuntimeMode            string   `json:"runtime_mode"`
+	MicrosoftClientID      string   `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID      string   `json:"microsoft_tenant_id,omitempty"`
+	SecretsPreconfigured   bool     `json:"secrets_preconfigured"`
+	MissingEnvSecrets      []string `json:"missing_env_secrets,omitempty"`
+	Timezone               string   `json:"timezone,omitempty"`
+	TOTPClockOffsetSeconds int64    `json:"totp_clock_offset_seconds"`
+	ServerUnix             int64    `json:"server_unix"`
 }
 
 type InitialSetupRequest struct {
-	AdminUsername     string   `json:"admin_username"`
-	AdminEmail        string   `json:"admin_email"`
-	AdminPassword     string   `json:"admin_password"`
-	AllowRegistration *bool    `json:"allow_registration,omitempty"`
-	MicrosoftClientID string   `json:"microsoft_client_id,omitempty"`
-	MicrosoftTenantID string   `json:"microsoft_tenant_id,omitempty"`
-	Domains           []string `json:"domains,omitempty"`
-	IngressEnabled    *bool    `json:"ingress_enabled,omitempty"`
-	IngressClassName  string   `json:"ingress_class_name,omitempty"`
-	JWTSecret         string   `json:"jwt_secret,omitempty"`
-	EncryptionKey     string   `json:"encryption_key,omitempty"`
-	AdminRecoveryKey  string   `json:"admin_recovery_key,omitempty"`
-	DBUsername        string   `json:"db_username,omitempty"`
-	DBPassword        string   `json:"db_password,omitempty"`
+	AdminUsername          string   `json:"admin_username"`
+	AdminEmail             string   `json:"admin_email"`
+	AdminPassword          string   `json:"admin_password"`
+	AllowRegistration      *bool    `json:"allow_registration,omitempty"`
+	MicrosoftClientID      string   `json:"microsoft_client_id,omitempty"`
+	MicrosoftTenantID      string   `json:"microsoft_tenant_id,omitempty"`
+	Domains                []string `json:"domains,omitempty"`
+	IngressEnabled         *bool    `json:"ingress_enabled,omitempty"`
+	IngressClassName       string   `json:"ingress_class_name,omitempty"`
+	JWTSecret              string   `json:"jwt_secret,omitempty"`
+	EncryptionKey          string   `json:"encryption_key,omitempty"`
+	AdminRecoveryKey       string   `json:"admin_recovery_key,omitempty"`
+	DBUsername             string   `json:"db_username,omitempty"`
+	DBPassword             string   `json:"db_password,omitempty"`
+	Timezone               string   `json:"timezone,omitempty"`
+	TOTPClockOffsetSeconds *int64   `json:"totp_clock_offset_seconds,omitempty"`
+	ClientUnixMs           int64    `json:"client_unix_ms,omitempty"`
 }
 
 type MicrosoftDeviceCodeRequest struct {
@@ -658,55 +664,63 @@ type SystemStatusResponse struct {
 
 // SystemNetworkConfig persists dynamic FQDN, Ingress (Port 443), and TLS certificate settings
 type SystemNetworkConfig struct {
-	ID                uint       `gorm:"primaryKey" json:"id"`
-	IngressEnabled    bool       `gorm:"default:false" json:"ingress_enabled"`
-	DomainsJSON       string     `gorm:"type:text" json:"-"`
-	IngressClassName  string     `gorm:"size:128" json:"ingress_class_name,omitempty"`
-	StandardHTTPSPort bool       `gorm:"default:true" json:"standard_https_port"`
-	TLSMode           string     `gorm:"size:32;default:'auto_self_signed'" json:"tls_mode"` // "auto_self_signed" | "custom"
-	CertIssuer        string     `gorm:"size:128" json:"cert_issuer,omitempty"`
-	CertPEM           string     `gorm:"type:text" json:"cert_pem,omitempty"`
-	KeyPEM            string     `gorm:"type:text" json:"-"`
-	CertFingerprint   string     `gorm:"size:128" json:"cert_fingerprint,omitempty"`
-	CertExpiresAt     *time.Time `json:"cert_expires_at,omitempty"`
-	LastAppliedAt     *time.Time `json:"last_applied_at,omitempty"`
-	LastApplyStatus   string     `gorm:"size:32" json:"last_apply_status,omitempty"`
-	LastApplyMessage  string     `gorm:"type:text" json:"last_apply_message,omitempty"`
-	UpdatedBy         string     `gorm:"size:64" json:"updated_by,omitempty"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID                     uint       `gorm:"primaryKey" json:"id"`
+	IngressEnabled         bool       `gorm:"default:false" json:"ingress_enabled"`
+	DomainsJSON            string     `gorm:"type:text" json:"-"`
+	IngressClassName       string     `gorm:"size:128" json:"ingress_class_name,omitempty"`
+	StandardHTTPSPort      bool       `gorm:"default:true" json:"standard_https_port"`
+	TLSMode                string     `gorm:"size:32;default:'auto_self_signed'" json:"tls_mode"` // "auto_self_signed" | "custom"
+	CertIssuer             string     `gorm:"size:128" json:"cert_issuer,omitempty"`
+	CertPEM                string     `gorm:"type:text" json:"cert_pem,omitempty"`
+	KeyPEM                 string     `gorm:"type:text" json:"-"`
+	CertFingerprint        string     `gorm:"size:128" json:"cert_fingerprint,omitempty"`
+	CertExpiresAt          *time.Time `json:"cert_expires_at,omitempty"`
+	Timezone               string     `gorm:"size:64" json:"timezone,omitempty"`
+	TOTPClockOffsetSeconds int64      `gorm:"default:0" json:"totp_clock_offset_seconds"`
+	LastAppliedAt          *time.Time `json:"last_applied_at,omitempty"`
+	LastApplyStatus        string     `gorm:"size:32" json:"last_apply_status,omitempty"`
+	LastApplyMessage       string     `gorm:"type:text" json:"last_apply_message,omitempty"`
+	UpdatedBy              string     `gorm:"size:64" json:"updated_by,omitempty"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 type NetworkConfigResponse struct {
-	IngressEnabled    bool       `json:"ingress_enabled"`
-	Domains           []string   `json:"domains"`
-	IngressClassName  string     `json:"ingress_class_name,omitempty"`
-	StandardHTTPSPort bool       `json:"standard_https_port"`
-	TLSMode           string     `json:"tls_mode"`
-	CertIssuer        string     `json:"cert_issuer,omitempty"`
-	CertPEM           string     `json:"cert_pem,omitempty"`
-	CertFingerprint   string     `json:"cert_fingerprint,omitempty"`
-	CertExpiresAt     *time.Time `json:"cert_expires_at,omitempty"`
-	CertSANs          []string   `json:"cert_sans,omitempty"`
-	RuntimeMode       string     `json:"runtime_mode"`
-	K8sConnected      bool       `json:"k8s_connected"`
-	K8sNamespace      string     `json:"k8s_namespace,omitempty"`
-	LastAppliedAt     *time.Time `json:"last_applied_at,omitempty"`
-	LastApplyStatus   string     `json:"last_apply_status,omitempty"`
-	LastApplyMessage  string     `json:"last_apply_message,omitempty"`
-	UpdatedBy         string     `json:"updated_by,omitempty"`
-	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+	IngressEnabled         bool       `json:"ingress_enabled"`
+	Domains                []string   `json:"domains"`
+	IngressClassName       string     `json:"ingress_class_name,omitempty"`
+	StandardHTTPSPort      bool       `json:"standard_https_port"`
+	TLSMode                string     `json:"tls_mode"`
+	CertIssuer             string     `json:"cert_issuer,omitempty"`
+	CertPEM                string     `json:"cert_pem,omitempty"`
+	CertFingerprint        string     `json:"cert_fingerprint,omitempty"`
+	CertExpiresAt          *time.Time `json:"cert_expires_at,omitempty"`
+	CertSANs               []string   `json:"cert_sans,omitempty"`
+	Timezone               string     `json:"timezone,omitempty"`
+	TOTPClockOffsetSeconds int64      `json:"totp_clock_offset_seconds"`
+	ServerUnix             int64      `json:"server_unix"`
+	RuntimeMode            string     `json:"runtime_mode"`
+	K8sConnected           bool       `json:"k8s_connected"`
+	K8sNamespace           string     `json:"k8s_namespace,omitempty"`
+	LastAppliedAt          *time.Time `json:"last_applied_at,omitempty"`
+	LastApplyStatus        string     `json:"last_apply_status,omitempty"`
+	LastApplyMessage       string     `json:"last_apply_message,omitempty"`
+	UpdatedBy              string     `json:"updated_by,omitempty"`
+	UpdatedAt              *time.Time `json:"updated_at,omitempty"`
 }
 
 type UpdateNetworkConfigRequest struct {
-	IngressEnabled     bool     `json:"ingress_enabled"`
-	Domains            []string `json:"domains"`
-	IngressClassName   string   `json:"ingress_class_name,omitempty"`
-	StandardHTTPSPort  *bool    `json:"standard_https_port,omitempty"`
-	TLSMode            string   `json:"tls_mode,omitempty"` // "auto_self_signed" | "custom"
-	CertIssuer         string   `json:"cert_issuer,omitempty"`
-	CustomCertPEM      string   `json:"custom_cert_pem,omitempty"`
-	CustomKeyPEM       string   `json:"custom_key_pem,omitempty"`
-	RestartDeployments *bool    `json:"restart_deployments,omitempty"`
+	IngressEnabled         bool     `json:"ingress_enabled"`
+	Domains                []string `json:"domains"`
+	IngressClassName       string   `json:"ingress_class_name,omitempty"`
+	StandardHTTPSPort      *bool    `json:"standard_https_port,omitempty"`
+	TLSMode                string   `json:"tls_mode,omitempty"` // "auto_self_signed" | "custom"
+	CertIssuer             string   `json:"cert_issuer,omitempty"`
+	CustomCertPEM          string   `json:"custom_cert_pem,omitempty"`
+	CustomKeyPEM           string   `json:"custom_key_pem,omitempty"`
+	RestartDeployments     *bool    `json:"restart_deployments,omitempty"`
+	Timezone               string   `json:"timezone,omitempty"`
+	TOTPClockOffsetSeconds *int64   `json:"totp_clock_offset_seconds,omitempty"`
+	ClientUnixMs           int64    `json:"client_unix_ms,omitempty"`
 }
 
 // SecretStatusItem describes the configuration state of a system secret without exposing its raw value

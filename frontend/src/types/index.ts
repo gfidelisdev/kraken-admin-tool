@@ -56,6 +56,9 @@ export interface SetupStatusResponse {
   microsoft_tenant_id?: string;
   secrets_preconfigured?: boolean;
   missing_env_secrets?: string[];
+  timezone?: string;
+  totp_clock_offset_seconds?: number;
+  server_unix?: number;
 }
 
 export interface InitialSetupRequest {
@@ -73,6 +76,9 @@ export interface InitialSetupRequest {
   admin_recovery_key?: string;
   db_username?: string;
   db_password?: string;
+  timezone?: string;
+  totp_clock_offset_seconds?: number;
+  client_unix_ms?: number;
 }
 
 export interface SecretStatusItem {
@@ -118,6 +124,9 @@ export interface NetworkConfigResponse {
   cert_fingerprint?: string;
   cert_expires_at?: string;
   cert_sans?: string[];
+  timezone?: string;
+  totp_clock_offset_seconds?: number;
+  server_unix?: number;
   runtime_mode: "kubernetes" | "docker" | string;
   k8s_connected: boolean;
   k8s_namespace?: string;
@@ -126,6 +135,12 @@ export interface NetworkConfigResponse {
   last_apply_message?: string;
   updated_by?: string;
   updated_at?: string;
+}
+
+export interface UpdateTimeConfigRequest {
+  timezone?: string;
+  totp_clock_offset_seconds?: number;
+  client_unix_ms?: number;
 }
 
 export interface UpdateNetworkConfigRequest {

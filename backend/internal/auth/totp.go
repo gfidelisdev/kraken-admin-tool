@@ -13,13 +13,35 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var (
-	totpReplayMu    sync.Mutex
-	totpReplayCache = make(map[string]time.Time)
+	totpReplayMu           sync.Mutex
+	totpReplayCache        = make(map[string]time.Time)
+	totpClockOffsetSeconds atomic.Int64
 )
+
+// SetTOTPClockOffsetSeconds configures a trusted server-wide UTC offset (in seconds)
+// to compensate for host clock skew when validating TOTP codes.
+func SetTOTPClockOffsetSeconds(offset int64) {
+	totpClockOffsetSeconds.Store(offset)
+}
+
+// GetTOTPClockOffsetSeconds returns the currently active TOTP clock offset in seconds.
+func GetTOTPClockOffsetSeconds() int64 {
+	return totpClockOffsetSeconds.Load()
+}
+
+// TOTPNow returns the current UTC-aligned time adjusted by any calibrated server clock offset.
+func TOTPNow() time.Time {
+	offset := totpClockOffsetSeconds.Load()
+	if offset == 0 {
+		return time.Now()
+	}
+	return time.Now().Add(time.Duration(offset) * time.Second)
+}
 
 const (
 	// TOTPPeriod defines the time step in seconds (RFC 6238 standard is 30s)
@@ -95,7 +117,7 @@ func ValidateTOTPCode(secret, code string) bool {
 		return false
 	}
 
-	now := time.Now()
+	now := TOTPNow()
 	// Check previous step, current step, and next step
 	for offset := -1; offset <= 1; offset++ {
 		t := now.Add(time.Duration(offset*TOTPPeriod) * time.Second)
@@ -122,7 +144,7 @@ func ConsumeTOTPCodeForAction(action, secret, code string) bool {
 	totpReplayMu.Lock()
 	defer totpReplayMu.Unlock()
 
-	now := time.Now()
+	now := TOTPNow()
 	for k, exp := range totpReplayCache {
 		if now.After(exp) {
 			delete(totpReplayCache, k)

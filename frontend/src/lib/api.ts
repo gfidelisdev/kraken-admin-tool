@@ -46,6 +46,7 @@ import {
   InitialSetupRequest,
   NetworkConfigResponse,
   UpdateNetworkConfigRequest,
+  UpdateTimeConfigRequest,
   SystemSecretsResponse,
   UpdateSystemSecretsRequest,
 } from "@/types";
@@ -1233,6 +1234,10 @@ export async function getNetworkConfig(): Promise<NetworkConfigResponse> {
 
 export async function updateNetworkConfig(payload: UpdateNetworkConfigRequest): Promise<NetworkConfigResponse> {
   return api.put<NetworkConfigResponse>("/api/system/network-config", payload);
+}
+
+export async function updateTimeConfig(payload: UpdateTimeConfigRequest): Promise<NetworkConfigResponse> {
+  return api.put<NetworkConfigResponse>("/api/system/time-config", payload);
 }
 
 export async function regenerateNetworkCertificate(): Promise<NetworkConfigResponse> {
