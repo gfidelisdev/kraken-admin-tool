@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,8 +15,10 @@ import (
 
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gorilla/websocket"
+	"github.com/kraken/admin-tool/backend/internal/auth"
 	"github.com/kraken/admin-tool/backend/internal/docker"
 	"github.com/kraken/admin-tool/backend/internal/k8s"
+	"gorm.io/gorm"
 )
 
 var (
@@ -121,7 +124,7 @@ func (w *wsLineWriter) Flush() error {
 }
 
 // HandleDockerLogs streams container logs over WebSocket
-func HandleDockerLogs(service *docker.DockerService) http.HandlerFunc {
+func HandleDockerLogs(service *docker.DockerService, db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		containerID := strings.TrimSpace(r.URL.Query().Get("containerId"))
 		if containerID == "" || len(containerID) > 128 {
@@ -135,11 +138,14 @@ func HandleDockerLogs(service *docker.DockerService) http.HandlerFunc {
 		}
 		follow := r.URL.Query().Get("follow") != "false"
 
-		var serverID uint = 0
-		if sID := r.URL.Query().Get("serverId"); sID != "" {
-			if id, err := strconv.ParseUint(sID, 10, 32); err == nil {
-				serverID = uint(id)
+		serverID, err := auth.ResolveAuthorizedServerID(db, r)
+		if err != nil {
+			status := http.StatusForbidden
+			if errors.Is(err, auth.ErrUnauthorized) {
+				status = http.StatusUnauthorized
 			}
+			http.Error(w, err.Error(), status)
+			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -202,7 +208,7 @@ func HandleDockerLogs(service *docker.DockerService) http.HandlerFunc {
 }
 
 // HandleK8sLogs streams Kubernetes pod logs over WebSocket
-func HandleK8sLogs(service *k8s.K8sService) http.HandlerFunc {
+func HandleK8sLogs(service *k8s.K8sService, db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		podName := strings.TrimSpace(r.URL.Query().Get("pod"))
 		if podName == "" {
@@ -236,11 +242,14 @@ func HandleK8sLogs(service *k8s.K8sService) http.HandlerFunc {
 		}
 		follow := r.URL.Query().Get("follow") != "false"
 
-		var serverID uint = 0
-		if sID := r.URL.Query().Get("serverId"); sID != "" {
-			if id, err := strconv.ParseUint(sID, 10, 32); err == nil {
-				serverID = uint(id)
+		serverID, err := auth.ResolveAuthorizedServerID(db, r)
+		if err != nil {
+			status := http.StatusForbidden
+			if errors.Is(err, auth.ErrUnauthorized) {
+				status = http.StatusUnauthorized
 			}
+			http.Error(w, err.Error(), status)
+			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)

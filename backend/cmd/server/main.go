@@ -474,8 +474,8 @@ func main() {
 
 		// WebSockets (Protected by AuthMiddleware via Bearer header or ?token=)
 		r.Route("/api/ws", func(r chi.Router) {
-			r.Get("/docker/logs", krakews.HandleDockerLogs(dockerService))
-			r.Get("/k8s/logs", krakews.HandleK8sLogs(k8sService))
+			r.Get("/docker/logs", krakews.HandleDockerLogs(dockerService, dbHandle.DB))
+			r.Get("/k8s/logs", krakews.HandleK8sLogs(k8sService, dbHandle.DB))
 		})
 	})
 

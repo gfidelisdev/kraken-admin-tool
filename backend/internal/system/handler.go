@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/kraken/admin-tool/backend/internal/auth"
@@ -81,43 +81,15 @@ func (h *Handler) SetSecretsCallbacks(
 }
 
 func (h *Handler) getAuthorizedServerID(r *http.Request) uint {
-	var requestedID uint
-	if header := r.Header.Get("X-Server-ID"); header != "" {
-		if id, err := strconv.ParseUint(header, 10, 32); err == nil {
-			requestedID = uint(id)
-		}
+	var db *gorm.DB
+	if h.DBHandle != nil {
+		db = h.DBHandle.DB
 	}
-	if query := r.URL.Query().Get("serverId"); query != "" && requestedID == 0 {
-		if id, err := strconv.ParseUint(query, 10, 32); err == nil {
-			requestedID = uint(id)
-		}
-	}
-
-	claims := auth.GetUserFromContext(r.Context())
-	if claims == nil || claims.UserID == 0 {
+	id, err := auth.ResolveAuthorizedServerID(db, r)
+	if err != nil {
 		return 0
 	}
-
-	if h.DBHandle == nil || h.DBHandle.DB == nil {
-		return requestedID
-	}
-
-	if requestedID > 0 {
-		var count int64
-		h.DBHandle.DB.Model(&models.DockerServer{}).Where("id = ? AND user_id = ?", requestedID, claims.UserID).Count(&count)
-		if count > 0 {
-			return requestedID
-		}
-		return 0
-	}
-
-	// If no server specified, pick the user's default or first server
-	var srv models.DockerServer
-	if err := h.DBHandle.DB.Where("user_id = ?", claims.UserID).Order("is_default desc, id asc").First(&srv).Error; err == nil {
-		return srv.ID
-	}
-
-	return 0
+	return id
 }
 
 // StatusHandler handles GET /api/system/status
@@ -132,7 +104,7 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	dockerContainers := 0
 	dockerImages := 0
 
-	if h.Docker != nil {
+	if serverID > 0 && h.Docker != nil {
 		dockerVersion = h.Docker.GetVersionOnServer(ctx, serverID)
 		dockerConnected = dockerVersion != "unavailable" && dockerVersion != ""
 		if dockerConnected {
@@ -145,7 +117,7 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	k8sPods := 0
 	k8sDeployments := 0
 
-	if h.K8s != nil {
+	if serverID > 0 && h.K8s != nil {
 		k8sVersion = h.K8s.GetVersionOnServer(ctx, serverID)
 		k8sConnected = k8sVersion != "unavailable" && k8sVersion != ""
 		if k8sConnected {

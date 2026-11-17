@@ -240,9 +240,37 @@ func (s *K8sService) StreamPodLogs(ctx context.Context, namespace, name, contain
 
 // --- Multi-Host Methods (*OnServer) Supporting SSH and Docker-Kubernetes ---
 
+// shouldUseLocalClient determines whether the in-cluster/local kubeconfig client may be used.
+// When a database is configured, serverID == 0 is rejected so unconfigured/unauthorized users
+// cannot access the host's local Kubernetes cluster. Local client access is only allowed when
+// serverID > 0 refers to an explicitly added local host (!docker.IsSSHHost).
+func (s *K8sService) shouldUseLocalClient(serverID uint) (bool, error) {
+	if serverID == 0 {
+		if s.db == nil {
+			return true, nil
+		}
+		return false, errors.New("no kubernetes server specified")
+	}
+
+	if s.db != nil && s.IsConnected() {
+		var srv models.DockerServer
+		if err := s.db.Select("id", "host_url").First(&srv, serverID).Error; err == nil {
+			if !docker.IsSSHHost(srv.HostURL) {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
 // GetVersionOnServer returns the Kubernetes version string for the given serverID
 func (s *K8sService) GetVersionOnServer(ctx context.Context, serverID uint) string {
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return "unavailable"
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return "unavailable"
 		}
@@ -297,7 +325,11 @@ func (s *K8sService) GetVersionOnServer(ctx context.Context, serverID uint) stri
 
 // GetCountsOnServer returns pod and deployment counts for the given serverID
 func (s *K8sService) GetCountsOnServer(ctx context.Context, serverID uint) (int, int) {
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return 0, 0
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return 0, 0
 		}
@@ -327,7 +359,11 @@ func (s *K8sService) ListPodsOnServer(ctx context.Context, serverID uint, namesp
 		return []models.PodSummary{}, err
 	}
 
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return []models.PodSummary{}, err
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return []models.PodSummary{}, errors.New("kubernetes cluster is currently unavailable")
 		}
@@ -377,7 +413,11 @@ func (s *K8sService) DeletePodOnServer(ctx context.Context, serverID uint, names
 		return err
 	}
 
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return err
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return errors.New("kubernetes cluster is currently unavailable")
 		}
@@ -406,7 +446,11 @@ func (s *K8sService) ListDeploymentsOnServer(ctx context.Context, serverID uint,
 		return []models.DeploymentSummary{}, err
 	}
 
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return []models.DeploymentSummary{}, err
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return []models.DeploymentSummary{}, errors.New("kubernetes cluster is currently unavailable")
 		}
@@ -445,7 +489,11 @@ func (s *K8sService) ScaleDeploymentOnServer(ctx context.Context, serverID uint,
 		return fmt.Errorf("invalid replicas count: %d (must be between 0 and 10000)", replicas)
 	}
 
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return err
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return errors.New("kubernetes cluster is currently unavailable")
 		}
@@ -480,7 +528,11 @@ func (s *K8sService) RestartDeploymentOnServer(ctx context.Context, serverID uin
 		return err
 	}
 
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return err
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return errors.New("kubernetes cluster is currently unavailable")
 		}
@@ -524,7 +576,11 @@ func (s *K8sService) StreamPodLogsOnServer(ctx context.Context, serverID uint, n
 		tailLines = 100
 	}
 
-	if serverID == 0 {
+	useLocal, err := s.shouldUseLocalClient(serverID)
+	if err != nil {
+		return nil, err
+	}
+	if useLocal {
 		if !s.IsConnected() {
 			return nil, errors.New("kubernetes cluster is currently unavailable")
 		}

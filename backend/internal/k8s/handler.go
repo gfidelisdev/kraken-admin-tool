@@ -2,9 +2,9 @@ package k8s
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/kraken/admin-tool/backend/internal/audit"
@@ -25,19 +25,32 @@ func NewHandler(service *K8sService, db *gorm.DB) *Handler {
 	}
 }
 
-// getServerID extracts server ID from X-Server-ID header or serverId query param
-func getServerID(r *http.Request) uint {
-	if header := r.Header.Get("X-Server-ID"); header != "" {
-		if id, err := strconv.ParseUint(header, 10, 32); err == nil {
-			return uint(id)
-		}
+// resolveAuthorizedServerID verifies user access to the requested or default server.
+// If allowEmptyOnUnconfigured is true and the user has no servers configured, it writes an empty list response and returns (0, false).
+func (h *Handler) resolveAuthorizedServerID(w http.ResponseWriter, r *http.Request, allowEmptyOnUnconfigured bool) (uint, bool) {
+	serverID, err := auth.ResolveAuthorizedServerID(h.DB, r)
+	if err == nil {
+		return serverID, true
 	}
-	if query := r.URL.Query().Get("serverId"); query != "" {
-		if id, err := strconv.ParseUint(query, 10, 32); err == nil {
-			return uint(id)
-		}
+
+	w.Header().Set("Content-Type", "application/json")
+	if errors.Is(err, auth.ErrNoServerConfigured) && allowEmptyOnUnconfigured {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []interface{}{},
+		})
+		return 0, false
 	}
-	return 0
+
+	status := http.StatusForbidden
+	if errors.Is(err, auth.ErrUnauthorized) {
+		status = http.StatusUnauthorized
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": err.Error(),
+		"data":  []interface{}{},
+	})
+	return 0, false
 }
 
 // ListPodsHandler handles GET /api/k8s/pods
@@ -49,7 +62,10 @@ func (h *Handler) ListPodsHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	serverID := getServerID(r)
+	serverID, ok := h.resolveAuthorizedServerID(w, r, true)
+	if !ok {
+		return
+	}
 
 	pods, err := h.Service.ListPodsOnServer(r.Context(), serverID, namespace)
 	if err != nil {
@@ -84,7 +100,10 @@ func (h *Handler) DeletePodHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	serverID := getServerID(r)
+	serverID, ok := h.resolveAuthorizedServerID(w, r, false)
+	if !ok {
+		return
+	}
 
 	user := auth.GetUserFromContext(r.Context())
 	username := "system"
@@ -118,7 +137,10 @@ func (h *Handler) ListDeploymentsHandler(w http.ResponseWriter, r *http.Request)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	serverID := getServerID(r)
+	serverID, ok := h.resolveAuthorizedServerID(w, r, true)
+	if !ok {
+		return
+	}
 
 	deployments, err := h.Service.ListDeploymentsOnServer(r.Context(), serverID, namespace)
 	if err != nil {
@@ -153,7 +175,10 @@ func (h *Handler) ScaleDeploymentHandler(w http.ResponseWriter, r *http.Request)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	serverID := getServerID(r)
+	serverID, ok := h.resolveAuthorizedServerID(w, r, false)
+	if !ok {
+		return
+	}
 
 	var req models.ScaleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Replicas < 0 || req.Replicas > 10000 {
@@ -202,7 +227,10 @@ func (h *Handler) RestartDeploymentHandler(w http.ResponseWriter, r *http.Reques
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	serverID := getServerID(r)
+	serverID, ok := h.resolveAuthorizedServerID(w, r, false)
+	if !ok {
+		return
+	}
 
 	user := auth.GetUserFromContext(r.Context())
 	username := "system"

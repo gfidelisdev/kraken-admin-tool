@@ -37,44 +37,7 @@ func NewHandler(service *DockerService, db *gorm.DB) *Handler {
 // If no server was explicitly requested (serverID == 0), it automatically picks the user's default/first server.
 // If the user does not own the requested server, or has no servers at all, it returns an error.
 func (h *Handler) getAuthorizedServerID(r *http.Request) (uint, error) {
-	var requestedID uint
-	if headerVal := r.Header.Get("X-Server-ID"); headerVal != "" {
-		if id, err := strconv.ParseUint(headerVal, 10, 32); err == nil {
-			requestedID = uint(id)
-		}
-	}
-	if queryVal := r.URL.Query().Get("serverId"); queryVal != "" && requestedID == 0 {
-		if id, err := strconv.ParseUint(queryVal, 10, 32); err == nil {
-			requestedID = uint(id)
-		}
-	}
-
-	claims := auth.GetUserFromContext(r.Context())
-	if claims == nil || claims.UserID == 0 {
-		if h.DB == nil {
-			return requestedID, nil
-		}
-		return 0, errors.New("unauthorized: missing user context")
-	}
-
-	if h.DB == nil {
-		return requestedID, nil
-	}
-
-	if requestedID > 0 {
-		var srv models.DockerServer
-		if err := h.DB.Where("id = ? AND user_id = ?", requestedID, claims.UserID).First(&srv).Error; err != nil {
-			return 0, fmt.Errorf("server %d not found or not accessible", requestedID)
-		}
-		return srv.ID, nil
-	}
-
-	// requestedID is 0: find a server owned by this user
-	var userSrv models.DockerServer
-	if err := h.DB.Where("user_id = ?", claims.UserID).Order("is_default desc, id asc").First(&userSrv).Error; err != nil {
-		return 0, errors.New("no server configured for user")
-	}
-	return userSrv.ID, nil
+	return auth.ResolveAuthorizedServerID(h.DB, r)
 }
 
 // getServerID extracts and authorizes the target docker server for the requesting user
