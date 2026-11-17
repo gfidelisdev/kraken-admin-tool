@@ -201,6 +201,10 @@ export default function SetupPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (step < STEPS.length) {
+      handleNext();
+      return;
+    }
     if (!validateStep(1) || !validateStep(2) || !validateStep(3)) return;
 
     setIsSubmitting(true);
@@ -314,7 +318,7 @@ export default function SetupPage() {
         <div className="mb-6 flex flex-col items-center text-center">
           <div className="relative mb-3 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500/20 to-emerald-500/20 border border-sky-500/30 shadow-2xl shadow-sky-500/10">
             <Image
-              src="/kraken-logo.png"
+              src="/kraken.png"
               alt="Kraken Admin Tool Logo"
               width={44}
               height={44}
@@ -670,6 +674,7 @@ export default function SetupPage() {
 
               {step < STEPS.length ? (
                 <Button
+                  key="next-step-btn"
                   type="button"
                   variant="default"
                   size="lg"
@@ -681,6 +686,7 @@ export default function SetupPage() {
                 </Button>
               ) : (
                 <Button
+                  key="submit-setup-btn"
                   type="submit"
                   variant="default"
                   size="lg"
