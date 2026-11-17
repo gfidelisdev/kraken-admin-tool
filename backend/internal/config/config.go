@@ -296,13 +296,21 @@ func Load() *Config {
 		}
 	}
 
+	runtimeMode := detectRuntimeMode()
+	defaultDBHost := "localhost"
+	defaultDBName := "kraken_db"
+	if runtimeMode == "kubernetes" {
+		defaultDBHost = "postgres"
+		defaultDBName = "postgres"
+	}
+
 	return &Config{
 		Port:                 getEnv("BACKEND_PORT", getEnv("PORT", "8080")),
-		DBHost:               getEnv("DB_HOST", "localhost"),
+		DBHost:               getEnv("DB_HOST", defaultDBHost),
 		DBPort:               getEnv("DB_PORT", "5432"),
 		DBUser:               getEnv("DB_USER", "postgres"),
 		DBPassword:           dbPassword,
-		DBName:               getEnv("DB_NAME", "kraken_db"),
+		DBName:               getEnv("DB_NAME", defaultDBName),
 		DBSSLMode:            getEnv("DB_SSLMODE", "disable"),
 		JWTSecret:            jwtSecret,
 		EncryptionKey:        encryptionKey,
@@ -312,7 +320,7 @@ func Load() *Config {
 		Kubeconfig:           getEnv("KUBECONFIG", defaultKubeconfig),
 		CorsOrigins:          origins,
 		Environment:          env,
-		RuntimeMode:          detectRuntimeMode(),
+		RuntimeMode:          runtimeMode,
 		K8sNamespace:         detectK8sNamespace(),
 		AllowRegistration:    getEnv("ALLOW_REGISTRATION", "false") == "true",
 		PluginsDir:           pluginsDir,

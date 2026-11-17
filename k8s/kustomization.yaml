@@ -6,7 +6,7 @@ namespace: kraken
 resources:
   - 00-namespace.yaml
   - 01-rbac.yaml
-  - 02-config-secret.yaml
+  - 02-config.yaml
   - 03-postgres.yaml
   - 04-backend.yaml
   - 05-frontend.yaml

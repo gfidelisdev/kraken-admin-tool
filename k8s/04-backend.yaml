@@ -40,10 +40,16 @@ spec:
         - name: wait-for-postgres
           image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: kraken-config
+            - secretRef:
+                name: kraken-secrets
+                optional: true
           command:
             - sh
             - -c
-            - until pg_isready -h postgres -p 5432 -U kraken; do sleep 2; done
+            - until pg_isready -h "${DB_HOST:-postgres}" -p "${DB_PORT:-5432}" -U "${DB_USER:-postgres}"; do sleep 2; done
       containers:
         - name: backend
           image: kraken-backend:latest
