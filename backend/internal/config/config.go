@@ -102,6 +102,7 @@ type PersistentSecrets struct {
 	EncryptionKey         string `json:"encryption_key"`
 	EncryptionKeyPrevious string `json:"encryption_key_previous,omitempty"`
 	AdminRecoveryKey      string `json:"admin_recovery_key,omitempty"`
+	DBUser                string `json:"db_user,omitempty"`
 	DBPassword            string `json:"db_password,omitempty"`
 	ConfiguredByAdmin     bool   `json:"configured_by_admin,omitempty"`
 }
@@ -282,6 +283,9 @@ func Load() *Config {
 		if dbPassword == "" && stored.DBPassword != "" {
 			dbPassword = stored.DBPassword
 			_ = os.Setenv("DB_PASSWORD", dbPassword)
+		}
+		if strings.TrimSpace(os.Getenv("DB_USER")) == "" && stored.DBUser != "" {
+			_ = os.Setenv("DB_USER", stored.DBUser)
 		}
 		if adminRecoveryKey == "" && stored.AdminRecoveryKey != "" {
 			adminRecoveryKey = stored.AdminRecoveryKey

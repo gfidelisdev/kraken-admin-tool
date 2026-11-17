@@ -71,6 +71,7 @@ export interface InitialSetupRequest {
   jwt_secret?: string;
   encryption_key?: string;
   admin_recovery_key?: string;
+  db_username?: string;
   db_password?: string;
 }
 
@@ -99,6 +100,7 @@ export interface UpdateSystemSecretsRequest {
   jwt_secret?: string;
   encryption_key?: string;
   admin_recovery_key?: string;
+  db_username?: string;
   db_password?: string;
   microsoft_client_id?: string;
   microsoft_tenant_id?: string;

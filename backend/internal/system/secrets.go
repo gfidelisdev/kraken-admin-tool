@@ -24,6 +24,24 @@ import (
 
 const k8sSecretsName = "kraken-secrets"
 
+func isValidPgIdentifier(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isLetter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isLetter {
+			return false
+		}
+		if !isLetter && !isDigit {
+			return false
+		}
+	}
+	return true
+}
+
 func maskSecretHint(val string) string {
 	trimmed := strings.TrimSpace(val)
 	if trimmed == "" {
@@ -189,6 +207,9 @@ func (h *Handler) ApplySystemSecrets(
 	if stored.AdminRecoveryKey == "" {
 		stored.AdminRecoveryKey = strings.TrimSpace(os.Getenv("ADMIN_RECOVERY_KEY"))
 	}
+	if stored.DBUser == "" {
+		stored.DBUser = strings.TrimSpace(os.Getenv("DB_USER"))
+	}
 	if stored.DBPassword == "" {
 		stored.DBPassword = strings.TrimSpace(os.Getenv("DB_PASSWORD"))
 	}
@@ -229,24 +250,75 @@ func (h *Handler) ApplySystemSecrets(
 		_ = os.Setenv("ADMIN_RECOVERY_KEY", newRec)
 	}
 
+	newDBUser := strings.TrimSpace(req.DBUsername)
 	newDBPass := strings.TrimSpace(req.DBPassword)
-	if newDBPass != "" {
-		if len(newDBPass) < 8 {
-			return nil, errors.New("DB_PASSWORD must be at least 8 characters long")
+	if newDBUser != "" && !isValidPgIdentifier(newDBUser) {
+		return nil, errors.New("db_username must start with a letter or underscore and contain only letters, digits, or underscores")
+	}
+	if newDBPass != "" && len(newDBPass) < 8 {
+		return nil, errors.New("DB_PASSWORD must be at least 8 characters long")
+	}
+	if newDBUser != "" || newDBPass != "" {
+		targetUser := newDBUser
+		if targetUser == "" {
+			targetUser = strings.TrimSpace(stored.DBUser)
+		}
+		if targetUser == "" {
+			targetUser = strings.TrimSpace(os.Getenv("DB_USER"))
 		}
 		if h.DBHandle != nil && h.DBHandle.DB != nil && h.DBHandle.DBType == "PostgreSQL" {
-			dbUser := strings.TrimSpace(os.Getenv("DB_USER"))
-			if dbUser == "" {
-				dbUser = "kraken"
+			if targetUser == "" {
+				var curUser string
+				if err := h.DBHandle.DB.Raw("SELECT current_user").Scan(&curUser).Error; err == nil && strings.TrimSpace(curUser) != "" {
+					targetUser = strings.TrimSpace(curUser)
+				} else {
+					targetUser = "postgres"
+				}
 			}
-			alterSQL := fmt.Sprintf("ALTER USER %s WITH PASSWORD %s", quotePgIdent(dbUser), quotePgLiteral(newDBPass))
-			if err := h.DBHandle.DB.Exec(alterSQL).Error; err != nil {
-				return nil, fmt.Errorf("failed to update PostgreSQL user password: %w", err)
+
+			var roleExists int
+			if err := h.DBHandle.DB.Raw("SELECT 1 FROM pg_roles WHERE rolname = ?", targetUser).Scan(&roleExists).Error; err != nil {
+				return nil, fmt.Errorf("failed to check PostgreSQL role %q: %w", targetUser, err)
 			}
+
+			if roleExists == 1 {
+				if newDBPass != "" {
+					alterSQL := fmt.Sprintf("ALTER USER %s WITH PASSWORD %s", quotePgIdent(targetUser), quotePgLiteral(newDBPass))
+					if err := h.DBHandle.DB.Exec(alterSQL).Error; err != nil {
+						return nil, fmt.Errorf("failed to update PostgreSQL user password: %w", err)
+					}
+				}
+			} else {
+				var createSQL string
+				if newDBPass != "" {
+					createSQL = fmt.Sprintf("CREATE USER %s WITH SUPERUSER PASSWORD %s", quotePgIdent(targetUser), quotePgLiteral(newDBPass))
+				} else {
+					createSQL = fmt.Sprintf("CREATE USER %s WITH SUPERUSER", quotePgIdent(targetUser))
+				}
+				if err := h.DBHandle.DB.Exec(createSQL).Error; err != nil {
+					return nil, fmt.Errorf("failed to create PostgreSQL user %q: %w", targetUser, err)
+				}
+
+				var curDB string
+				if err := h.DBHandle.DB.Raw("SELECT current_database()").Scan(&curDB).Error; err == nil && strings.TrimSpace(curDB) != "" {
+					_ = h.DBHandle.DB.Exec(fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s", quotePgIdent(strings.TrimSpace(curDB)), quotePgIdent(targetUser))).Error
+				}
+				_ = h.DBHandle.DB.Exec(fmt.Sprintf("GRANT ALL ON SCHEMA public TO %s", quotePgIdent(targetUser))).Error
+			}
+		} else if targetUser == "" {
+			targetUser = "kraken"
 		}
-		stored.DBPassword = newDBPass
-		_ = os.Setenv("DB_PASSWORD", newDBPass)
-		_ = os.Setenv("POSTGRES_PASSWORD", newDBPass)
+
+		if targetUser != "" {
+			stored.DBUser = targetUser
+			_ = os.Setenv("DB_USER", targetUser)
+			_ = os.Setenv("POSTGRES_USER", targetUser)
+		}
+		if newDBPass != "" {
+			stored.DBPassword = newDBPass
+			_ = os.Setenv("DB_PASSWORD", newDBPass)
+			_ = os.Setenv("POSTGRES_PASSWORD", newDBPass)
+		}
 	}
 
 	msClient := strings.TrimSpace(req.MicrosoftClientID)
@@ -287,6 +359,8 @@ func (h *Handler) ApplySystemSecrets(
 			"ENCRYPTION_KEY":          []byte(stored.EncryptionKey),
 			"ENCRYPTION_KEY_PREVIOUS": []byte(stored.EncryptionKeyPrevious),
 			"ADMIN_RECOVERY_KEY":      []byte(stored.AdminRecoveryKey),
+			"DB_USER":                 []byte(stored.DBUser),
+			"POSTGRES_USER":           []byte(stored.DBUser),
 			"DB_PASSWORD":             []byte(stored.DBPassword),
 			"POSTGRES_PASSWORD":       []byte(stored.DBPassword),
 		}

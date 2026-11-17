@@ -121,6 +121,7 @@ func main() {
 			JWTSecret:          req.JWTSecret,
 			EncryptionKey:      req.EncryptionKey,
 			AdminRecoveryKey:   req.AdminRecoveryKey,
+			DBUsername:         req.DBUsername,
 			DBPassword:         req.DBPassword,
 			MicrosoftClientID:  req.MicrosoftClientID,
 			MicrosoftTenantID:  req.MicrosoftTenantID,

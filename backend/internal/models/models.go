@@ -172,6 +172,7 @@ type InitialSetupRequest struct {
 	JWTSecret         string   `json:"jwt_secret,omitempty"`
 	EncryptionKey     string   `json:"encryption_key,omitempty"`
 	AdminRecoveryKey  string   `json:"admin_recovery_key,omitempty"`
+	DBUsername        string   `json:"db_username,omitempty"`
 	DBPassword        string   `json:"db_password,omitempty"`
 }
 
@@ -736,6 +737,7 @@ type UpdateSystemSecretsRequest struct {
 	JWTSecret          string `json:"jwt_secret,omitempty"`
 	EncryptionKey      string `json:"encryption_key,omitempty"`
 	AdminRecoveryKey   string `json:"admin_recovery_key,omitempty"`
+	DBUsername         string `json:"db_username,omitempty"`
 	DBPassword         string `json:"db_password,omitempty"`
 	MicrosoftClientID  string `json:"microsoft_client_id,omitempty"`
 	MicrosoftTenantID  string `json:"microsoft_tenant_id,omitempty"`
