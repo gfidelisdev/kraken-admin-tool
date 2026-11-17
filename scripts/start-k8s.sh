@@ -44,10 +44,11 @@ if [ -z "$STEP" ] || [ "$STEP" -le 2 ] 2>/dev/null; then
     echo "==> No k8s/02-config-secret.yaml found; starting in zero-secret mode (configure secrets & admin password at /setup)."
   fi
 
-  kubectl -n kraken rollout restart deployment/backend deployment/postgres
-  kubectl rollout status deployment/backend -n kraken
-  kubectl rollout status deployment/frontend -n kraken
-  kubectl rollout status deployment/proxy -n kraken
+  kubectl -n kraken rollout restart deployment/backend deployment/postgres deployment/frontend deployment/proxy
+  kubectl rollout status deployment/backend -n kraken --timeout=30s
+  kubectl rollout status deployment/postgres -n kraken --timeout=30s
+  kubectl rollout status deployment/frontend -n kraken --timeout=30s
+  kubectl rollout status deployment/proxy -n kraken --timeout=30s
 
   echo "==> Aguardando pods atingirem o status Ready..."
   kubectl wait --namespace=kraken --for=condition=ready pod --all --timeout=120s
