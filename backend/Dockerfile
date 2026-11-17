@@ -34,13 +34,9 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh && chown -R kraken:kraken /app && \
     mkdir -p /tmp/go-cache /tmp/go && chmod -R 777 /tmp/go-cache /tmp/go
 
-# Default environment variables (sensitive values like DB_PASSWORD, JWT_SECRET should be passed at runtime)
+# Default environment variables (DB_* and secrets are supplied at runtime or defaulted by config.Load)
 ENV PORT=8080 \
     ENVIRONMENT=production \
-    DB_HOST=postgres \
-    DB_PORT=5432 \
-    DB_USER=kraken \
-    DB_NAME=kraken_db \
     DOCKER_HOST=unix:///var/run/docker.sock \
     KUBECONFIG=/home/kraken/.kube/config \
     GOCACHE=/tmp/go-cache \
