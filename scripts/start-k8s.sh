@@ -48,5 +48,8 @@ if [ -z "$STEP" ] || [ "$STEP" -le 2 ] 2>/dev/null; then
   kubectl rollout status deployment/backend -n kraken
   kubectl rollout status deployment/frontend -n kraken
   kubectl rollout status deployment/proxy -n kraken
-  kubectl -n kraken get pods -w
+
+  echo "==> Aguardando pods atingirem o status Ready..."
+  kubectl wait --namespace=kraken --for=condition=ready pod --all --timeout=120s
+  kubectl -n kraken get pods
 fi
