@@ -82,8 +82,8 @@ export default function SetupPage() {
   const [copiedField, setCopiedField] = useState<SecretFieldKey | null>(null);
 
   // Step 4: Microsoft Entra ID
-  const [microsoftTenantID, setMicrosoftTenantID] = useState("");
-  const [microsoftClientID, setMicrosoftClientID] = useState("");
+  const [microsoftTenantID, setMicrosoftTenantID] = useState("common");
+  const [microsoftClientID, setMicrosoftClientID] = useState("04b07795-8ddb-461a-bbee-02f9e1bf7b46");
 
   // Step 5: FQDN / Ingress
   const [fqdnInput, setFqdnInput] = useState("");
@@ -96,6 +96,12 @@ export default function SetupPage() {
   useEffect(() => {
     if (setupStatus) {
       setAllowRegistration(Boolean(setupStatus.allow_registration));
+      if (setupStatus.microsoft_tenant_id) {
+        setMicrosoftTenantID(setupStatus.microsoft_tenant_id);
+      }
+      if (setupStatus.microsoft_client_id) {
+        setMicrosoftClientID(setupStatus.microsoft_client_id);
+      }
     }
   }, [setupStatus]);
 
@@ -565,7 +571,9 @@ export default function SetupPage() {
                   <span>Step 4 — Microsoft Entra ID (Optional)</span>
                 </div>
                 <p className="text-xs text-slate-400">
-                  Configure Microsoft Entra ID SSO parameters now, or leave blank to skip and configure later in Settings.
+                  Configure Microsoft Entra ID SSO parameters, or keep the default public App ID (
+                  <span className="font-mono text-slate-300">04b07795-8ddb-461a-bbee-02f9e1bf7b46</span>) and{" "}
+                  <span className="font-mono text-slate-300">common</span> tenant.
                 </p>
 
                 <div>

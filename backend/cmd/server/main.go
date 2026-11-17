@@ -111,7 +111,7 @@ func main() {
 	systemHandler := system.NewHandler(dbHandle, dockerService, k8sService, startTime)
 	systemHandler.SetSecretsCallbacks(
 		cfg.PluginsDir,
-		func(newJWT string) { authHandler.JWTSecret = newJWT },
+		func(newJWT string) { authHandler.SetJWTSecret(newJWT) },
 		func(newRec string) { authHandler.SetAdminRecoveryKey(newRec) },
 		func(cid, tid string) { authHandler.SetMicrosoftConfig(cid, tid) },
 	)
@@ -277,7 +277,7 @@ func main() {
 
 	// Protected Endpoints
 	r.Group(func(r chi.Router) {
-		r.Use(auth.AuthMiddleware(cfg.JWTSecret))
+		r.Use(auth.AuthMiddlewareWithProvider(authHandler.GetJWTSecret))
 
 		// Profile & Ticket & Account (All authenticated users: admin, operator, viewer)
 		r.Get("/api/auth/me", authHandler.Me)

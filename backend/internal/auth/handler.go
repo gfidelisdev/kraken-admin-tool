@@ -37,6 +37,7 @@ type Handler struct {
 	OnNetworkSetup       func(ctx context.Context, domains []string, ingressEnabled bool, ingressClass string, actor string, userID uint) error
 	OnSecretsSetup       func(ctx context.Context, req models.InitialSetupRequest, actor string, userID uint) error
 	setupMu              sync.Mutex
+	jwtMu                sync.RWMutex
 }
 
 func NewHandler(db *gorm.DB, secret string, allowRegistration bool) *Handler {
@@ -62,6 +63,19 @@ func (h *Handler) SetMicrosoftConfig(clientID, tenantID string) {
 
 func (h *Handler) SetAdminRecoveryKey(key string) {
 	h.AdminRecoveryKey = strings.TrimSpace(key)
+}
+
+func (h *Handler) SetJWTSecret(secret string) {
+	h.jwtMu.Lock()
+	h.JWTSecret = strings.TrimSpace(secret)
+	h.jwtMu.Unlock()
+}
+
+func (h *Handler) GetJWTSecret() string {
+	h.jwtMu.RLock()
+	s := h.JWTSecret
+	h.jwtMu.RUnlock()
+	return s
 }
 
 func (h *Handler) needsInitialSetup() (bool, error) {
@@ -177,7 +191,7 @@ func (h *Handler) CompleteInitialSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	h.SetMicrosoftConfig(req.MicrosoftClientID, req.MicrosoftTenantID)
 
-	if h.OnSecretsSetup != nil && (strings.TrimSpace(req.JWTSecret) != "" || strings.TrimSpace(req.EncryptionKey) != "" || strings.TrimSpace(req.AdminRecoveryKey) != "" || strings.TrimSpace(req.DBPassword) != "") {
+	if h.OnSecretsSetup != nil && (strings.TrimSpace(req.JWTSecret) != "" || strings.TrimSpace(req.EncryptionKey) != "" || strings.TrimSpace(req.AdminRecoveryKey) != "" || strings.TrimSpace(req.DBUsername) != "" || strings.TrimSpace(req.DBPassword) != "") {
 		if secErr := h.OnSecretsSetup(r.Context(), req, user.Username, user.ID); secErr != nil {
 			_ = h.DB.Unscoped().Delete(&user).Error
 			w.Header().Set("Content-Type", "application/json")
