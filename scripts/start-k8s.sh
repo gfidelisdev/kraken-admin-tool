@@ -12,17 +12,12 @@ if [ -z "$STEP" ] || [ "$STEP" -eq 1 ] 2>/dev/null; then
   docker build -t kraken-backend:latest "$ROOT_DIR/backend"
   docker build -t kraken-frontend:latest "$ROOT_DIR/frontend"
 
-  SUDO=""
-  if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-    SUDO="sudo"
-  fi
-
   if command -v k3s >/dev/null 2>&1; then
     echo "==> Importing images into k3s containerd..."
-    docker save kraken-backend:latest kraken-frontend:latest | $SUDO k3s ctr images import -
+    docker save kraken-backend:latest kraken-frontend:latest | k3s ctr images import -
   elif command -v microk8s >/dev/null 2>&1; then
     echo "==> Importing images into microk8s containerd..."
-    docker save kraken-backend:latest kraken-frontend:latest | $SUDO microk8s ctr image import -
+    docker save kraken-backend:latest kraken-frontend:latest | microk8s ctr image import -
   elif command -v kind >/dev/null 2>&1; then
     echo "==> Loading images into kind..."
     kind load docker-image kraken-backend:latest kraken-frontend:latest
@@ -32,7 +27,7 @@ if [ -z "$STEP" ] || [ "$STEP" -eq 1 ] 2>/dev/null; then
     minikube image load kraken-frontend:latest
   elif command -v ctr >/dev/null 2>&1; then
     echo "==> Importing images into containerd (k8s.io namespace)..."
-    docker save kraken-backend:latest kraken-frontend:latest | $SUDO ctr -n k8s.io images import -
+    docker save kraken-backend:latest kraken-frontend:latest | ctr -n k8s.io images import -
   fi
 fi
 
