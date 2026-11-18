@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -21,6 +23,14 @@ type Claims struct {
 func GenerateTokenWithSession(user *models.User, secret string, duration time.Duration, authProvider string, sessionID string) (string, error) {
 	if secret == "" {
 		return "", errors.New("jwt secret is required")
+	}
+
+	if sessionID == "" {
+		buf := make([]byte, 16)
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		sessionID = hex.EncodeToString(buf)
 	}
 
 	claims := Claims{

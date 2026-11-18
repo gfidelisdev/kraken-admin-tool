@@ -229,7 +229,7 @@ func (h *Handler) CompleteInitialSetup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	token, err := GenerateToken(&user, h.JWTSecret, 24*time.Hour)
+	token, err := GenerateToken(&user, h.JWTSecret, AccessTokenTTL)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -347,7 +347,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		token, err := GenerateToken(&user, h.JWTSecret, 24*time.Hour)
+		token, err := GenerateToken(&user, h.JWTSecret, AccessTokenTTL)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -510,7 +510,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := GenerateToken(&user, h.JWTSecret, 24*time.Hour)
+	token, err := GenerateToken(&user, h.JWTSecret, AccessTokenTTL)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -784,10 +784,10 @@ func (h *Handler) PollMicrosoftDeviceLogin(w http.ResponseWriter, r *http.Reques
 		"https://vault.azure.net/.default",
 		tokenPayload.AccessToken,
 		tokenPayload.ExpiresIn,
-		24*time.Hour,
+		AccessTokenTTL,
 	)
 
-	jwtToken, err := GenerateTokenWithSession(&user, h.JWTSecret, 24*time.Hour, "microsoft", sessionID)
+	jwtToken, err := GenerateTokenWithSession(&user, h.JWTSecret, AccessTokenTTL, "microsoft", sessionID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -843,6 +843,9 @@ func (h *Handler) PollMicrosoftDeviceLogin(w http.ResponseWriter, r *http.Reques
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	claims := GetUserFromContext(r.Context())
 	if claims != nil {
+		if claims.ExpiresAt != nil {
+			DefaultRevocations.RevokeToken(claims.ID, claims.ExpiresAt.Time)
+		}
 		if h.MSBroker != nil {
 			if claims.ID != "" {
 				h.MSBroker.DeleteSession(claims.ID)
@@ -878,6 +881,50 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// Refresh rotates the caller's access token: it issues a fresh short-lived token and revokes the presented one
+func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
+	claims := GetUserFromContext(r.Context())
+	if claims == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	var user models.User
+	if err := h.DB.First(&user, claims.UserID).Error; err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	authProvider := claims.AuthProvider
+	if authProvider == "" {
+		authProvider = "local"
+	}
+	// Microsoft sessions keep their jti because it is the broker session key
+	sessionID := ""
+	rotate := authProvider != "microsoft"
+	if !rotate {
+		sessionID = claims.ID
+	}
+
+	token, err := GenerateTokenWithSession(&user, h.GetJWTSecret(), AccessTokenTTL, authProvider, sessionID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate token"})
+		return
+	}
+	if rotate && claims.ExpiresAt != nil {
+		DefaultRevocations.RevokeToken(claims.ID, claims.ExpiresAt.Time)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"token": token})
 }
 
 // GetDashboardLayout retrieves the custom dashboard layout for the authenticated user
@@ -1052,6 +1099,8 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update password"})
 		return
 	}
+
+	DefaultRevocations.RevokeUserTokens(user.ID)
 
 	audit.Log(h.DB, user.ID, user.Username, "CHANGE_PASSWORD", "auth", user.Username, "Password updated successfully", "SUCCESS")
 

@@ -731,7 +731,6 @@ type SecretStatusItem struct {
 	Required    bool   `json:"required"`
 	Configured  bool   `json:"configured"`
 	Source      string `json:"source"` // "environment" | "persisted" | "auto_generated" | "unset"
-	MaskedHint  string `json:"masked_hint,omitempty"`
 }
 
 // SystemSecretsResponse reports all system secret statuses and Kubernetes Secret sync status

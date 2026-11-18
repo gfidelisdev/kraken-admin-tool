@@ -48,13 +48,8 @@ var upgrader = websocket.Upgrader{
 				return true
 			}
 		}
-		if u, err := url.Parse(origin); err == nil {
-			if u.Port() == "3000" || u.Port() == "8080" || u.Port() == "8443" || u.Port() == "443" || u.Port() == "" {
-				return true
-			}
-			if u.Scheme == "https" || u.Scheme == "wss" || r.Header.Get("X-Forwarded-Proto") == "https" {
-				return true
-			}
+		if u, err := url.Parse(origin); err == nil && strings.EqualFold(u.Host, r.Host) {
+			return true
 		}
 		log.Printf("[WS] Rejected connection from unauthorized origin: %s", origin)
 		return false

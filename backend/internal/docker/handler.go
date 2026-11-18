@@ -71,10 +71,29 @@ func (h *Handler) ListServersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if claims != nil && strings.EqualFold(claims.Role, "viewer") {
+		for i := range servers {
+			redactServerConnectionDetails(&servers[i])
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"data": servers,
 	})
+}
+
+// redactServerConnectionDetails strips connection and credential-reference fields that only admins/operators need
+func redactServerConnectionDetails(s *models.DockerServer) {
+	s.HostURL = ""
+	s.SSHUser = ""
+	s.SSHAuthMethod = ""
+	s.TLSCACert = ""
+	s.TLSCert = ""
+	s.CredentialPluginID = ""
+	s.SecretReference = ""
+	s.SecretVersion = ""
+	s.VaultConfig = ""
 }
 
 // StreamServersStatusHandler streams real-time status probe updates for all registered servers via SSE.

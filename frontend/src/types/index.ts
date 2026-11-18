@@ -88,7 +88,6 @@ export interface SecretStatusItem {
   required: boolean;
   configured: boolean;
   source: "environment" | "persisted" | "auto_generated" | "unset" | string;
-  masked_hint?: string;
 }
 
 export interface SystemSecretsResponse {

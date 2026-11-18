@@ -74,6 +74,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     fetchCurrentUser();
   }, [fetchCurrentUser]);
 
+  // Access tokens are short-lived (15 min); rotate them while the session is active
+  useEffect(() => {
+    if (!token) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await api.post<{ token: string }>("/api/auth/refresh");
+        if (res?.token) {
+          setToken(res.token);
+          setTokenState(res.token);
+        }
+      } catch {
+        // 401 handling in the API client redirects to login
+      }
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [token]);
+
   const login = async (username: string, password: string) => {
     setIsLoading(true);
     try {

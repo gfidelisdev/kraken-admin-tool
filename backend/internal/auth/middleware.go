@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -12,7 +13,7 @@ type contextKey string
 const UserContextKey contextKey = "user"
 
 // AuthMiddleware creates a Chi-compatible middleware that validates JWT tokens
-// Supports token in Authorization header (Bearer <token>) or ?token=<token> query parameter (for WebSockets)
+// Supports token in Authorization header (Bearer <token>) or a single-use ?ticket= (for WebSockets)
 func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 	return AuthMiddlewareWithProvider(func() string { return secret })
 }
@@ -42,11 +43,6 @@ func AuthMiddlewareWithProvider(secretProvider func() string) func(http.Handler)
 				}
 			}
 
-			// Fallback: Check query param ?token= (legacy support for browser WebSocket connections)
-			if tokenString == "" {
-				tokenString = r.URL.Query().Get("token")
-			}
-
 			if tokenString == "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -55,6 +51,9 @@ func AuthMiddlewareWithProvider(secretProvider func() string) func(http.Handler)
 			}
 
 			claims, err := ValidateToken(tokenString, secretProvider())
+			if err == nil && DefaultRevocations.IsRevoked(claims) {
+				err = errors.New("token revoked")
+			}
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -114,13 +113,10 @@ func ExtractTokenClaims(r *http.Request, secret string) *Claims {
 		}
 	}
 	if tokenString == "" {
-		tokenString = r.URL.Query().Get("token")
-	}
-	if tokenString == "" {
 		return nil
 	}
 	claims, err := ValidateToken(tokenString, secret)
-	if err != nil {
+	if err != nil || DefaultRevocations.IsRevoked(claims) {
 		return nil
 	}
 	return claims

@@ -6,6 +6,8 @@
 #   ${HTTPS_PORT} - Secure HTTPS port terminating TLS with self-signed cert
 # ==============================================================================
 
+server_tokens off;
+
 map $http_upgrade $connection_upgrade {
     default upgrade;
     ''      close;

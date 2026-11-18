@@ -872,11 +872,6 @@ export default function DomainIngressSettingsPage() {
                       </Badge>
                     </div>
                     <p className="text-[11px] text-slate-400">{item.description}</p>
-                    {item.masked_hint && (
-                      <div className="text-[10px] font-mono text-slate-500">
-                        Active: {item.masked_hint}
-                      </div>
-                    )}
                   </div>
                 ))}
 

@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -224,24 +224,27 @@ func main() {
 		})
 	})
 
+	// Encoded slashes/backslashes in resource-name path segments are never valid; reject them before routing
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/docker/stacks/") || strings.HasPrefix(r.URL.Path, "/api/plugins/") {
+				raw := strings.ToLower(r.URL.RawPath)
+				if strings.Contains(raw, "%2f") || strings.Contains(raw, "%5c") {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid path"})
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: cfg.CorsOrigins,
 		AllowOriginFunc: func(r *http.Request, origin string) bool {
-			if len(cfg.CorsOrigins) == 0 {
-				return true
-			}
 			for _, o := range cfg.CorsOrigins {
 				if o == "*" || strings.EqualFold(o, origin) {
-					return true
-				}
-			}
-			// Automatically allow requests originating from frontend port 3000, 8080, 8443, 443, or reverse proxy origins
-			if u, err := url.Parse(origin); err == nil {
-				if u.Port() == "3000" || u.Port() == "8080" || u.Port() == "8443" || u.Port() == "443" || u.Port() == "" {
-					return true
-				}
-				// Also allow any HTTPS origin reaching Kraken via reverse proxy
-				if u.Scheme == "https" || r.Header.Get("X-Forwarded-Proto") == "https" {
 					return true
 				}
 			}
@@ -288,6 +291,7 @@ func main() {
 		r.Get("/api/users/me/dashboard", authHandler.GetDashboardLayout)
 		r.Put("/api/users/me/dashboard", authHandler.SaveDashboardLayout)
 		r.Post("/api/auth/logout", authHandler.Logout)
+		r.Post("/api/auth/refresh", authHandler.Refresh)
 		r.Post("/api/auth/change-password", authHandler.ChangePassword)
 		r.Post("/api/auth/ws-ticket", authHandler.CreateWSTicket)
 		r.Get("/api/auth/otp/setup", authHandler.SetupOTP)
@@ -477,7 +481,7 @@ func main() {
 			})
 		})
 
-		// WebSockets (Protected by AuthMiddleware via Bearer header or ?token=)
+		// WebSockets (Protected by AuthMiddleware via Bearer header or single-use ?ticket=)
 		r.Route("/api/ws", func(r chi.Router) {
 			r.Get("/docker/logs", krakews.HandleDockerLogs(dockerService, dbHandle.DB))
 			r.Get("/k8s/logs", krakews.HandleK8sLogs(k8sService, dbHandle.DB))

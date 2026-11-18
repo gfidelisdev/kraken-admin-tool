@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { getToken, getBaseApiUrl, getWsTicket } from "@/lib/api";
+import { getBaseApiUrl, getWsTicket } from "@/lib/api";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 
@@ -63,7 +63,6 @@ export function useWebSocketLogs({
     setStatus("connecting");
 
     // Construct full ws:// or wss:// URL
-    const token = getToken();
     let fullUrl = url;
 
     // Handle relative or absolute URLs
@@ -83,10 +82,9 @@ export function useWebSocketLogs({
     if (ticket) {
       const separator = fullUrl.includes("?") ? "&" : "?";
       fullUrl = `${fullUrl}${separator}ticket=${encodeURIComponent(ticket)}`;
-    } else if (token && !fullUrl.includes("token=")) {
-      // Fallback to token if ticket exchange is unavailable
-      const separator = fullUrl.includes("?") ? "&" : "?";
-      fullUrl = `${fullUrl}${separator}token=${encodeURIComponent(token)}`;
+    } else {
+      setStatus("error");
+      return;
     }
 
     try {

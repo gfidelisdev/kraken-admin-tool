@@ -42,17 +42,6 @@ func isValidPgIdentifier(s string) bool {
 	return true
 }
 
-func maskSecretHint(val string) string {
-	trimmed := strings.TrimSpace(val)
-	if trimmed == "" {
-		return ""
-	}
-	if len(trimmed) <= 6 {
-		return fmt.Sprintf("•••• (%d chars)", len(trimmed))
-	}
-	return fmt.Sprintf("••••%s (%d chars)", trimmed[len(trimmed)-4:], len(trimmed))
-}
-
 func quotePgIdent(ident string) string {
 	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }
@@ -79,31 +68,31 @@ func (h *Handler) buildSystemSecretsResponse(ctx context.Context) *models.System
 	stored, err := config.LoadPersistentSecrets(pluginsDir)
 	hasPersisted := err == nil
 
-	resolveSource := func(envKey, persistedVal string, required bool) (bool, string, string) {
+	resolveSource := func(envKey, persistedVal string, required bool) (bool, string) {
 		envVal := strings.TrimSpace(os.Getenv(envKey))
 		if envVal != "" {
 			if persistedVal != "" && envVal == persistedVal {
 				if stored.ConfiguredByAdmin {
-					return true, "persisted", maskSecretHint(envVal)
+					return true, "persisted"
 				}
-				return true, "auto_generated", maskSecretHint(envVal)
+				return true, "auto_generated"
 			}
-			return true, "environment", maskSecretHint(envVal)
+			return true, "environment"
 		}
 		if persistedVal != "" {
 			if stored.ConfiguredByAdmin {
-				return true, "persisted", maskSecretHint(persistedVal)
+				return true, "persisted"
 			}
-			return true, "auto_generated", maskSecretHint(persistedVal)
+			return true, "auto_generated"
 		}
-		return false, "unset", ""
+		return false, "unset"
 	}
 
-	jwtCfg, jwtSrc, jwtHint := resolveSource("JWT_SECRET", stored.JWTSecret, true)
-	encCfg, encSrc, encHint := resolveSource("ENCRYPTION_KEY", stored.EncryptionKey, true)
-	prevCfg, prevSrc, prevHint := resolveSource("ENCRYPTION_KEY_PREVIOUS", stored.EncryptionKeyPrevious, false)
-	recCfg, recSrc, recHint := resolveSource("ADMIN_RECOVERY_KEY", stored.AdminRecoveryKey, false)
-	dbCfg, dbSrc, dbHint := resolveSource("DB_PASSWORD", stored.DBPassword, false)
+	jwtCfg, jwtSrc := resolveSource("JWT_SECRET", stored.JWTSecret, true)
+	encCfg, encSrc := resolveSource("ENCRYPTION_KEY", stored.EncryptionKey, true)
+	prevCfg, prevSrc := resolveSource("ENCRYPTION_KEY_PREVIOUS", stored.EncryptionKeyPrevious, false)
+	recCfg, recSrc := resolveSource("ADMIN_RECOVERY_KEY", stored.AdminRecoveryKey, false)
+	dbCfg, dbSrc := resolveSource("DB_PASSWORD", stored.DBPassword, false)
 
 	items := []models.SecretStatusItem{
 		{
@@ -113,7 +102,6 @@ func (h *Handler) buildSystemSecretsResponse(ctx context.Context) *models.System
 			Required:    true,
 			Configured:  jwtCfg,
 			Source:      jwtSrc,
-			MaskedHint:  jwtHint,
 		},
 		{
 			Key:         "ENCRYPTION_KEY",
@@ -122,7 +110,6 @@ func (h *Handler) buildSystemSecretsResponse(ctx context.Context) *models.System
 			Required:    true,
 			Configured:  encCfg,
 			Source:      encSrc,
-			MaskedHint:  encHint,
 		},
 		{
 			Key:         "DB_PASSWORD",
@@ -131,7 +118,6 @@ func (h *Handler) buildSystemSecretsResponse(ctx context.Context) *models.System
 			Required:    false,
 			Configured:  dbCfg,
 			Source:      dbSrc,
-			MaskedHint:  dbHint,
 		},
 		{
 			Key:         "ADMIN_RECOVERY_KEY",
@@ -140,7 +126,6 @@ func (h *Handler) buildSystemSecretsResponse(ctx context.Context) *models.System
 			Required:    false,
 			Configured:  recCfg,
 			Source:      recSrc,
-			MaskedHint:  recHint,
 		},
 		{
 			Key:         "ENCRYPTION_KEY_PREVIOUS",
@@ -149,7 +134,6 @@ func (h *Handler) buildSystemSecretsResponse(ctx context.Context) *models.System
 			Required:    false,
 			Configured:  prevCfg,
 			Source:      prevSrc,
-			MaskedHint:  prevHint,
 		},
 	}
 
