@@ -445,6 +445,12 @@ type DeployStackRequest struct {
 	ForceRecreate bool              `json:"force_recreate,omitempty"`
 }
 
+// RedeployStackRequest drives POST /api/docker/stacks/{name}/redeploy
+type RedeployStackRequest struct {
+	Build bool `json:"build"` // rebuild images (`up --build`)
+	Down  bool `json:"down"`  // run `docker compose down` before `up`
+}
+
 // ComposeStackConfig persists the docker-compose.yaml content for a stack on a given server
 type ComposeStackConfig struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`

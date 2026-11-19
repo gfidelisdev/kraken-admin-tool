@@ -197,6 +197,14 @@ func main() {
 	}
 	pluginsHandler := plugins.NewHandler(pluginsManager)
 
+	// Microsoft-authenticated JWTs are only valid while their in-memory broker session exists
+	auth.SetSessionValidator(func(c *auth.Claims) bool {
+		if c == nil || c.AuthProvider != "microsoft" {
+			return true
+		}
+		return authHandler.MSBroker != nil && authHandler.MSBroker.IsSessionActive(c.ID)
+	})
+
 	// Rate limiter for sensitive auth endpoints (5 burst, 1 request per 2s per IP)
 	authRateLimiter := auth.NewIPRateLimiter(rate.Every(2*time.Second), 5)
 	authRateLimiter.SetTrustedProxies(cfg.TrustedProxies)
@@ -363,6 +371,8 @@ func main() {
 				opRouter.Post("/stacks/{name}/start", dockerHandler.StartComposeStackHandler)
 				opRouter.Post("/stacks/{name}/stop", dockerHandler.StopComposeStackHandler)
 				opRouter.Post("/stacks/{name}/restart", dockerHandler.RestartComposeStackHandler)
+				opRouter.Post("/stacks/{name}/services/{service}/restart", dockerHandler.RestartComposeServiceHandler)
+				opRouter.Post("/stacks/{name}/redeploy", dockerHandler.RedeployComposeStackHandler)
 				opRouter.Delete("/stacks/{name}", dockerHandler.RemoveComposeStackHandler)
 				opRouter.Post("/stacks/deploy", dockerHandler.DeployComposeStackHandler)
 				opRouter.Put("/stacks/{name}/yaml", dockerHandler.UpdateComposeStackYAMLHandler)

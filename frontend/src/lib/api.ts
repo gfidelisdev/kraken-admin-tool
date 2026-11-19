@@ -131,6 +131,21 @@ export function getBaseApiUrl(): string {
   return process.env.INTERNAL_API_URL || process.env.NEXT_PUBLIC_API_URL || "http://backend:8080";
 }
 
+// Expired/invalid sessions (including a lost Microsoft broker session) answer 401; send the user back to login
+function handleUnauthorized(status: number, endpoint: string): void {
+  if (status !== 401) return;
+  // Do not treat host-level operations (like sudo password prompts) as JWT authentication logout
+  if (endpoint.startsWith("/api/hosts/")) return;
+  if (
+    typeof window !== "undefined" &&
+    !window.location.pathname.startsWith("/login") &&
+    !window.location.pathname.startsWith("/setup")
+  ) {
+    removeToken();
+    window.location.href = "/login";
+  }
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -164,19 +179,7 @@ async function request<T>(
   try {
     const response = await fetch(url, config);
 
-    if (response.status === 401) {
-      // Do not treat host-level operations (like sudo password prompts) as JWT authentication logout
-      const isHostEndpoint = cleanEndpoint.startsWith("/api/hosts/");
-      if (
-        !isHostEndpoint &&
-        typeof window !== "undefined" &&
-        !window.location.pathname.startsWith("/login") &&
-        !window.location.pathname.startsWith("/setup")
-      ) {
-        removeToken();
-        window.location.href = "/login";
-      }
-    }
+    handleUnauthorized(response.status, cleanEndpoint);
 
     let responseData: any = null;
     const contentType = response.headers.get("content-type");
@@ -267,6 +270,7 @@ export async function pullImageStream(
     signal,
   });
 
+  handleUnauthorized(response.status, "/api/docker/images/pull/stream");
   if (!response.ok) {
     let errText = `Failed to pull image (${response.status})`;
     try {
@@ -343,6 +347,7 @@ export async function testServerStream(
     signal,
   });
 
+  handleUnauthorized(response.status, "/api/docker/servers/test/stream");
   if (!response.ok) {
     let errText = `Failed to test server connection (${response.status})`;
     try {
@@ -448,6 +453,32 @@ export async function restartComposeStack(name: string, serverId?: number): Prom
   return api.post<{ message: string }>(`/api/docker/stacks/${name}/restart`, {}, { headers });
 }
 
+export async function restartComposeService(name: string, service: string, serverId?: number): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string }>(
+    `/api/docker/stacks/${name}/services/${encodeURIComponent(service)}/restart`,
+    {},
+    { headers }
+  );
+}
+
+export async function redeployComposeStack(
+  name: string,
+  options: { build: boolean; down: boolean },
+  serverId?: number
+): Promise<{ message: string; output?: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string; output?: string }>(`/api/docker/stacks/${name}/redeploy`, options, { headers });
+}
+
+export async function restartContainer(id: string, serverId?: number): Promise<{ message: string }> {
+  const headers: Record<string, string> = {};
+  if (serverId) headers["X-Server-ID"] = serverId.toString();
+  return api.post<{ message: string }>(`/api/docker/containers/${encodeURIComponent(id)}/restart`, {}, { headers });
+}
+
 export async function removeComposeStack(name: string, serverId?: number, removeVolumes: boolean = false): Promise<{ message: string }> {
   const headers: Record<string, string> = {};
   if (serverId) headers["X-Server-ID"] = serverId.toString();
@@ -518,6 +549,7 @@ export async function buildImageStream(
     signal,
   });
 
+  handleUnauthorized(response.status, "/api/docker/images/build/stream");
   if (!response.ok) {
     let errText = `Failed to build image (${response.status})`;
     try {
@@ -946,6 +978,7 @@ export async function inspectPluginUpload(file: File): Promise<PluginInspectResp
     body: formData,
   });
 
+  handleUnauthorized(res.status, "/api/plugins/inspect-upload");
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new ApiError(err.error || `Falha ao inspecionar plugin (${res.status})`, res.status, err);
@@ -987,6 +1020,7 @@ export async function installPluginUpload(
       body: formData,
     });
 
+    handleUnauthorized(res.status, "/api/plugins/install-upload");
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new ApiError(err.error || `Falha ao instalar plugin (${res.status})`, res.status, err);
@@ -1076,6 +1110,7 @@ export async function getPluginWorkerJS(pluginId: string): Promise<string> {
   const res = await fetch(`${baseUrl}/api/plugins/${encodeURIComponent(pluginId)}/worker.js`, {
     headers,
   });
+  handleUnauthorized(res.status, `/api/plugins/${encodeURIComponent(pluginId)}/worker.js`);
   if (!res.ok) {
     throw new ApiError(`Falha ao obter worker.js do plugin (${res.status})`, res.status);
   }
@@ -1143,6 +1178,7 @@ export async function streamServersStatus(
     signal,
   });
 
+  handleUnauthorized(response.status, "/api/docker/servers/status/stream");
   if (!response.ok) {
     throw new ApiError(`Failed to stream server statuses (${response.status})`, response.status);
   }

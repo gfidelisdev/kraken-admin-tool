@@ -2,6 +2,9 @@ package docker
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -134,3 +137,52 @@ func TestComposeStackYAML_Persistence(t *testing.T) {
 }
 
 
+
+func runRedeployScriptWithFakeDocker(t *testing.T, script, stdin string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "calls.log")
+	fake := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + logFile + "\n" +
+		"for a in \"$@\"; do case \"$prev\" in -f) [ -f \"$a\" ] && echo \"file:$(cat \"$a\")\" >> " + logFile + ";; esac; prev=\"$a\"; done\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+	cmd.Stdin = strings.NewReader(stdin)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("script failed: %v: %s", err, out)
+	}
+	data, _ := os.ReadFile(logFile)
+	return string(data)
+}
+
+func TestComposeRedeployScriptDownThenUpWithBuild(t *testing.T) {
+	wd := t.TempDir()
+	script := buildComposeRedeployScript("web", wd, []string{"/srv/a b/docker-compose.yml"}, models.RedeployStackRequest{Build: true, Down: true})
+	calls := strings.Split(strings.TrimSpace(runRedeployScriptWithFakeDocker(t, script, "")), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("expected down then up, got %q", calls)
+	}
+	if calls[0] != "compose -p web -f /srv/a b/docker-compose.yml down --remove-orphans" {
+		t.Fatalf("unexpected down call: %q", calls[0])
+	}
+	if calls[1] != "compose -p web -f /srv/a b/docker-compose.yml up -d --remove-orphans --build" {
+		t.Fatalf("unexpected up call: %q", calls[1])
+	}
+}
+
+func TestComposeRedeployScriptStagesStdinYAML(t *testing.T) {
+	script := buildComposeRedeployScript("web", "", nil, models.RedeployStackRequest{Build: true})
+	log := runRedeployScriptWithFakeDocker(t, script, "services:\n  app:\n    image: nginx\n")
+	if strings.Contains(log, " down") {
+		t.Fatalf("did not expect down without Down option: %s", log)
+	}
+	if !strings.Contains(log, "up -d --remove-orphans --build --force-recreate") {
+		t.Fatalf("expected up with build and force-recreate: %s", log)
+	}
+	if !strings.Contains(log, "file:services:") || !strings.Contains(log, "image: nginx") {
+		t.Fatalf("expected compose YAML from stdin to be staged into the -f file: %s", log)
+	}
+}

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import Link from "next/link";
 import {
   Layers,
   Play,
@@ -25,12 +26,17 @@ import {
   Link2,
   Unlink,
   Sparkles,
+  Hammer,
+  FileText,
 } from "lucide-react";
 import {
   getComposeStacks,
   startComposeStack,
   stopComposeStack,
   restartComposeStack,
+  restartComposeService,
+  redeployComposeStack,
+  restartContainer,
   removeComposeStack,
   deployComposeStack,
   getComposeStackYAML,
@@ -44,6 +50,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/Table";
 import { SourceDirsModal } from "@/components/modals/SourceDirsModal";
 import { SortControl } from "@/components/ui/SortControl";
 import { sortItems, SortDirection } from "@/lib/sort";
@@ -58,6 +65,15 @@ export default function StacksPage() {
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [error, setError] = useState<string | null>(null);
   const [actionLoadingName, setActionLoadingName] = useState<string | null>(null);
+  // Key of the service ("stack/service") or container id currently being restarted
+  const [itemLoadingKey, setItemLoadingKey] = useState<string | null>(null);
+
+  // Redeploy (rebuild / down+up) modal state
+  const [redeployTarget, setRedeployTarget] = useState<ComposeStack | null>(null);
+  const [redeployMode, setRedeployMode] = useState<"build" | "down" | "down_build">("build");
+  const [isRedeploying, setIsRedeploying] = useState(false);
+  const [redeployError, setRedeployError] = useState<string | null>(null);
+  const [redeployOutput, setRedeployOutput] = useState<string | null>(null);
   const [expandedStacks, setExpandedStacks] = useState<Record<string, boolean>>({});
 
   // Deploy modal state
@@ -154,6 +170,61 @@ export default function StacksPage() {
     } catch (err: any) {
       setError(err?.message || `Failed to restart stack ${name}`);
     } finally {
+      setActionLoadingName(null);
+    }
+  };
+
+  const handleRestartService = async (stackName: string, serviceName: string) => {
+    const key = `${stackName}/${serviceName}`;
+    setItemLoadingKey(key);
+    try {
+      await restartComposeService(stackName, serviceName, activeServer?.id);
+      await fetchStacks();
+    } catch (err: any) {
+      setError(err?.message || `Failed to restart service ${key}`);
+    } finally {
+      setItemLoadingKey(null);
+    }
+  };
+
+  const handleRestartContainer = async (id: string, label: string) => {
+    setItemLoadingKey(id);
+    try {
+      await restartContainer(id, activeServer?.id);
+      await fetchStacks();
+    } catch (err: any) {
+      setError(err?.message || `Failed to restart container ${label}`);
+    } finally {
+      setItemLoadingKey(null);
+    }
+  };
+
+  const openRedeployModal = (stack: ComposeStack) => {
+    setRedeployTarget(stack);
+    setRedeployMode("build");
+    setRedeployError(null);
+    setRedeployOutput(null);
+  };
+
+  const handleRedeploy = async () => {
+    if (!redeployTarget) return;
+    const name = redeployTarget.name;
+    setIsRedeploying(true);
+    setActionLoadingName(name);
+    setRedeployError(null);
+    setRedeployOutput(null);
+    try {
+      const res = await redeployComposeStack(
+        name,
+        { build: redeployMode !== "down", down: redeployMode !== "build" },
+        activeServer?.id
+      );
+      setRedeployOutput(res?.output?.trim() || res?.message || "Done");
+      await fetchStacks();
+    } catch (err: any) {
+      setRedeployError(err?.message || `Failed to redeploy stack ${name}`);
+    } finally {
+      setIsRedeploying(false);
       setActionLoadingName(null);
     }
   };
@@ -576,6 +647,18 @@ export default function StacksPage() {
                     <Button
                       variant="outline"
                       size="sm"
+                      onClick={() => openRedeployModal(stack)}
+                      disabled={isBusy}
+                      title="Rebuild images and/or run docker compose down + up"
+                      className="border-slate-700 bg-slate-900/50 hover:bg-slate-800 text-violet-400"
+                    >
+                      <Hammer className="h-3.5 w-3.5 mr-1.5" />
+                      Redeploy
+                    </Button>
+
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => handleOpenYamlModal(stack)}
                       disabled={isBusy}
                       title="View and edit docker-compose.yaml on the fly"
@@ -608,65 +691,227 @@ export default function StacksPage() {
                     <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
                       Services ({stack.services.length})
                     </div>
-                    <div className="grid grid-cols-1 gap-2.5">
-                      {stack.services.map((svc) => (
-                        <div
-                          key={svc.name}
-                          className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg border border-slate-800/80 bg-slate-900/40 gap-3"
-                        >
-                          <div className="flex items-center gap-3">
-                            <Box className="h-4 w-4 text-sky-400 shrink-0" />
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-slate-200 text-sm">{svc.name}</span>
-                                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                                  {svc.running_replicas}/{svc.replicas} replicas
-                                </span>
-                              </div>
-                              <div className="text-xs text-slate-500 font-mono mt-0.5">
-                                Image: <span className="text-slate-400">{svc.image}</span>
-                              </div>
-                            </div>
-                          </div>
+                    <Table aria-label={`Services of stack ${stack.name}`} className="table-fixed">
+                      <colgroup>
+                        <col className="w-[34%]" />
+                        <col className="w-[26%]" />
+                        <col className="w-[24%]" />
+                        <col className="w-[16%]" />
+                      </colgroup>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Container</TableHead>
+                          <TableHead>Status / Uptime</TableHead>
+                          <TableHead>Ports</TableHead>
+                          <TableHead className="text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {stack.services.map((svc) => {
+                          const svcKey = `${stack.name}/${svc.name}`;
+                          const isSvcBusy = itemLoadingKey === svcKey;
+                          return (
+                            <React.Fragment key={svc.name}>
+                              {/* Service header row */}
+                              <TableRow className="bg-slate-800/40 hover:bg-slate-800/40">
+                                <TableCell colSpan={3} className="py-2.5">
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <Box className="h-4 w-4 text-sky-400 shrink-0" />
+                                    <span className="font-semibold text-slate-100 text-sm truncate">{svc.name}</span>
+                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-900 text-slate-300 shrink-0">
+                                      {svc.running_replicas}/{svc.replicas} replicas
+                                    </span>
+                                    <span className="text-xs text-slate-500 font-mono truncate" title={svc.image}>
+                                      {svc.image}
+                                    </span>
+                                  </div>
+                                </TableCell>
+                                <TableCell className="py-2.5 text-right">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleRestartService(stack.name, svc.name)}
+                                    disabled={isBusy || isSvcBusy}
+                                    title={`Restart all containers of service ${svc.name}`}
+                                    className="h-8 text-sky-400 hover:text-sky-300"
+                                  >
+                                    <RotateCw className={`h-3.5 w-3.5 mr-1.5 ${isSvcBusy ? "animate-spin" : ""}`} />
+                                    Restart
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
 
-                          {/* Containers in Service */}
-                          <div className="flex flex-wrap items-center gap-2">
-                            {svc.containers.map((c) => {
-                              const isRunning = c.state.toLowerCase() === "running";
-                              const nameStr = c.names && c.names.length > 0 ? c.names[0].replace(/^\//, "") : (c.id || "").slice(0, 12);
-                              const portStrs = (c.ports || [])
-                                .filter((p) => p.public_port)
-                                .map((p) => `${p.public_port}:${p.private_port}`)
-                                .join(", ");
+                              {svc.containers.length === 0 && (
+                                <TableRow>
+                                  <TableCell colSpan={4} className="py-2 pl-11 text-xs text-slate-500">
+                                    No containers
+                                  </TableCell>
+                                </TableRow>
+                              )}
 
-                              return (
-                                <div
-                                  key={c.id}
-                                  className="flex items-center gap-2 text-xs font-mono px-2.5 py-1 rounded bg-slate-950/80 border border-slate-800"
-                                >
-                                  {isRunning ? (
-                                    <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                                  ) : (
-                                    <span className="h-2 w-2 rounded-full bg-slate-500" />
-                                  )}
-                                  <span className="text-slate-300 truncate max-w-[140px]" title={nameStr}>
-                                    {nameStr}
-                                  </span>
-                                  {portStrs && (
-                                    <span className="text-sky-400/80 text-[10px]">({portStrs})</span>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                              {svc.containers.map((c) => {
+                                const nameStr =
+                                  c.names && c.names.length > 0 ? c.names[0].replace(/^\//, "") : (c.id || "").slice(0, 12);
+                                const isCtrBusy = itemLoadingKey === c.id;
+                                return (
+                                  <TableRow key={c.id}>
+                                    <TableCell className="py-2.5 pl-11">
+                                      <p className="font-semibold text-white text-xs truncate" title={nameStr}>
+                                        {nameStr}
+                                      </p>
+                                      <p className="font-mono text-[11px] text-slate-500">{(c.id || "").slice(0, 12)}</p>
+                                    </TableCell>
+                                    <TableCell className="py-2.5">
+                                      <StatusBadge status={c.status || c.state} />
+                                    </TableCell>
+                                    <TableCell className="py-2.5 text-xs font-mono text-slate-300">
+                                      {c.ports && c.ports.some((p) => p.public_port) ? (
+                                        <div className="flex flex-wrap gap-1">
+                                          {c.ports
+                                            .filter((p) => p.public_port)
+                                            .map((p, idx) => (
+                                              <span
+                                                key={idx}
+                                                className="bg-slate-800/80 px-1.5 py-0.5 rounded text-[11px] text-slate-300"
+                                              >
+                                                {p.public_port}:{p.private_port}
+                                              </span>
+                                            ))}
+                                        </div>
+                                      ) : (
+                                        <span className="text-slate-500">-</span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell className="py-2.5 text-right">
+                                      <div className="flex items-center justify-end space-x-1.5">
+                                        <Link href={`/logs?source=docker&container=${c.id}`} title="View container logs">
+                                          <Button variant="ghost" size="icon" className="h-8 w-8 text-sky-400">
+                                            <FileText className="h-4 w-4" />
+                                          </Button>
+                                        </Link>
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-8 w-8 text-sky-400 hover:text-sky-300"
+                                          title={`Restart container ${nameStr}`}
+                                          disabled={isBusy || isSvcBusy || isCtrBusy}
+                                          onClick={() => handleRestartContainer(c.id, nameStr)}
+                                        >
+                                          <RotateCw className={`h-3.5 w-3.5 ${isCtrBusy ? "animate-spin" : ""}`} />
+                                        </Button>
+                                      </div>
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </React.Fragment>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
                   </div>
                 )}
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Redeploy (rebuild / down+up) Modal */}
+      {redeployTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="w-full max-w-xl rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Hammer className="h-5 w-5 text-violet-400" />
+                Redeploy stack <span className="font-mono text-violet-300">{redeployTarget.name}</span>
+              </h3>
+              <button
+                onClick={() => !isRedeploying && setRedeployTarget(null)}
+                className="text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                disabled={isRedeploying}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {(
+                [
+                  { value: "build", title: "Rebuild & recreate", cmd: "docker compose up -d --build --force-recreate" },
+                  { value: "down", title: "Full restart (down + up)", cmd: "docker compose down && docker compose up -d" },
+                  { value: "down_build", title: "Full restart with rebuild", cmd: "docker compose down && docker compose up -d --build" },
+                ] as const
+              ).map((opt) => (
+                <label
+                  key={opt.value}
+                  className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition ${
+                    redeployMode === opt.value
+                      ? "border-violet-500/60 bg-violet-500/10"
+                      : "border-slate-800 bg-slate-950/40 hover:border-slate-700"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="redeploy-mode"
+                    className="mt-1 accent-violet-500"
+                    checked={redeployMode === opt.value}
+                    onChange={() => setRedeployMode(opt.value)}
+                    disabled={isRedeploying}
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">{opt.title}</div>
+                    <code className="text-[11px] text-slate-500">{opt.cmd}</code>
+                  </div>
+                </label>
+              ))}
+              {redeployMode !== "build" && (
+                <p className="text-[11px] text-amber-400/90">
+                  &quot;down&quot; removes the stack containers and networks before starting them again (named volumes are kept).
+                </p>
+              )}
+            </div>
+
+            {redeployError && (
+              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                <pre className="whitespace-pre-wrap break-all font-mono max-h-60 overflow-auto">{redeployError}</pre>
+              </div>
+            )}
+
+            {redeployOutput && (
+              <div className="rounded-lg bg-slate-950 border border-slate-800 p-3">
+                <div className="text-[10px] uppercase tracking-wider text-emerald-400 mb-1.5 flex items-center gap-1.5">
+                  <CheckCircle2 className="h-3.5 w-3.5" /> docker compose output
+                </div>
+                <pre className="text-[11px] text-slate-300 whitespace-pre-wrap break-all font-mono max-h-60 overflow-auto">{redeployOutput}</pre>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => setRedeployTarget(null)}
+                disabled={isRedeploying}
+                className="border-slate-700"
+              >
+                {redeployOutput ? "Close" : "Cancel"}
+              </Button>
+              <Button onClick={handleRedeploy} disabled={isRedeploying} className="bg-violet-600 hover:bg-violet-500 text-white">
+                {isRedeploying ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-1.5 animate-spin" />
+                    Running...
+                  </>
+                ) : (
+                  <>
+                    <Hammer className="h-4 w-4 mr-1.5" />
+                    Run
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 

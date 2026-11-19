@@ -24,6 +24,12 @@ func isContainerized() bool {
 // runHostNamespaceCommand executes a command inside the host operating system namespace.
 // If input is non-empty, it is piped via standard input to avoid exposing passwords in process tables.
 func runHostNamespaceCommand(ctx context.Context, shellCmd string, input string) error {
+	_, err := runHostNamespaceCombined(ctx, shellCmd, input)
+	return err
+}
+
+// runHostNamespaceCombined is runHostNamespaceCommand that also returns the combined stdout/stderr on success.
+func runHostNamespaceCombined(ctx context.Context, shellCmd string, input string) (string, error) {
 	var execCmd *exec.Cmd
 	if isContainerized() {
 		if err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "true").Run(); err == nil {
@@ -45,9 +51,9 @@ func runHostNamespaceCommand(ctx context.Context, shellCmd string, input string)
 		if outStr == "" {
 			outStr = err.Error()
 		}
-		return fmt.Errorf("%s", outStr)
+		return "", fmt.Errorf("%s", outStr)
 	}
-	return nil
+	return string(out), nil
 }
 
 // runHostNamespaceOutput executes a shell command in the host namespace and returns stdout.

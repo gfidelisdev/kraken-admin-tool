@@ -289,6 +289,171 @@ func (s *DockerService) RestartComposeStack(ctx context.Context, serverID uint, 
 	return nil
 }
 
+var safeServiceNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._\-]*$`)
+
+// RestartComposeService restarts every container of a single service inside a Compose stack
+func (s *DockerService) RestartComposeService(ctx context.Context, serverID uint, stackName, serviceName string) error {
+	if err := ValidateStackName(stackName); err != nil {
+		return err
+	}
+	if !safeServiceNameRegex.MatchString(serviceName) {
+		return fmt.Errorf("invalid service name '%s'", serviceName)
+	}
+
+	cli, err := s.GetClient(ctx, serverID)
+	if err != nil {
+		return err
+	}
+
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	found := false
+	timeout := 10
+	restartOpts := container.StopOptions{Timeout: &timeout}
+	for _, c := range containers {
+		if strings.EqualFold(c.Labels["com.docker.compose.project"], stackName) &&
+			c.Labels["com.docker.compose.service"] == serviceName {
+			found = true
+			if err := cli.ContainerRestart(ctx, c.ID, restartOpts); err != nil {
+				return fmt.Errorf("failed to restart container %s: %w", c.ID[:12], err)
+			}
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("service '%s' not found in compose stack '%s'", serviceName, stackName)
+	}
+	return nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// buildComposeRedeployScript returns a shell script running `docker compose` (down and/or up --build) for a stack.
+// When files is empty, the compose YAML is expected on stdin and staged into a temporary file on the target host.
+func buildComposeRedeployScript(stackName, workingDir string, files []string, opts models.RedeployStackRequest) string {
+	var fileArgs string
+	var prelude, epilogue string
+	if len(files) == 0 {
+		prelude = `kraken_cf=$(mktemp) && cat > "$kraken_cf" && `
+		fileArgs = ` -f "$kraken_cf"`
+		epilogue = `; kraken_rc=$?; rm -f "$kraken_cf"; exit $kraken_rc`
+	} else {
+		for _, f := range files {
+			fileArgs += " -f " + shellQuote(f)
+		}
+	}
+
+	base := "docker compose -p " + shellQuote(stackName) + fileArgs
+	upCmd := base + " up -d --remove-orphans"
+	if opts.Build {
+		upCmd += " --build"
+	}
+	if !opts.Down {
+		// Without a preceding down, recreate so restarted services pick up rebuilt images / config changes
+		upCmd += " --force-recreate"
+	}
+
+	script := prelude
+	if workingDir != "" && len(files) > 0 {
+		script += "cd " + shellQuote(workingDir) + " && "
+	}
+	if opts.Down {
+		script += base + " down --remove-orphans && "
+	}
+	return "{ " + script + upCmd + "; }" + epilogue
+}
+
+// RedeployComposeStack re-runs a stack through the docker compose CLI on the target host: optionally `down` first,
+// then `up -d` (with `--build` when requested). It returns the combined compose output.
+func (s *DockerService) RedeployComposeStack(ctx context.Context, serverID uint, stackName string, opts models.RedeployStackRequest) (string, error) {
+	if !opts.Build && !opts.Down {
+		return "", errors.New("select at least one of: build, down")
+	}
+
+	stack, err := s.GetComposeStack(ctx, serverID, stackName)
+	if err != nil {
+		return "", err
+	}
+	server, err := s.GetServer(serverID)
+	if err != nil {
+		return "", err
+	}
+
+	var files []string
+	for _, f := range strings.Split(stack.ConfigFiles, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			files = append(files, f)
+		}
+	}
+
+	isSSH := IsSSHHost(server.HostURL)
+	if !isSSH && !IsLocalHost(server.HostURL) {
+		return "", errors.New("rebuild/down-up is only supported for local or SSH Docker hosts")
+	}
+
+	// Stacks deployed by Kraken on a containerized backend keep their compose file inside the backend container,
+	// which the host cannot see: fall back to streaming the stored YAML over stdin.
+	if !isSSH && isContainerized() && len(files) > 0 {
+		for _, f := range files {
+			if _, statErr := os.Stat(filepath.Join("/host", f)); statErr != nil {
+				files = nil
+				break
+			}
+		}
+	}
+
+	stdinYAML := ""
+	if len(files) == 0 {
+		if s.db != nil {
+			var cfg models.ComposeStackConfig
+			if err := s.db.Where("server_id = ? AND stack_name = ?", serverID, stack.Name).First(&cfg).Error; err == nil {
+				stdinYAML = strings.TrimSpace(cfg.ComposeYAML)
+			}
+		}
+		if stdinYAML == "" {
+			return "", fmt.Errorf("compose file for stack '%s' is not reachable on the host and no stored YAML is available", stack.Name)
+		}
+		stdinYAML += "\n"
+	}
+
+	script := buildComposeRedeployScript(stack.Name, stack.WorkingDir, files, opts)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+
+	if isSSH {
+		sshClient, _, err := s.GetSSHClient(cmdCtx, serverID)
+		if err != nil {
+			return "", fmt.Errorf("failed to connect via SSH: %w", err)
+		}
+		defer sshClient.Close()
+		session, err := sshClient.NewSession()
+		if err != nil {
+			return "", fmt.Errorf("failed to create SSH session: %w", err)
+		}
+		defer session.Close()
+		if stdinYAML != "" {
+			session.Stdin = strings.NewReader(stdinYAML)
+		}
+		out, err := session.CombinedOutput("sh -c " + shellQuote(script))
+		if err != nil {
+			return string(out), fmt.Errorf("docker compose failed: %s", strings.TrimSpace(string(out)))
+		}
+		return string(out), nil
+	}
+
+	out, err := runHostNamespaceCombined(cmdCtx, script, stdinYAML)
+	if err != nil {
+		return "", fmt.Errorf("docker compose failed: %w", err)
+	}
+	return out, nil
+}
+
 // RemoveComposeStack removes all containers in a Compose stack
 func (s *DockerService) RemoveComposeStack(ctx context.Context, serverID uint, stackName string, removeVolumes bool) error {
 	if err := ValidateStackName(stackName); err != nil {

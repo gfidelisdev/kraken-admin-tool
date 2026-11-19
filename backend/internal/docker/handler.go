@@ -1033,6 +1033,70 @@ func (h *Handler) RestartComposeStackHandler(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack restarted successfully"})
 }
 
+// RestartComposeServiceHandler handles POST /api/docker/stacks/{name}/services/{service}/restart
+func (h *Handler) RestartComposeServiceHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+	service := chi.URLParam(r, "service")
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	target := name + "/" + service
+	if err := h.Service.RestartComposeService(r.Context(), serverID, name, service); err != nil {
+		audit.Log(h.DB, userID, username, "RESTART_STACK_SERVICE", "docker_compose", target, err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "RESTART_STACK_SERVICE", "docker_compose", target, "Restarted compose service successfully", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Service restarted successfully"})
+}
+
+// RedeployComposeStackHandler handles POST /api/docker/stacks/{name}/redeploy (rebuild and/or down+up)
+func (h *Handler) RedeployComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	serverID := h.getServerID(r)
+	name := chi.URLParam(r, "name")
+
+	var req models.RedeployStackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var userID uint = 0
+	if user != nil {
+		username = user.Username
+		userID = user.UserID
+	}
+
+	mode := fmt.Sprintf("build=%t down=%t", req.Build, req.Down)
+	output, err := h.Service.RedeployComposeStack(r.Context(), serverID, name, req)
+	if err != nil {
+		audit.Log(h.DB, userID, username, "REDEPLOY_STACK", "docker_compose", name, mode+": "+err.Error(), "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, userID, username, "REDEPLOY_STACK", "docker_compose", name, "Redeployed compose stack ("+mode+")", "SUCCESS")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Stack redeployed successfully", "output": output})
+}
+
 // RemoveComposeStackHandler handles DELETE /api/docker/stacks/{name}
 func (h *Handler) RemoveComposeStackHandler(w http.ResponseWriter, r *http.Request) {
 	serverID := h.getServerID(r)

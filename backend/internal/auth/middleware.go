@@ -6,11 +6,31 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 )
 
 type contextKey string
 
 const UserContextKey contextKey = "user"
+
+var sessionValidator atomic.Pointer[func(*Claims) bool]
+
+// SetSessionValidator registers a check that rejects otherwise-valid JWTs whose backing server-side session
+// is gone (e.g. a Microsoft broker session lost to expiry or a backend restart), forcing the client to log in again.
+func SetSessionValidator(fn func(*Claims) bool) {
+	if fn == nil {
+		sessionValidator.Store(nil)
+		return
+	}
+	sessionValidator.Store(&fn)
+}
+
+func isSessionValid(claims *Claims) bool {
+	if fn := sessionValidator.Load(); fn != nil {
+		return (*fn)(claims)
+	}
+	return true
+}
 
 // AuthMiddleware creates a Chi-compatible middleware that validates JWT tokens
 // Supports token in Authorization header (Bearer <token>) or a single-use ?ticket= (for WebSockets)
@@ -27,7 +47,7 @@ func AuthMiddlewareWithProvider(secretProvider func() string) func(http.Handler)
 			// Check single-use WebSocket ticket (?ticket=)
 			if ticket := r.URL.Query().Get("ticket"); ticket != "" {
 				claims := DefaultTicketStore.ConsumeTicket(ticket)
-				if claims != nil {
+				if claims != nil && isSessionValid(claims) {
 					ctx := context.WithValue(r.Context(), UserContextKey, claims)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
@@ -53,6 +73,9 @@ func AuthMiddlewareWithProvider(secretProvider func() string) func(http.Handler)
 			claims, err := ValidateToken(tokenString, secretProvider())
 			if err == nil && DefaultRevocations.IsRevoked(claims) {
 				err = errors.New("token revoked")
+			}
+			if err == nil && !isSessionValid(claims) {
+				err = errors.New("session expired")
 			}
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
@@ -116,7 +139,7 @@ func ExtractTokenClaims(r *http.Request, secret string) *Claims {
 		return nil
 	}
 	claims, err := ValidateToken(tokenString, secret)
-	if err != nil || DefaultRevocations.IsRevoked(claims) {
+	if err != nil || DefaultRevocations.IsRevoked(claims) || !isSessionValid(claims) {
 		return nil
 	}
 	return claims

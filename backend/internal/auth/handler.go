@@ -784,7 +784,7 @@ func (h *Handler) PollMicrosoftDeviceLogin(w http.ResponseWriter, r *http.Reques
 		"https://vault.azure.net/.default",
 		tokenPayload.AccessToken,
 		tokenPayload.ExpiresIn,
-		AccessTokenTTL,
+		AccessTokenTTL+time.Minute,
 	)
 
 	jwtToken, err := GenerateTokenWithSession(&user, h.JWTSecret, AccessTokenTTL, "microsoft", sessionID)
@@ -910,6 +910,13 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	rotate := authProvider != "microsoft"
 	if !rotate {
 		sessionID = claims.ID
+		// The broker session must outlive each refreshed JWT; if it is gone, the user has to sign in again
+		if h.MSBroker == nil || !h.MSBroker.ExtendSession(sessionID, AccessTokenTTL+time.Minute) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Microsoft session expired"})
+			return
+		}
 	}
 
 	token, err := GenerateTokenWithSession(&user, h.GetJWTSecret(), AccessTokenTTL, authProvider, sessionID)

@@ -146,6 +146,39 @@ func (b *MicrosoftSessionBroker) CreateSession(
 	return sessionID
 }
 
+// IsSessionActive reports whether the broker still holds a non-expired session for sessionID
+func (b *MicrosoftSessionBroker) IsSessionActive(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	entry, exists := b.sessions[sessionID]
+	return exists && time.Now().Before(entry.ExpiresAt)
+}
+
+// ExtendSession slides the expiry of an active session to now+ttl; it returns false if the session is gone or expired
+func (b *MicrosoftSessionBroker) ExtendSession(sessionID string, ttl time.Duration) bool {
+	if sessionID == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry, exists := b.sessions[sessionID]
+	if !exists {
+		return false
+	}
+	now := time.Now()
+	if now.After(entry.ExpiresAt) {
+		delete(b.sessions, sessionID)
+		return false
+	}
+	if newExpiry := now.Add(ttl); newExpiry.After(entry.ExpiresAt) {
+		entry.ExpiresAt = newExpiry
+	}
+	return true
+}
+
 // GetAccountMetadata returns public Microsoft session metadata without exposing raw OAuth2 tokens
 func (b *MicrosoftSessionBroker) GetAccountMetadata(sessionID string) *models.MicrosoftSessionAccount {
 	if sessionID == "" {
@@ -154,13 +187,14 @@ func (b *MicrosoftSessionBroker) GetAccountMetadata(sessionID string) *models.Mi
 
 	b.mu.RLock()
 	entry, exists := b.sessions[sessionID]
+	expired := exists && time.Now().After(entry.ExpiresAt)
 	b.mu.RUnlock()
 
 	if !exists {
 		return nil
 	}
 
-	if time.Now().After(entry.ExpiresAt) {
+	if expired {
 		b.DeleteSession(sessionID)
 		return nil
 	}
@@ -185,13 +219,14 @@ func (b *MicrosoftSessionBroker) GetScopedToken(ctx context.Context, sessionID s
 
 	b.mu.RLock()
 	entry, exists := b.sessions[sessionID]
+	expired := exists && time.Now().After(entry.ExpiresAt)
 	b.mu.RUnlock()
 
 	if !exists {
 		return "", nil, errors.New("microsoft session not found")
 	}
 
-	if time.Now().After(entry.ExpiresAt) {
+	if expired {
 		b.DeleteSession(sessionID)
 		return "", nil, errors.New("microsoft session expired")
 	}
