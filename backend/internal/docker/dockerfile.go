@@ -363,7 +363,7 @@ func (s *DockerService) ReadFileFromHost(ctx context.Context, serverID uint, pat
 
 	// Local host read (resolving against /host mount if running containerized)
 	actualPath := cleanPath
-	if _, err := os.Stat("/.dockerenv"); err == nil {
+	if isContainerized() {
 		if fi, err := os.Stat("/host"); err == nil && fi.IsDir() {
 			if !strings.HasPrefix(cleanPath, "/host") {
 				actualPath = filepath.Clean("/host/" + strings.TrimPrefix(cleanPath, "/"))

@@ -81,7 +81,8 @@ func NewScanner(exec host.Executor) *Scanner {
 
 // getHostMountPrefix detects if running inside a container with the host root filesystem mounted at /host
 func getHostMountPrefix() string {
-	if _, err := os.Stat("/.dockerenv"); err == nil {
+	_, dockerEnvErr := os.Stat("/.dockerenv")
+	if dockerEnvErr == nil || strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" {
 		if fi, err := os.Stat("/host"); err == nil && fi.IsDir() {
 			return "/host"
 		}

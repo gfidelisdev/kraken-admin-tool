@@ -240,6 +240,9 @@ func isRunningInContainer() bool {
 	if _, err := os.Stat("/.dockerenv"); err == nil {
 		return true
 	}
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" {
+		return true
+	}
 	if _, err := os.Stat("/run/.containerenv"); err == nil {
 		return true
 	}

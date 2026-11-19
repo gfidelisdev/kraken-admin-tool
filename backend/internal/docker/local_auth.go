@@ -9,11 +9,23 @@ import (
 	"strings"
 )
 
+// isContainerized reports whether the backend runs inside a container, either under plain Docker
+// (/.dockerenv) or Kubernetes (containerd/CRI-O pods have no /.dockerenv).
+func isContainerized() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" {
+		return true
+	}
+	return false
+}
+
 // runHostNamespaceCommand executes a command inside the host operating system namespace.
 // If input is non-empty, it is piped via standard input to avoid exposing passwords in process tables.
 func runHostNamespaceCommand(ctx context.Context, shellCmd string, input string) error {
 	var execCmd *exec.Cmd
-	if _, err := os.Stat("/.dockerenv"); err == nil {
+	if isContainerized() {
 		if err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "true").Run(); err == nil {
 			execCmd = exec.CommandContext(ctx, "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "sh", "-c", shellCmd)
 		} else {
@@ -41,7 +53,7 @@ func runHostNamespaceCommand(ctx context.Context, shellCmd string, input string)
 // runHostNamespaceOutput executes a shell command in the host namespace and returns stdout.
 func runHostNamespaceOutput(ctx context.Context, shellCmd string) (string, error) {
 	var execCmd *exec.Cmd
-	if _, err := os.Stat("/.dockerenv"); err == nil {
+	if isContainerized() {
 		if err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "true").Run(); err == nil {
 			execCmd = exec.CommandContext(ctx, "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "sh", "-c", shellCmd)
 		} else {
