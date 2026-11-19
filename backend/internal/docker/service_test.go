@@ -85,7 +85,7 @@ func TestDockerService_SSHServerCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open sqlite in memory: %v", err)
 	}
-	if err := db.AutoMigrate(&models.DockerServer{}); err != nil {
+	if err := db.AutoMigrate(&models.DockerServer{}, &models.ServerAccessGrant{}); err != nil {
 		t.Fatalf("failed to migrate models: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestDockerService_SSRFProtection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open in-memory db: %v", err)
 	}
-	_ = db.AutoMigrate(&models.DockerServer{})
+	_ = db.AutoMigrate(&models.DockerServer{}, &models.ServerAccessGrant{})
 
 	svc := NewDockerService("unix:///var/run/docker.sock", db)
 	ctx := context.Background()

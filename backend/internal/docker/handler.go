@@ -71,8 +71,9 @@ func (h *Handler) ListServersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if claims != nil && strings.EqualFold(claims.Role, "viewer") {
-		for i := range servers {
+	isViewer := claims != nil && strings.EqualFold(claims.Role, "viewer")
+	for i := range servers {
+		if isViewer || servers[i].Shared {
 			redactServerConnectionDetails(&servers[i])
 		}
 	}
@@ -318,6 +319,112 @@ func (h *Handler) DeleteServerHandler(w http.ResponseWriter, r *http.Request) {
 	audit.Log(h.DB, userID, username, "DELETE_DOCKER_SERVER", "docker_server", idStr, "Server removed successfully", "SUCCESS")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Server deleted successfully"})
+}
+
+// GetServerAccessHandler handles GET /api/docker/servers/{id}/access (admin only).
+// Returns the IDs of users the server is shared with.
+func (h *Handler) GetServerAccessHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id, err := strconv.ParseUint(chi.URLParam(r, "id"), 10, 32)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid server ID"})
+		return
+	}
+	var server models.DockerServer
+	if err := h.DB.First(&server, id).Error; err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Server not found"})
+		return
+	}
+
+	userIDs := []uint{}
+	if err := h.DB.Model(&models.ServerAccessGrant{}).Where("server_id = ?", id).Order("user_id asc").Pluck("user_id", &userIDs).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"server_id": server.ID,
+		"owner_id":  server.UserID,
+		"user_ids":  userIDs,
+	})
+}
+
+// UpdateServerAccessHandler handles PUT /api/docker/servers/{id}/access (admin only).
+// Replaces the set of users the server is shared with.
+func (h *Handler) UpdateServerAccessHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid server ID"})
+		return
+	}
+	var server models.DockerServer
+	if err := h.DB.First(&server, id).Error; err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Server not found"})
+		return
+	}
+
+	var req models.UpdateServerAccessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+
+	user := auth.GetUserFromContext(r.Context())
+	username := "system"
+	var actorID uint
+	if user != nil {
+		username = user.Username
+		actorID = user.UserID
+	}
+
+	// Keep only existing users other than the owner, deduplicated
+	wanted := []uint{}
+	seen := map[uint]bool{}
+	for _, uid := range req.UserIDs {
+		if uid == 0 || uid == server.UserID || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		wanted = append(wanted, uid)
+	}
+	if len(wanted) > 0 {
+		var existing []uint
+		h.DB.Model(&models.User{}).Where("id IN ?", wanted).Pluck("id", &existing)
+		wanted = existing
+	}
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("server_id = ?", server.ID).Delete(&models.ServerAccessGrant{}).Error; err != nil {
+			return err
+		}
+		for _, uid := range wanted {
+			if err := tx.Create(&models.ServerAccessGrant{ServerID: server.ID, UserID: uid, GrantedBy: actorID}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		audit.Log(h.DB, actorID, username, "UPDATE_SERVER_ACCESS", "docker_server", server.Name, err.Error(), "FAILED")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	audit.Log(h.DB, actorID, username, "UPDATE_SERVER_ACCESS", "docker_server", server.Name,
+		fmt.Sprintf("Server shared with %d user(s): %v", len(wanted), wanted), "SUCCESS")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"server_id": server.ID,
+		"owner_id":  server.UserID,
+		"user_ids":  wanted,
+	})
 }
 
 // SetDefaultServerHandler handles POST /api/docker/servers/{id}/default
@@ -1353,3 +1460,35 @@ func (h *Handler) BuildImageStreamHandler(w http.ResponseWriter, r *http.Request
 }
 
 
+
+// InspectContainerHandler handles GET /api/docker/containers/{id}/inspect (admin only)
+func (h *Handler) InspectContainerHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	w.Header().Set("Content-Type", "application/json")
+	raw, err := h.Service.InspectContainerOnServer(r.Context(), h.getServerID(r), id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if user := auth.GetUserFromContext(r.Context()); user != nil {
+		audit.Log(h.DB, user.UserID, user.Username, "INSPECT_CONTAINER", "docker_container", id, "Container inspected", "SUCCESS")
+	}
+	_, _ = w.Write(raw)
+}
+
+// InspectComposeStackHandler handles GET /api/docker/stacks/{name}/inspect (admin only)
+func (h *Handler) InspectComposeStackHandler(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	w.Header().Set("Content-Type", "application/json")
+	result, err := h.Service.InspectComposeStackOnServer(r.Context(), h.getServerID(r), name)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if user := auth.GetUserFromContext(r.Context()); user != nil {
+		audit.Log(h.DB, user.UserID, user.Username, "INSPECT_STACK", "compose_stack", name, "Stack inspected", "SUCCESS")
+	}
+	_ = json.NewEncoder(w).Encode(result)
+}

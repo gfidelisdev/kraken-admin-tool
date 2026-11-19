@@ -10,8 +10,9 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock,
+  FileSearch,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, describeK8sResource } from "@/lib/api";
 import { K8sDeployment } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -32,9 +33,14 @@ import { Select } from "@/components/ui/Select";
 import { ScaleDeploymentModal } from "@/components/modals/ScaleDeploymentModal";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import { useServer } from "@/context/ServerContext";
+import { useAuth } from "@/context/AuthContext";
+import { useInvestigationTools } from "@/hooks/useInvestigationTools";
 
 export default function DeploymentsPage() {
   const { activeServer } = useServer();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const { openInspect, modals: investigationModals } = useInvestigationTools(activeServer?.id);
   const [deployments, setDeployments] = useState<K8sDeployment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("all");
@@ -360,6 +366,26 @@ export default function DeploymentsPage() {
                       >
                         <RotateCw className="h-3.5 w-3.5" />
                       </Button>
+
+                      {isAdmin && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-violet-300 hover:text-violet-200"
+                          title="Describe deployment"
+                          onClick={() =>
+                            openInspect({
+                              title: `Describe deployment: ${dep.namespace}/${dep.name}`,
+                              load: async () => ({
+                                kind: "k8s",
+                                data: await describeK8sResource("deployment", dep.namespace, dep.name, activeServer?.id),
+                              }),
+                            })
+                          }
+                        >
+                          <FileSearch className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -387,6 +413,7 @@ export default function DeploymentsPage() {
         confirmVariant="k8s"
         onConfirm={handleRolloutRestart}
       />
+      {investigationModals}
     </div>
   );
 }

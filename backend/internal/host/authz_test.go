@@ -53,7 +53,7 @@ func TestAuthorizationBypass_PrivilegeEscalationDefense(t *testing.T) {
 		t.Fatalf("failed to open sqlite: %v", err)
 	}
 
-	if err := db.AutoMigrate(&models.DockerServer{}, &models.HostPackageUpdate{}, &models.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&models.DockerServer{}, &models.ServerAccessGrant{}, &models.HostPackageUpdate{}, &models.AuditLog{}); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 

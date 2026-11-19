@@ -349,6 +349,8 @@ func main() {
 				srvRouter.Delete("/servers/{id}", dockerHandler.DeleteServerHandler)
 			})
 			r.With(auth.RequireRole("admin")).Post("/servers/{id}/default", dockerHandler.SetDefaultServerHandler)
+			r.With(auth.RequireRole("admin")).Get("/servers/{id}/access", dockerHandler.GetServerAccessHandler)
+			r.With(auth.RequireRole("admin")).Put("/servers/{id}/access", dockerHandler.UpdateServerAccessHandler)
 
 			// Containers: List for all, mutations restricted to Admin & Operator
 			r.Get("/containers", dockerHandler.ListContainersHandler)
@@ -360,6 +362,7 @@ func main() {
 				opRouter.Post("/containers/{id}/restart", dockerHandler.RestartContainerHandler)
 				opRouter.Delete("/containers/{id}", dockerHandler.RemoveContainerHandler)
 			})
+			r.With(auth.RequireRole("admin")).Get("/containers/{id}/inspect", dockerHandler.InspectContainerHandler)
 
 			// Compose Stacks: List & Detail for all, mutations restricted to Admin & Operator
 			r.Get("/stacks", dockerHandler.ListComposeStacksHandler)
@@ -377,6 +380,7 @@ func main() {
 				opRouter.Post("/stacks/deploy", dockerHandler.DeployComposeStackHandler)
 				opRouter.Put("/stacks/{name}/yaml", dockerHandler.UpdateComposeStackYAMLHandler)
 			})
+			r.With(auth.RequireRole("admin")).Get("/stacks/{name}/inspect", dockerHandler.InspectComposeStackHandler)
 
 			// Images: List & Search for all, Pull & Delete restricted to Admin & Operator
 			r.Get("/images", dockerHandler.ListImagesHandler)
@@ -447,6 +451,10 @@ func main() {
 				opRouter.Post("/deployments/{namespace}/{name}/scale", k8sHandler.ScaleDeploymentHandler)
 				opRouter.Post("/deployments/{namespace}/{name}/restart", k8sHandler.RestartDeploymentHandler)
 			})
+
+			// Investigation tools restricted to Admin
+			r.With(auth.RequireRole("admin")).Get("/pods/{namespace}/{name}/describe", k8sHandler.DescribePodHandler)
+			r.With(auth.RequireRole("admin")).Get("/deployments/{namespace}/{name}/describe", k8sHandler.DescribeDeploymentHandler)
 		})
 
 		// Plugins & Store Endpoints
@@ -495,6 +503,10 @@ func main() {
 		r.Route("/api/ws", func(r chi.Router) {
 			r.Get("/docker/logs", krakews.HandleDockerLogs(dockerService, dbHandle.DB))
 			r.Get("/k8s/logs", krakews.HandleK8sLogs(k8sService, dbHandle.DB))
+
+			// Interactive shells are restricted to Admin
+			r.With(auth.RequireRole("admin")).Get("/docker/exec", krakews.HandleDockerExec(dockerService, dbHandle.DB))
+			r.With(auth.RequireRole("admin")).Get("/k8s/exec", krakews.HandleK8sExec(k8sService, dbHandle.DB))
 		})
 	})
 

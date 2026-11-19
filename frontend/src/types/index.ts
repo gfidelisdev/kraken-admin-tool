@@ -251,6 +251,8 @@ export interface DockerServer {
   available_updates_count?: number;
   security_updates_count?: number;
   is_default: boolean;
+  /** True when the server belongs to another user and was shared with the current user. */
+  shared?: boolean;
   status: "CONNECTED" | "UNREACHABLE" | "CONNECTING" | "UNKNOWN" | string;
   err_msg?: string;
   containers_count: number;
@@ -864,3 +866,28 @@ export interface ResolvedCredentials {
   sudo_password?: string;
 }
 
+
+export interface K8sEventSummary {
+  type: string;
+  reason: string;
+  object: string;
+  message: string;
+  count: number;
+  last_seen: string;
+}
+
+export interface K8sResourceDescription {
+  kind: string;
+  namespace: string;
+  name: string;
+  source: "api" | "kubectl" | "docker" | string;
+  manifest: string;
+  describe?: string;
+  events: K8sEventSummary[] | null;
+}
+
+export interface ServerAccess {
+  server_id: number;
+  owner_id: number;
+  user_ids: number[];
+}

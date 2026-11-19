@@ -24,6 +24,7 @@ func setupIsolationTestDB(t *testing.T) *gorm.DB {
 		&models.UserPluginState{},
 		&models.PluginKVStore{},
 		&models.DockerServer{},
+		&models.ServerAccessGrant{},
 		&models.UserDashboardPreference{},
 	); err != nil {
 		t.Fatalf("migration failed: %v", err)

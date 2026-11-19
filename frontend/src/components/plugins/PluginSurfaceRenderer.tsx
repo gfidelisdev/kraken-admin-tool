@@ -226,6 +226,63 @@ self.kraken = {
   }
 };
 
+// Outbound HTTP via the Kraken backend (requires "http:outbound" + manifest allowed_hosts).
+// Browsers block cross-origin calls from plugin workers (CSP connect-src 'self' and CORS),
+// so requests to other origins are proxied server-side and returned as a standard Response.
+const _nativeFetch = self.fetch.bind(self);
+function _b64ToBytes(b64) {
+  const bin = atob(b64 || '');
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function _bodyToBase64(body) {
+  if (body == null) return undefined;
+  let bytes;
+  if (typeof body === 'string') bytes = new TextEncoder().encode(body);
+  else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+  else if (ArrayBuffer.isView(body)) bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  else bytes = new Uint8Array(await new Response(body).arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+async function _proxyFetch(input, init) {
+  init = init || {};
+  const req = input instanceof Request ? input : null;
+  const url = req ? req.url : String(input);
+  const headers = {};
+  new Headers(init.headers || (req ? req.headers : undefined)).forEach((v, k) => { headers[k] = v; });
+  let body = init.body;
+  if (body === undefined && req && req.method !== 'GET' && req.method !== 'HEAD') body = await req.arrayBuffer();
+  const res = await self.kraken.backend.call('http.fetch', {
+    url: url,
+    method: init.method || (req ? req.method : 'GET'),
+    headers: headers,
+    body_base64: await _bodyToBase64(body),
+    timeout_ms: init.timeout_ms,
+  });
+  const nullBody = res.status === 204 || res.status === 205 || res.status === 304 || (init.method || '').toUpperCase() === 'HEAD';
+  const response = new Response(nullBody ? null : _b64ToBytes(res.body_base64), {
+    status: res.status,
+    statusText: res.status_text || '',
+    headers: res.headers || {},
+  });
+  Object.defineProperty(response, 'url', { value: res.url || url });
+  return response;
+}
+self.kraken.http = { fetch: _proxyFetch };
+self.fetch = function(input, init) {
+  try {
+    const raw = input instanceof Request ? input.url : String(input);
+    const target = new URL(raw, self.location.href);
+    if ((target.protocol === 'http:' || target.protocol === 'https:') && target.origin !== ${JSON.stringify(typeof window !== "undefined" ? window.location.origin : "")}) {
+      return _proxyFetch(input, init);
+    }
+  } catch (_) { /* fall through to native fetch */ }
+  return _nativeFetch(input, init);
+};
+
 self.onmessage = function(e) {
   const msg = e.data;
   if (!msg) return;

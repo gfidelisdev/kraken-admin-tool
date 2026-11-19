@@ -74,6 +74,7 @@ func shellEscape(s string) string {
 // K8sService encapsulates interactions with Kubernetes clusters (both local and remote via SSH / Docker)
 type K8sService struct {
 	client    kubernetes.Interface
+	restCfg   *rest.Config
 	connected bool
 	inCluster bool
 	errMsg    string
@@ -141,6 +142,7 @@ func NewK8sService(kubeconfigPath string) *K8sService {
 		log.Printf("[K8S] Warning: Kubernetes cluster unreachable (%v). Running in degraded mode.", err)
 		return &K8sService{
 			client:    clientset,
+			restCfg:   cfg,
 			connected: false,
 			inCluster: inCluster,
 			errMsg:    err.Error(),
@@ -150,6 +152,7 @@ func NewK8sService(kubeconfigPath string) *K8sService {
 	log.Printf("[K8S] Successfully connected to Kubernetes cluster.")
 	return &K8sService{
 		client:    clientset,
+		restCfg:   cfg,
 		connected: true,
 		inCluster: inCluster,
 	}

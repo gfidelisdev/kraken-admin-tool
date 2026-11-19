@@ -259,7 +259,7 @@ Only declare permissions strictly required by your plugin:
 - `k8s:read` — Queries Kubernetes Pods, Deployments, and Namespaces.
 - `k8s:write` — Restarts or scales Kubernetes workloads.
 - `storage:kv` — Reads and writes scoped key-value persistent storage.
-- `http:outbound` — Enables outbound HTTP calls to domains declared in `allowed_hosts`.
+- `http:outbound` — Enables outbound HTTP calls to domains declared in `allowed_hosts`. The worker SDK transparently routes cross-origin `fetch()` (or `kraken.http.fetch`) through the Kraken backend, since the app CSP blocks direct cross-origin requests from workers. Loopback/link-local destinations are always blocked; redirects are re-validated against `allowed_hosts`.
 - `credentials:resolve` — Dynamically resolves server logon secrets (SSH keys, passwords) Just-in-Time for external Key Vaults.
 - `credentials:manage` — Manages external Key Vault secrets (list, create, bind, test connection).
 - `network:ldap` — Authorizes LDAP/Active Directory directory integration and authentication.

@@ -11,8 +11,10 @@ import {
   AlertCircle,
   Filter,
   CheckCircle2,
+  TerminalSquare,
+  FileSearch,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, describeK8sResource } from "@/lib/api";
 import { K8sPod } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -32,9 +34,14 @@ import { sortItems, SortDirection } from "@/lib/sort";
 import { Select } from "@/components/ui/Select";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import { useServer } from "@/context/ServerContext";
+import { useAuth } from "@/context/AuthContext";
+import { useInvestigationTools } from "@/hooks/useInvestigationTools";
 
 export default function PodsPage() {
   const { activeServer } = useServer();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const { openTerminal, openInspect, modals: investigationModals } = useInvestigationTools(activeServer?.id);
   const [pods, setPods] = useState<K8sPod[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("all");
@@ -325,6 +332,46 @@ export default function PodsPage() {
                       </Button>
                     </Link>
 
+                    {isAdmin && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-emerald-300 hover:text-emerald-200"
+                          title={pod.status === "Running" ? "Open shell (exec)" : "Pod must be running to open a shell"}
+                          disabled={pod.status !== "Running"}
+                          onClick={() =>
+                            openTerminal({
+                              kind: "k8s",
+                              namespace: pod.namespace,
+                              pod: pod.name,
+                              containers: pod.containers,
+                              label: `${pod.namespace}/${pod.name}`,
+                            })
+                          }
+                        >
+                          <TerminalSquare className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-violet-300 hover:text-violet-200"
+                          title="Describe pod"
+                          onClick={() =>
+                            openInspect({
+                              title: `Describe pod: ${pod.namespace}/${pod.name}`,
+                              load: async () => ({
+                                kind: "k8s",
+                                data: await describeK8sResource("pod", pod.namespace, pod.name, activeServer?.id),
+                              }),
+                            })
+                          }
+                        >
+                          <FileSearch className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
+
                     {/* Delete Pod */}
                     <Button
                       variant="ghost"
@@ -353,6 +400,7 @@ export default function PodsPage() {
         confirmVariant="destructive"
         onConfirm={handleDeletePod}
       />
+      {investigationModals}
     </div>
   );
 }

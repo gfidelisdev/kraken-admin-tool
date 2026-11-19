@@ -275,6 +275,8 @@ type DockerServer struct {
 	AvailableUpdatesCount int       `gorm:"default:0" json:"available_updates_count"`
 	SecurityUpdatesCount  int       `gorm:"default:0" json:"security_updates_count"`
 	IsDefault             bool      `gorm:"default:false;index" json:"is_default"`
+	// Shared is true when the requesting user can see this server through an access grant instead of owning it
+	Shared                bool      `gorm:"-" json:"shared"`
 	Status                string    `gorm:"size:32;default:'UNKNOWN'" json:"status"`
 	ErrMsg                string    `gorm:"type:text" json:"err_msg,omitempty"`
 	Containers            int       `gorm:"default:0" json:"containers_count"`
@@ -282,6 +284,21 @@ type DockerServer struct {
 	Version               string    `gorm:"size:64" json:"version,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+// ServerAccessGrant shares a server owned by one user with another user (e.g. so viewers can monitor it).
+// The grantee's role still decides which operations they may perform on the shared server.
+type ServerAccessGrant struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	ServerID  uint      `gorm:"not null;uniqueIndex:idx_server_access_grant" json:"server_id"`
+	UserID    uint      `gorm:"not null;uniqueIndex:idx_server_access_grant;index" json:"user_id"`
+	GrantedBy uint      `json:"granted_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// UpdateServerAccessRequest replaces the set of users a server is shared with
+type UpdateServerAccessRequest struct {
+	UserIDs []uint `json:"user_ids"`
 }
 
 type HostPackageUpdate struct {

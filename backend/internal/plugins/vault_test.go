@@ -23,6 +23,7 @@ func setupPluginTestDB(t *testing.T) *gorm.DB {
 		&models.PluginKVStore{},
 		&models.PluginTrustedKey{},
 		&models.DockerServer{},
+		&models.ServerAccessGrant{},
 	); err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestPluginManager_VaultPermissionsEnforced(t *testing.T) {
 
 func TestPluginManager_ServerBindingsSyncToDockerServers(t *testing.T) {
 	db := setupPluginTestDB(t)
-	_ = db.AutoMigrate(&models.DockerServer{})
+	_ = db.AutoMigrate(&models.DockerServer{}, &models.ServerAccessGrant{})
 
 	srv := models.DockerServer{
 		Name:             "srv-maquinasvirtuais-p04poa-dev01",

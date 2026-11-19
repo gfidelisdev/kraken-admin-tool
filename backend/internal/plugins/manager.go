@@ -947,6 +947,13 @@ func (m *Manager) CallPlugin(
 		return map[string]string{"status": "ok"}, nil
 	}
 
+	if httpOutboundActions[action] {
+		if !permMap["http:outbound"] {
+			return nil, fmt.Errorf("plugin '%s' lacks mandatory permission 'http:outbound'", pluginID)
+		}
+		return executeOutboundHTTP(ctx, manifest.AllowedHosts, payload)
+	}
+
 	// 2. WASM Runtime
 	if manifest.Runtime.Type == "wasm" {
 		entrypoint := filepath.Join(p.InstallPath, manifest.Runtime.Entrypoint)

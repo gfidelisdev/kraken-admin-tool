@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/kraken/admin-tool/backend/internal/audit"
@@ -253,4 +254,35 @@ func (h *Handler) RestartDeploymentHandler(w http.ResponseWriter, r *http.Reques
 	audit.Log(h.DB, userID, username, "RESTART_DEPLOYMENT", "k8s_deployment", resourceID, "Rollout restart triggered", "SUCCESS")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Rollout restart triggered successfully"})
+}
+
+// DescribePodHandler handles GET /api/k8s/pods/{namespace}/{name}/describe (admin only)
+func (h *Handler) DescribePodHandler(w http.ResponseWriter, r *http.Request) {
+	h.describe(w, r, "pod")
+}
+
+// DescribeDeploymentHandler handles GET /api/k8s/deployments/{namespace}/{name}/describe (admin only)
+func (h *Handler) DescribeDeploymentHandler(w http.ResponseWriter, r *http.Request) {
+	h.describe(w, r, "deployment")
+}
+
+func (h *Handler) describe(w http.ResponseWriter, r *http.Request, kind string) {
+	serverID, ok := h.resolveAuthorizedServerID(w, r, false)
+	if !ok {
+		return
+	}
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	w.Header().Set("Content-Type", "application/json")
+	desc, err := h.Service.DescribeResourceOnServer(r.Context(), serverID, kind, namespace, name)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if user := auth.GetUserFromContext(r.Context()); user != nil {
+		audit.Log(h.DB, user.UserID, user.Username, "DESCRIBE_"+strings.ToUpper(kind), "k8s_"+kind, namespace+"/"+name, "Resource described", "SUCCESS")
+	}
+	_ = json.NewEncoder(w).Encode(desc)
 }

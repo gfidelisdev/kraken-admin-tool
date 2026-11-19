@@ -1,5 +1,7 @@
 import {
   DockerPullMessage,
+  K8sResourceDescription,
+  ServerAccess,
   ServerDiagnosticLog,
   TestServerPayload,
   TestServerResult,
@@ -1287,4 +1289,55 @@ export async function getSystemSecrets(): Promise<SystemSecretsResponse> {
 
 export async function updateSystemSecrets(payload: UpdateSystemSecretsRequest): Promise<SystemSecretsResponse> {
   return api.put<SystemSecretsResponse>("/api/system/secrets", payload);
+}
+
+function serverHeaders(serverId?: number): Record<string, string> {
+  return serverId ? { "X-Server-ID": serverId.toString() } : {};
+}
+
+// Investigation (admin only)
+export async function inspectContainer(id: string, serverId?: number): Promise<unknown> {
+  return api.get<unknown>(`/api/docker/containers/${encodeURIComponent(id)}/inspect`, { headers: serverHeaders(serverId) });
+}
+
+export async function inspectComposeStack(name: string, serverId?: number): Promise<unknown> {
+  return api.get<unknown>(`/api/docker/stacks/${encodeURIComponent(name)}/inspect`, { headers: serverHeaders(serverId) });
+}
+
+export async function describeK8sResource(
+  kind: "pod" | "deployment",
+  namespace: string,
+  name: string,
+  serverId?: number
+): Promise<K8sResourceDescription> {
+  return api.get<K8sResourceDescription>(
+    `/api/k8s/${kind}s/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/describe`,
+    { headers: serverHeaders(serverId) }
+  );
+}
+
+// Server sharing (admin only)
+export async function getServerAccess(serverId: number): Promise<ServerAccess> {
+  return api.get<ServerAccess>(`/api/docker/servers/${serverId}/access`);
+}
+
+export async function updateServerAccess(serverId: number, userIds: number[]): Promise<ServerAccess> {
+  return api.put<ServerAccess>(`/api/docker/servers/${serverId}/access`, { user_ids: userIds });
+}
+
+/** Builds an absolute ws(s):// URL for an API path and appends a single-use auth ticket. */
+export async function buildWsUrl(path: string): Promise<string> {
+  let url = path;
+  const baseApi = getBaseApiUrl();
+  if (baseApi) {
+    url = `${baseApi.replace(/^http/, "ws")}${path}`;
+  } else if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    url = `${protocol}//${window.location.host}${path}`;
+  }
+  const ticket = await getWsTicket();
+  if (ticket) {
+    url += `${url.includes("?") ? "&" : "?"}ticket=${encodeURIComponent(ticket)}`;
+  }
+  return url;
 }

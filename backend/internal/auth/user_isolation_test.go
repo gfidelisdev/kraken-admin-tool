@@ -26,6 +26,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.User{},
 		&models.AuditLog{},
 		&models.DockerServer{},
+		&models.ServerAccessGrant{},
 		&models.UserDashboardPreference{},
 	); err != nil {
 		t.Fatalf("migration failed: %v", err)
@@ -153,5 +154,49 @@ func TestDockerServer_UserIsolation(t *testing.T) {
 	}
 	if len(serversC) != 0 {
 		t.Fatalf("expected 0 servers for user C without servers, got %d", len(serversC))
+	}
+}
+
+func TestSharedServerAccessForGrantee(t *testing.T) {
+	db := setupTestDB(t)
+	owner := uint(1)
+	viewer := uint(2)
+	stranger := uint(3)
+
+	srv := models.DockerServer{Name: "prod", HostURL: "ssh://ops@prod:22", SSHUser: "ops", UserID: owner}
+	if err := db.Create(&srv).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := func(userID uint) (uint, error) {
+		req := httptest.NewRequest(http.MethodGet, "/api/docker/containers", nil)
+		req.Header.Set("X-Server-ID", "1")
+		req = req.WithContext(context.WithValue(req.Context(), auth.UserContextKey, &auth.Claims{UserID: userID, Role: "viewer"}))
+		return auth.ResolveAuthorizedServerID(db, req)
+	}
+
+	if _, err := resolve(viewer); err == nil {
+		t.Fatal("viewer must not access the server before it is shared")
+	}
+
+	if err := db.Create(&models.ServerAccessGrant{ServerID: srv.ID, UserID: viewer, GrantedBy: owner}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if id, err := resolve(viewer); err != nil || id != srv.ID {
+		t.Fatalf("viewer should access shared server, got id=%d err=%v", id, err)
+	}
+	if _, err := resolve(stranger); err == nil {
+		t.Fatal("users without a grant must still be denied")
+	}
+
+	svc := docker.NewDockerService("unix:///nonexistent.sock", db)
+	list, err := svc.ListServersForUser(context.Background(), viewer)
+	if err != nil || len(list) != 1 || !list[0].Shared {
+		t.Fatalf("expected one shared server for viewer, got %+v err=%v", list, err)
+	}
+	ownerList, _ := svc.ListServersForUser(context.Background(), owner)
+	if len(ownerList) != 1 || ownerList[0].Shared {
+		t.Fatalf("owner should see the server as owned, got %+v", ownerList)
 	}
 }

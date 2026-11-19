@@ -33,9 +33,12 @@ import {
   Download,
   Minimize2,
   FolderSearch,
+  Share2,
 } from "lucide-react";
 import { SourceDirsModal } from "@/components/modals/SourceDirsModal";
 import { useServer } from "@/context/ServerContext";
+import { useAuth } from "@/context/AuthContext";
+import { ShareServerModal } from "@/components/modals/ShareServerModal";
 import {
   api,
   testServerStream,
@@ -141,6 +144,10 @@ export default function ServersPage() {
     setAllServersStatus,
     isLoading,
   } = useServer();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const canManageServers = isAdmin || user?.role === "operator";
+  const [shareTarget, setShareTarget] = useState<DockerServer | null>(null);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<string>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -1261,10 +1268,12 @@ export default function ServersPage() {
             />
             {connectingCount > 0 ? `Verificando (${connectingCount})...` : "Atualizar Status"}
           </Button>
-          <Button variant="docker" size="sm" onClick={handleOpenAddModal}>
-            <Plus className="mr-1.5 h-4 w-4" />
-            Adicionar Host Remoto
-          </Button>
+          {canManageServers && (
+            <Button variant="docker" size="sm" onClick={handleOpenAddModal}>
+              <Plus className="mr-1.5 h-4 w-4" />
+              Adicionar Host Remoto
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1411,7 +1420,11 @@ export default function ServersPage() {
               <TableEmpty
                 colSpan={7}
                 message={
-                  search ? "Nenhum servidor corresponde à pesquisa." : "Nenhum servidor Docker registrado."
+                  search
+                    ? "Nenhum servidor corresponde à pesquisa."
+                    : canManageServers
+                      ? "Nenhum servidor Docker registrado."
+                      : "Nenhum host foi compartilhado com você ainda. Peça a um administrador para compartilhar um host em Hosts → Compartilhar."
                 }
               />
             ) : (
@@ -1436,6 +1449,14 @@ export default function ServersPage() {
                         {server.is_default && (
                           <span className="inline-flex items-center rounded-md bg-slate-800 border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300">
                             Padrão
+                          </span>
+                        )}
+                        {server.shared && (
+                          <span
+                            className="inline-flex items-center rounded-md bg-violet-500/15 border border-violet-500/40 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300"
+                            title="Host compartilhado com você por um administrador"
+                          >
+                            Compartilhado
                           </span>
                         )}
                       </div>
@@ -1655,7 +1676,7 @@ export default function ServersPage() {
                           </Button>
                         )}
 
-                        {!server.is_default && (
+                        {isAdmin && !server.is_default && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -1668,26 +1689,42 @@ export default function ServersPage() {
                           </Button>
                         )}
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 w-7 p-0 text-slate-400 hover:text-white"
-                          onClick={() => handleOpenEditModal(server)}
-                          title="Editar Servidor"
-                        >
-                          <Edit className="h-3.5 w-3.5" />
-                        </Button>
+                        {isAdmin && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0 text-slate-400 hover:text-violet-300"
+                            onClick={() => setShareTarget(server)}
+                            title="Compartilhar host com usuários (ex.: viewers)"
+                          >
+                            <Share2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 w-7 p-0 text-slate-400 hover:text-rose-400"
-                          onClick={() => setDeleteTarget(server)}
-                          disabled={servers.length <= 1}
-                          title={servers.length <= 1 ? "Não é possível excluir o único host" : "Excluir Host"}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        {(isAdmin || (canManageServers && !server.shared)) && (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 text-slate-400 hover:text-white"
+                              onClick={() => handleOpenEditModal(server)}
+                              title="Editar Servidor"
+                            >
+                              <Edit className="h-3.5 w-3.5" />
+                            </Button>
+
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 text-slate-400 hover:text-rose-400"
+                              onClick={() => setDeleteTarget(server)}
+                              disabled={servers.length <= 1}
+                              title={servers.length <= 1 ? "Não é possível excluir o único host" : "Excluir Host"}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1696,6 +1733,12 @@ export default function ServersPage() {
             )}
           </TableBody>
         </Table>
+
+      <ShareServerModal
+        isOpen={!!shareTarget}
+        onClose={() => setShareTarget(null)}
+        server={shareTarget}
+      />
 
       {/* Add / Edit Docker Server Modal */}
       <Modal

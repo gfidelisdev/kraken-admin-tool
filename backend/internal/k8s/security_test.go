@@ -25,7 +25,7 @@ func setupK8sSecurityTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.DockerServer{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.DockerServer{}, &models.ServerAccessGrant{}); err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
 	return db

@@ -124,6 +124,7 @@ func InitDB(cfg *config.Config) (*Handle, error) {
 		&models.UserPluginState{},
 		&models.AuditLog{},
 		&models.DockerServer{},
+		&models.ServerAccessGrant{},
 		&models.HostPackageUpdate{},
 		&models.PasswordResetRequest{},
 		&models.ComposeStackConfig{},

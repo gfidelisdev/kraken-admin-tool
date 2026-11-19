@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
+	"github.com/kraken/admin-tool/backend/internal/auth"
 	krakencrypto "github.com/kraken/admin-tool/backend/internal/crypto"
 	"github.com/kraken/admin-tool/backend/internal/models"
 	"golang.org/x/crypto/ssh"
@@ -694,8 +695,8 @@ func (s *DockerService) ListServers(ctx context.Context, probe ...bool) ([]model
 }
 
 // ListServersForUser returns Docker servers accessible by a specific user.
-// Servers are strictly isolated: a user only sees hosts they explicitly own (user_id = userID).
-// The system host is never shown automatically unless the user explicitly owns it.
+// A user only sees hosts they own (user_id = userID) or hosts an admin explicitly shared with them.
+// The system host is never shown automatically unless the user owns it or it was shared.
 // If userID is 0, an empty slice is returned.
 func (s *DockerService) ListServersForUser(ctx context.Context, userID uint, probe ...bool) ([]models.DockerServer, error) {
 	if userID == 0 || s.db == nil {
@@ -703,12 +704,13 @@ func (s *DockerService) ListServersForUser(ctx context.Context, userID uint, pro
 	}
 
 	var servers []models.DockerServer
-	query := s.db.Order("is_default desc, id asc").Where("user_id = ?", userID)
+	query := auth.AccessibleServers(s.db, userID).Order("is_default desc, id asc")
 	if err := query.Find(&servers).Error; err != nil {
 		return nil, err
 	}
 
 	for i := range servers {
+		servers[i].Shared = servers[i].UserID != userID
 		if servers[i].CredentialPolicy == "" {
 			servers[i].CredentialPolicy = "save_securely"
 		}
@@ -1064,6 +1066,7 @@ func (s *DockerService) DeleteServer(ctx context.Context, id uint) error {
 	if err := s.db.Delete(&server).Error; err != nil {
 		return err
 	}
+	s.db.Where("server_id = ?", id).Delete(&models.ServerAccessGrant{})
 
 	s.InvalidateClientCache(id)
 	return nil

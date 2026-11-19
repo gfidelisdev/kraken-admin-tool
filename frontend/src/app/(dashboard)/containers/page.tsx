@@ -13,8 +13,10 @@ import {
   RefreshCw,
   AlertCircle,
   ExternalLink,
+  TerminalSquare,
+  FileSearch,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, inspectContainer } from "@/lib/api";
 import { DockerContainer } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -35,9 +37,14 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ConfirmActionModal } from "@/components/modals/ConfirmActionModal";
 import { useServer } from "@/context/ServerContext";
 import { formatDate } from "@/lib/utils";
+import { useAuth } from "@/context/AuthContext";
+import { useInvestigationTools } from "@/hooks/useInvestigationTools";
 
 export default function ContainersPage() {
   const { activeServer } = useServer();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const { openTerminal, openInspect, modals: investigationModals } = useInvestigationTools(activeServer?.id);
   const [containers, setContainers] = useState<DockerContainer[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -357,6 +364,39 @@ export default function ContainersPage() {
                         </Button>
                       </Link>
 
+                      {isAdmin && (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-emerald-300 hover:text-emerald-200"
+                            title={isRunning ? "Open shell (exec)" : "Container must be running to open a shell"}
+                            disabled={!isRunning}
+                            onClick={() => openTerminal({ kind: "docker", containerId: container.id, label: name })}
+                          >
+                            <TerminalSquare className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-violet-300 hover:text-violet-200"
+                            title="Inspect container"
+                            onClick={() =>
+                              openInspect({
+                                title: `Inspect: ${name}`,
+                                description: "docker inspect",
+                                load: async () => ({
+                                  kind: "json",
+                                  data: await inspectContainer(container.id, activeServer?.id),
+                                }),
+                              })
+                            }
+                          >
+                            <FileSearch className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      )}
+
                       {/* Start / Stop Toggle */}
                       {isRunning ? (
                         <Button
@@ -426,6 +466,7 @@ export default function ContainersPage() {
         confirmVariant="destructive"
         onConfirm={handleDelete}
       />
+      {investigationModals}
     </div>
   );
 }

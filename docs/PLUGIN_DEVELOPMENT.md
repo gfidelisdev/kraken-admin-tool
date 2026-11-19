@@ -160,6 +160,24 @@ const valor = await kraken.kv.get("chave");
 kraken.log("Mensagem de log");
 ```
 
+### Chamadas HTTP externas (`http:outbound`)
+
+O worker roda sob o CSP do Kraken (`connect-src 'self'`), então o navegador bloqueia
+chamadas diretas a outros domínios, independentemente de CORS. Com a permissão
+`http:outbound`, o SDK encaminha automaticamente qualquer `fetch()` para outra origem
+pelo backend do Kraken, que executa a requisição no servidor e devolve um `Response` padrão:
+
+```javascript
+const r = await fetch("https://sensores.exemplo.com/api/leituras", { headers: { Accept: "application/json" } });
+const dados = await r.json();
+// equivalente explícito: await kraken.http.fetch(url, init)
+```
+
+Regras aplicadas pelo backend:
+- O host precisa estar em `allowed_hosts` (`"*"`, `"host"`, `"host:porta"` ou `"*.dominio.com"`); redirecionamentos também são validados.
+- Apenas `http`/`https`; loopback, link-local (ex.: `169.254.169.254`) e multicast são bloqueados. Redes privadas (10.x, 172.16.x, 192.168.x) são permitidas.
+- Métodos GET/HEAD/POST/PUT/PATCH/DELETE; corpo de requisição até 1 MB, resposta até 5 MB; timeout padrão de 15 s (máx. 60 s via `timeout_ms`).
+
 ### Componentes Declarativos Suportados
 
 A árvore emitida para `kraken.render()` aceita os seguintes nós:

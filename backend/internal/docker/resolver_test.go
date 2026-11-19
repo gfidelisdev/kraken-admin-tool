@@ -53,7 +53,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open in-memory sqlite db: %v", err)
 	}
-	if err := db.AutoMigrate(&models.DockerServer{}); err != nil {
+	if err := db.AutoMigrate(&models.DockerServer{}, &models.ServerAccessGrant{}); err != nil {
 		t.Fatalf("failed to migrate DockerServer: %v", err)
 	}
 	return db

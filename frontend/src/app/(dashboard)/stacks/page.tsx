@@ -28,6 +28,8 @@ import {
   Sparkles,
   Hammer,
   FileText,
+  TerminalSquare,
+  FileSearch,
 } from "lucide-react";
 import {
   getComposeStacks,
@@ -44,6 +46,8 @@ import {
   listDiscoveredFiles,
   bindSource,
   unbindSource,
+  inspectContainer,
+  inspectComposeStack,
 } from "@/lib/api";
 import { ComposeStack, DeployStackRequest, SourceLink } from "@/types";
 import { Button } from "@/components/ui/Button";
@@ -55,9 +59,14 @@ import { SourceDirsModal } from "@/components/modals/SourceDirsModal";
 import { SortControl } from "@/components/ui/SortControl";
 import { sortItems, SortDirection } from "@/lib/sort";
 import { useServer } from "@/context/ServerContext";
+import { useAuth } from "@/context/AuthContext";
+import { useInvestigationTools } from "@/hooks/useInvestigationTools";
 
 export default function StacksPage() {
   const { activeServer } = useServer();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const { openTerminal, openInspect, modals: investigationModals } = useInvestigationTools(activeServer?.id);
   const [stacks, setStacks] = useState<ComposeStack[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -656,6 +665,28 @@ export default function StacksPage() {
                       Redeploy
                     </Button>
 
+                    {isAdmin && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          openInspect({
+                            title: `Inspect stack: ${stack.name}`,
+                            description: "Containers, networks and volumes of this compose project",
+                            load: async () => ({
+                              kind: "json",
+                              data: await inspectComposeStack(stack.name, activeServer?.id),
+                            }),
+                          })
+                        }
+                        title="Inspect compose project (containers, networks, volumes)"
+                        className="border-slate-700 bg-slate-900/50 hover:bg-slate-800 text-violet-300"
+                      >
+                        <FileSearch className="h-3.5 w-3.5 mr-1.5" />
+                        Inspect
+                      </Button>
+                    )}
+
                     <Button
                       variant="outline"
                       size="sm"
@@ -789,6 +820,38 @@ export default function StacksPage() {
                                             <FileText className="h-4 w-4" />
                                           </Button>
                                         </Link>
+                                        {isAdmin && (
+                                          <>
+                                            <Button
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-8 w-8 text-emerald-300 hover:text-emerald-200"
+                                              title={c.state === "running" ? "Open shell (exec)" : "Container must be running to open a shell"}
+                                              disabled={c.state !== "running"}
+                                              onClick={() => openTerminal({ kind: "docker", containerId: c.id, label: nameStr })}
+                                            >
+                                              <TerminalSquare className="h-3.5 w-3.5" />
+                                            </Button>
+                                            <Button
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-8 w-8 text-violet-300 hover:text-violet-200"
+                                              title="Inspect container"
+                                              onClick={() =>
+                                                openInspect({
+                                                  title: `Inspect: ${nameStr}`,
+                                                  description: "docker inspect",
+                                                  load: async () => ({
+                                                    kind: "json",
+                                                    data: await inspectContainer(c.id, activeServer?.id),
+                                                  }),
+                                                })
+                                              }
+                                            >
+                                              <FileSearch className="h-3.5 w-3.5" />
+                                            </Button>
+                                          </>
+                                        )}
                                         <Button
                                           variant="ghost"
                                           size="icon"
@@ -1377,6 +1440,7 @@ export default function StacksPage() {
         serverName={activeServer?.name}
         onScanCompleted={() => fetchStacks()}
       />
+      {investigationModals}
     </div>
   );
 }

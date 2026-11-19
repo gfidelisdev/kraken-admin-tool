@@ -85,6 +85,8 @@ export function ServerSelector() {
             {servers.length === 0 && (
               <div className="py-4 px-3 text-center text-xs text-slate-400">
                 Nenhum host disponível para seu usuário.
+                <br />
+                <span className="text-slate-500">Peça a um administrador para compartilhar um host com você.</span>
               </div>
             )}
             {servers.map((server) => {
